@@ -1,0 +1,51 @@
+# ─── 凭证 / 环境变量(绝不提交)──────────────────────────
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+
+# ─── Node / 前端 ──────────────────────────────────────
+node_modules/
+dist/
+.vite/
+*.local
+
+# ─── Java / Maven ────────────────────────────────────
+target/
+*.class
+*.jar
+*.war
+*.ear
+*.tsbuildinfo
+.mvn/wrapper/maven-wrapper.jar
+
+# ─── 工作流生成产物(运行时生成,不进版本控制)──────────
+ai-generated-modules/
+_compile-check/
+
+# ─── BladeX 参考项目(不纳入本仓库)─────────────────────
+blade_hgsjy/
+
+# ─── IDE / 编辑器 ────────────────────────────────────
+.idea/
+.vscode/
+*.iml
+*.ipr
+*.iws
+.project
+.classpath
+.settings/
+
+# ─── 日志 / 临时 ─────────────────────────────────────
+logs/
+*.log
+*.tmp
+*.bak
+*.swp
+
+# ─── OS ──────────────────────────────────────────────
+Thumbs.db
+Desktop.ini
+.DS_Store

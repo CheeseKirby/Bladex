@@ -1,0 +1,112 @@
+/* 全局样式重置 */
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+html, body, #root {
+  height: 100%;
+  width: 100%;
+  overflow: hidden;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'PingFang SC', 'Microsoft YaHei', 'Helvetica Neue', Arial, sans-serif;
+  font-size: 15px;
+  color: #2c3338;
+  background: #fff;
+}
+
+/* Antd 主题色微调 — 柔和蓝灰, 降低饱和度 */
+:root {
+  --primary: #2f6bbf;
+  --primary-hover: #3b7dd6;
+  --primary-light: #e9f1fb;
+  --text-main: #2c3338;
+  --text-secondary: #6b7480;
+  --border: #e6e9ee;
+  --bg-soft: #f7f8fa;
+  --bg-card: #ffffff;
+}
+
+/* ReactFlow 节点字体放大 */
+.react-flow__node {
+  font-size: 14px;
+}
+
+.react-flow__attribution {
+  display: none !important;
+}
+
+/* 滚动条 — 更柔和 */
+::-webkit-scrollbar {
+  width: 9px;
+  height: 9px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #ced2da;
+  border-radius: 5px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #aab0bc;
+}
+
+/* 输入框/文本域字体放大 */
+.ant-input, .ant-input-affix-wrapper, textarea.ant-input {
+  font-size: 15px !important;
+}
+
+/* Antd Tabs 字体放大 */
+.ant-tabs-tab {
+  font-size: 15px !important;
+}
+
+/* Antd Tabs 选中态颜色统一主色 */
+.ant-tabs-tab-active .ant-tabs-tab-btn {
+  color: var(--primary) !important;
+  font-weight: 600;
+}
+
+.ant-tabs-ink-bar {
+  background: var(--primary) !important;
+}
+
+/* 按钮 */
+.ant-btn {
+  font-size: 14px;
+}
+
+.ant-btn-primary {
+  background: var(--primary) !important;
+  border-color: var(--primary) !important;
+}
+
+.ant-btn-primary:hover {
+  background: var(--primary-hover) !important;
+  border-color: var(--primary-hover) !important;
+}
+
+/* Tag 字体稍大 */
+.ant-tag {
+  font-size: 13px;
+}
+
+/* 卡片圆角柔和 */
+.ant-card {
+  border-radius: 8px;
+}
+
+/* 标题/正文文字层次 */
+h1, h2, h3, h4, h5 {
+  color: var(--text-main);
+}
+
+/* 选中文字配色 */
+::selection {
+  background: var(--primary-light);
+  color: var(--primary);
+}

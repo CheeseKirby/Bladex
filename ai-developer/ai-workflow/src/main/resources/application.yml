@@ -1,0 +1,65 @@
+server:
+  port: 8110
+  # 优雅停机,给进行中的工作流一些时间收尾
+  shutdown: graceful
+
+spring:
+  application:
+    name: ai-workflow
+  datasource:
+    driver-class-name: com.mysql.cj.jdbc.Driver
+    url: jdbc:mysql://127.0.0.1:3306/ai_workflow?useUnicode=true&characterEncoding=UTF-8&serverTimezone=Asia/Shanghai
+    username: ${DB_USERNAME:root}
+    password: ${DB_PASSWORD:root}
+    hikari:
+      maximum-pool-size: 10
+      minimum-idle: 2
+      connection-timeout: 10000
+      idle-timeout: 600000
+  profiles:
+    active: dev
+  lifecycle:
+    timeout-per-shutdown-phase: 30s
+
+logging:
+  level:
+    org.springblade.aiworkflow: INFO
+    com.baomidou.mybatisplus: WARN
+    okhttp3: WARN
+
+mybatis-plus:
+  mapper-locations: classpath*:/mapper/**/*.xml
+  type-enums-package: org.springblade.aiworkflow.enums
+  global-config:
+    db-config:
+      logic-delete-field: isDeleted
+      logic-delete-value: 1
+      logic-not-delete-value: 0
+
+# Part B 自身配置
+ai-workflow:
+  llm:
+    provider: anthropic
+    # API Base URL - 默认 Anthropic 官方,可指向 ccswitch/代理网关
+    base-url: ${ANTHROPIC_BASE_URL:https://api.anthropic.com}
+    model: ${LLM_MODEL:glm-5.1}
+    # 两种鉴权择一: AUTH_TOKEN(Bearer) 优先, API_KEY(x-api-key) 次之
+    api-key: ${ANTHROPIC_API_KEY:}
+    auth-token: ${ANTHROPIC_AUTH_TOKEN:}
+    anthropic-version: ${ANTHROPIC_VERSION:2023-06-01}
+    max-tokens: 8192
+    temperature: 0.1
+  # 目标 BladeX 项目根路径（代码写入目标），通过环境变量覆盖
+  target-project-root: ${TARGET_PROJECT_ROOT:../../blade_hgsjy}
+  # 生成产物独立输出根（BladeX 多模块结构落盘点），与 blade_hgsjy 物理隔离
+  output-root: ${AI_WORKFLOW_OUTPUT_ROOT:../../ai-generated-modules}
+  # BladeX 规范文档路径（默认从 classpath 加载内置规范文档,可通过环境变量切换到本地文件系统）
+  convention-docs-path: ${CONVENTION_DOCS_PATH:classpath:bladex-docs/}
+  max-review-retries: 3
+  auto-commit: false
+  # Part A 回调地址
+  part-a-callback-url: ${PART_A_CALLBACK_URL:http://localhost:3001/api/transmission/status-update}
+  admin:
+    # 管理端 token: /api/config 等写入端点要求 X-Admin-Token 头与之匹配。
+    # 未配置时,写入端点只接受 127.0.0.1 / ::1 的请求。
+    token: ${AI_WORKFLOW_ADMIN_TOKEN:}
