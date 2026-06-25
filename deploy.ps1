@@ -54,18 +54,34 @@ function Read-Secret($prompt) {
 Info "Step 1/6: 检查依赖"
 
 if (-not (Test-Cmd "java")) { Fail "未找到 java。请装 JDK 17 (https://adoptium.net/),然后把 bin 加入 PATH。" }
+# java -version 把版本写到 stderr(Java 惯例),Stop 策略下 2>&1 会触发 NativeCommandError。
+# 临时放宽策略捕获,捕获后恢复。
+$prevEap = $ErrorActionPreference
+$ErrorActionPreference = "Continue"
 $javaVerOut = (& java -version 2>&1) -join "`n"
+$ErrorActionPreference = $prevEap
 if ($javaVerOut -notmatch '"(\d+)\.') { Fail "无法解析 java -version: $javaVerOut" }
 $javaMajor = [int]$Matches[1]
 if ($javaMajor -lt 17) { Fail "需要 JDK 17+,当前是 $javaMajor。" }
 Write-Host "  java: OK (major=$javaMajor)"
 
 if (-not (Test-Cmd "mvn")) { Fail "未找到 mvn。请装 Maven 3.8+ (https://maven.apache.org/)。" }
-Write-Host "  mvn: OK"
+$prevEap = $ErrorActionPreference
+$ErrorActionPreference = "Continue"
+$mvnVerOut = (& mvn -v 2>&1) -join "`n"
+$ErrorActionPreference = $prevEap
+if ($mvnVerOut -notmatch 'Apache Maven (\d+)\.') { Fail "无法解析 mvn -v: $mvnVerOut" }
+$mvnMajor = [int]$Matches[1]
+if ($mvnMajor -lt 3) { Fail "需要 Maven 3.8+,当前是 $mvnMajor。" }
+Write-Host "  mvn: OK (v$mvnMajor)"
 
 if (-not (Test-Cmd "node")) { Fail "未找到 node。请装 Node 18+ (https://nodejs.org/)。" }
-$nodeVer = (& node -v).TrimStart('v')
-$nodeMajor = [int]($nodeVer.Split('.')[0])
+$prevEap = $ErrorActionPreference
+$ErrorActionPreference = "Continue"
+$nodeVer = (& node -v 2>&1).TrimStart('v')
+$ErrorActionPreference = $prevEap
+if ($nodeVer -notmatch '^(\d+)\.') { Fail "无法解析 node -v: $nodeVer" }
+$nodeMajor = [int]$Matches[1]
 if ($nodeMajor -lt 18) { Fail "需要 Node 18+,当前是 v$nodeVer。" }
 Write-Host "  node: OK (v$nodeVer)"
 
