@@ -37,6 +37,8 @@ echo ========================================
 echo.
 
 echo [1/3] 启动 ai-workflow (Part B, 端口 8110)...
+:: 启动前清理占用 8110 的旧进程(上次没正常关闭的 ai-workflow),避免端口冲突启动失败
+powershell -NoProfile -Command "$ErrorActionPreference='Continue'; $c=Get-NetTCPConnection -LocalPort 8110 -State Listen -ErrorAction SilentlyContinue; if($c){ foreach($x in $c){ $p=Get-Process -Id $x.OwningProcess -ErrorAction SilentlyContinue; if($p){ Write-Host '  [清理] 停止占用 8110 的旧进程 '$p.Name'(PID '$x.OwningProcess')'; Stop-Process -Id $x.OwningProcess -Force } }; Start-Sleep -Seconds 2 }" 2>nul
 :: 不用 -o:别的电脑首次可能没有完整 .m2 缓存,需联网拉依赖
 start "ai-workflow (8110)" /D "%ROOT%\ai-developer" cmd /k "mvn spring-boot:run -pl ai-workflow -Dspring-boot.run.profiles=dev"
 
