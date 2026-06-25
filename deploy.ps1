@@ -205,7 +205,8 @@ volumes:
 else {
     # 本地 MySQL
     Write-Host "  灌入 init.sql 到 ${dbHost}:${dbPort}..."
-    & mysql -h $dbHost -P $dbPort -u $dbUser -p"$dbPass" -e "source $initSql"
+    # 用 stdin 管道灌入(与 Docker 模式一致),避免 source 命令对含空格部署路径解析失败
+    Get-Content $initSql -Raw | & mysql -h $dbHost -P $dbPort -u $dbUser -p"$dbPass"
     if ($LASTEXITCODE -ne 0) { Fail "init.sql 执行失败,请检查 MySQL 凭证。" }
 }
 Write-Host "  数据库初始化完成"

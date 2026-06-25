@@ -32,10 +32,24 @@ function Start-Window($title, $workDir, $cmd) {
 
 Write-Host "启动 3 个服务..." -ForegroundColor Cyan
 
+# 启动前清理占用 8110 的旧进程(上次没正常关闭的 ai-workflow),避免端口冲突启动失败
+# 与 start.bat 的清理逻辑保持一致
+$staleConn = Get-NetTCPConnection -LocalPort 8110 -State Listen -ErrorAction SilentlyContinue
+if ($staleConn) {
+    foreach ($c in @($staleConn)) {
+        $p = Get-Process -Id $c.OwningProcess -ErrorAction SilentlyContinue
+        if ($p) {
+            Write-Host "[清理] 停止占用 8110 的旧进程 $($p.Name) (PID $($c.OwningProcess))" -ForegroundColor Yellow
+            Stop-Process -Id $c.OwningProcess -Force -ErrorAction SilentlyContinue
+        }
+    }
+    Start-Sleep -Seconds 2
+}
+
 # Part B: ai-workflow
 Start-Window "ai-workflow (8110)" `
     (Join-Path $Root "ai-developer") `
-    "mvn -o spring-boot:run -pl ai-workflow -Dspring-boot.run.profiles=dev"
+    "mvn spring-boot:run -pl ai-workflow -Dspring-boot.run.profiles=dev"
 
 Start-Sleep -Seconds 2
 
