@@ -67,11 +67,11 @@ mysql -uroot -p < ai-developer/sql/init.sql
 
 ### 4. 启动服务
 
-```powershell
-.\start.ps1
-```
+**双击 `start.bat`**(或命令行 `.\start.bat`)。走 cmd,不受 PowerShell 执行策略限制,直接双击即可。
 
 会开 3 个窗口分别跑 Part B(8110)、BFF(3001)、前端(3000)。访问 http://localhost:3000/ 。
+
+> `start.bat` 读取 `.env` 注入环境变量。密码若含 `& | < > ^` 等 cmd 特殊字符,需用 `^` 转义(如 `secret^&pass`);普通字母数字密码无此问题。
 
 ## 使用流程
 
@@ -121,13 +121,25 @@ ai-generated-modules/
 
 ### 目标机部署
 
+PowerShell 默认禁止运行脚本,首次需解锁(任选其一):
+
+```powershell
+# 方式 A(推荐):一次性解锁当前用户,之后所有 .ps1 都能直接跑
+Set-ExecutionPolicy RemoteSigned -Scope CurrentUser
+
+# 方式 B:不修改策略,单次绕过运行
+powershell -ExecutionPolicy Bypass -File deploy.ps1
+```
+
+解锁后:
+
 ```powershell
 .\deploy.ps1
 ```
 
-交互式完成:依赖检查 → 选 MySQL(本地 / Docker)→ 填凭证 → 写 `.env` → 灌 schema → 构建。完成后跑 `.\start.ps1` 启动。
+交互式完成:依赖检查 → 选 MySQL(本地 / Docker)→ 填凭证 → 写 `.env` → 灌 schema → 构建。完成后双击 `start.bat` 启动。
 
-> 首次构建需联网拉 Maven/npm 依赖。目标机可选 7-Zip 或 WinRAR 加速打包。
+> 首次构建需联网拉 Maven/npm 依赖。`start.bat` 不受执行策略限制,部署好后直接双击即可。
 
 ## 常见问题
 
