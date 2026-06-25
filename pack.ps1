@@ -1,4 +1,4 @@
-# 源机打包脚本:把当前工作区压成 bladex-deploy-*.{zip|rar}
+﻿# 源机打包脚本:把当前工作区压成 bladex-deploy-*.{zip|rar}
 # 跑完后把压缩包拷到目标机,解压,跑 deploy.ps1 即可。
 #
 # 排除:node_modules / target / dist / logs / .git / 生成产物 / 参考项目 / 凭证

@@ -1,4 +1,4 @@
-# AI Workflow 一键部署脚本(Windows / PowerShell)
+﻿# AI Workflow 一键部署脚本(Windows / PowerShell)
 #
 # 用法:
 #   1. 解压本压缩包到任意目录(例如 D:\workspace\houduan\)

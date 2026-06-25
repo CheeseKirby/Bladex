@@ -1,4 +1,4 @@
-# 启动 3 个服务到独立 PowerShell 窗口
+﻿# 启动 3 个服务到独立 PowerShell 窗口
 #
 # 读 .env(由 deploy.ps1 生成),把环境变量注入到每个子窗口,然后启动:
 #   - ai-workflow (Part B, Java)  → 8110
