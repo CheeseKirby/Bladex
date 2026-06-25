@@ -175,8 +175,25 @@ volumes:
 "@ | Out-File -FilePath $composeFile -Encoding utf8 -NoNewline
 
     Write-Host "  启动 Docker MySQL..."
+    # 先清理同名残留容器(上次失败可能留下 Created/Exited 状态的容器,导致 up 报 name in use)
+    & docker rm -f ai-workflow-mysql 2>$null | Out-Null
+
+    # 端口冲突预检:3306(或配置的 dbPort)若已被占用,提示后再起,避免 compose up 报模糊错
+    $portBusy = (Get-NetTCPConnection -LocalPort $dbPort -State Listen -ErrorAction SilentlyContinue | Measure-Object).Count
+    if ($portBusy -gt 0) {
+        Write-Host "[WARN] 端口 $dbPort 已被占用(可能是本机 MySQL 或其他容器)。" -ForegroundColor Yellow
+        Write-Host "       选项:1) 选本地 MySQL 模式复用该实例 2) 停掉占用者 3) 改用其他端口" -ForegroundColor Yellow
+        $cont = Read-Host "是否继续(可能失败)? [y/N]"
+        if ($cont -notmatch '^[yY]') { Fail "请先释放端口 $dbPort 后重跑 deploy.ps1" }
+    }
+
     & docker compose -f $composeFile up -d
-    if ($LASTEXITCODE -ne 0) { Fail "docker compose up 失败" }
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "[FAIL] docker compose up 失败" -ForegroundColor Red
+        Write-Host "      常见原因:端口 $dbPort 被占用、或同名容器残留。" -ForegroundColor Red
+        Write-Host "      排查:docker ps -a | findstr mysql;  netstat -ano | findstr :$dbPort" -ForegroundColor Red
+        exit 1
+    }
 
     Write-Host "  等待 MySQL 就绪(最多 60 秒)..."
     $ready = $false
