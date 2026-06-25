@@ -17,7 +17,10 @@
 #   - 不会替你安装 JDK/MySQL/Node;缺了会提示装哪个版本
 #   - .env 不会被打进压缩包,只在目标机生成
 
-$ErrorActionPreference = "Stop"
+# 用 Continue 而非 Stop:外部命令(java/mvn/node/docker/mysql)常把版本/进度信息
+# 写到 stderr(Java 惯例),Stop 策略会把它们误判为错误抛 NativeCommandError。
+# 失败检测统一靠 $LASTEXITCODE + 显式 Fail()。
+$ErrorActionPreference = "Continue"
 $ProgressPreference    = "SilentlyContinue"
 
 # ─── 工作目录 ───────────────────────────────────────────
@@ -54,32 +57,21 @@ function Read-Secret($prompt) {
 Info "Step 1/6: 检查依赖"
 
 if (-not (Test-Cmd "java")) { Fail "未找到 java。请装 JDK 17 (https://adoptium.net/),然后把 bin 加入 PATH。" }
-# java -version 把版本写到 stderr(Java 惯例),Stop 策略下 2>&1 会触发 NativeCommandError。
-# 临时放宽策略捕获,捕获后恢复。
-$prevEap = $ErrorActionPreference
-$ErrorActionPreference = "Continue"
 $javaVerOut = (& java -version 2>&1) -join "`n"
-$ErrorActionPreference = $prevEap
 if ($javaVerOut -notmatch '"(\d+)\.') { Fail "无法解析 java -version: $javaVerOut" }
 $javaMajor = [int]$Matches[1]
 if ($javaMajor -lt 17) { Fail "需要 JDK 17+,当前是 $javaMajor。" }
 Write-Host "  java: OK (major=$javaMajor)"
 
 if (-not (Test-Cmd "mvn")) { Fail "未找到 mvn。请装 Maven 3.8+ (https://maven.apache.org/)。" }
-$prevEap = $ErrorActionPreference
-$ErrorActionPreference = "Continue"
 $mvnVerOut = (& mvn -v 2>&1) -join "`n"
-$ErrorActionPreference = $prevEap
 if ($mvnVerOut -notmatch 'Apache Maven (\d+)\.') { Fail "无法解析 mvn -v: $mvnVerOut" }
 $mvnMajor = [int]$Matches[1]
 if ($mvnMajor -lt 3) { Fail "需要 Maven 3.8+,当前是 $mvnMajor。" }
 Write-Host "  mvn: OK (v$mvnMajor)"
 
 if (-not (Test-Cmd "node")) { Fail "未找到 node。请装 Node 18+ (https://nodejs.org/)。" }
-$prevEap = $ErrorActionPreference
-$ErrorActionPreference = "Continue"
 $nodeVer = (& node -v 2>&1).TrimStart('v')
-$ErrorActionPreference = $prevEap
 if ($nodeVer -notmatch '^(\d+)\.') { Fail "无法解析 node -v: $nodeVer" }
 $nodeMajor = [int]$Matches[1]
 if ($nodeMajor -lt 18) { Fail "需要 Node 18+,当前是 v$nodeVer。" }
@@ -176,6 +168,7 @@ volumes:
 
     Write-Host "  启动 Docker MySQL..."
     # 先清理同名残留容器(上次失败可能留下 Created/Exited 状态的容器,导致 up 报 name in use)
+    # 容器不存在时 docker rm 会写 stderr(正常),Continue 策略下不抛异常,忽略即可。
     & docker rm -f ai-workflow-mysql 2>$null | Out-Null
 
     # 端口冲突预检:3306(或配置的 dbPort)若已被占用,提示后再起,避免 compose up 报模糊错
@@ -187,7 +180,7 @@ volumes:
         if ($cont -notmatch '^[yY]') { Fail "请先释放端口 $dbPort 后重跑 deploy.ps1" }
     }
 
-    & docker compose -f $composeFile up -d
+    & docker compose -f $composeFile up -d 2>&1 | Out-Host
     if ($LASTEXITCODE -ne 0) {
         Write-Host "[FAIL] docker compose up 失败" -ForegroundColor Red
         Write-Host "      常见原因:端口 $dbPort 被占用、或同名容器残留。" -ForegroundColor Red
