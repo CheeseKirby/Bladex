@@ -89,15 +89,41 @@ CREATE TABLE IF NOT EXISTS ai_workflow_generated_file (
 ) COMMENT 'AI工作流-生成的代码文件';
 
 -- -----------------------------------------------------------
--- 索引
+-- 索引(幂等:已存在则跳过,init.sql 可重复执行不报错)
+-- MySQL 没有 CREATE INDEX IF NOT EXISTS,用存储过程查 INFORMATION_SCHEMA 判断
 -- -----------------------------------------------------------
-CREATE INDEX idx_plan_status ON ai_workflow_plan(status);
-CREATE INDEX idx_plan_project_id ON ai_workflow_plan(project_id);
-CREATE INDEX idx_plan_reception_id ON ai_workflow_plan(reception_id);
-CREATE INDEX idx_sub_plan_plan_id ON ai_workflow_sub_plan(plan_id);
-CREATE INDEX idx_sub_plan_status ON ai_workflow_sub_plan(status);
-CREATE INDEX idx_sub_plan_part_a_id ON ai_workflow_sub_plan(part_a_sub_plan_id);
-CREATE INDEX idx_exec_log_sub_plan_id ON ai_workflow_execution_log(sub_plan_id);
-CREATE INDEX idx_exec_log_status ON ai_workflow_execution_log(status);
-CREATE INDEX idx_gen_file_plan_id ON ai_workflow_generated_file(plan_id);
-CREATE INDEX idx_gen_file_sub_plan_id ON ai_workflow_generated_file(sub_plan_id);
+DROP PROCEDURE IF EXISTS add_index_if_missing;
+DELIMITER //
+CREATE PROCEDURE add_index_if_missing(
+    IN p_table VARCHAR(64),
+    IN p_index VARCHAR(64),
+    IN p_cols VARCHAR(255)
+)
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM information_schema.STATISTICS
+        WHERE table_schema = DATABASE()
+          AND table_name   = p_table
+          AND index_name   = p_index
+    ) THEN
+        SET @sql = CONCAT('CREATE INDEX ', p_index, ' ON ', p_table, '(', p_cols, ')');
+        PREPARE stmt FROM @sql;
+        EXECUTE stmt;
+        DEALLOCATE PREPARE stmt;
+    END IF;
+END//
+DELIMITER ;
+
+CALL add_index_if_missing('ai_workflow_plan',          'idx_plan_status',           'status');
+CALL add_index_if_missing('ai_workflow_plan',          'idx_plan_project_id',       'project_id');
+CALL add_index_if_missing('ai_workflow_plan',          'idx_plan_reception_id',     'reception_id');
+CALL add_index_if_missing('ai_workflow_sub_plan',      'idx_sub_plan_plan_id',      'plan_id');
+CALL add_index_if_missing('ai_workflow_sub_plan',      'idx_sub_plan_status',       'status');
+CALL add_index_if_missing('ai_workflow_sub_plan',      'idx_sub_plan_part_a_id',    'part_a_sub_plan_id');
+CALL add_index_if_missing('ai_workflow_execution_log','idx_exec_log_sub_plan_id',  'sub_plan_id');
+CALL add_index_if_missing('ai_workflow_execution_log','idx_exec_log_status',         'status');
+CALL add_index_if_missing('ai_workflow_generated_file','idx_gen_file_plan_id',      'plan_id');
+CALL add_index_if_missing('ai_workflow_generated_file','idx_gen_file_sub_plan_id',  'sub_plan_id');
+
+DROP PROCEDURE IF EXISTS add_index_if_missing;
+
