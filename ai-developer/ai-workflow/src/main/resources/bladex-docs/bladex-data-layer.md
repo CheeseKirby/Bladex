@@ -1,6 +1,9 @@
 # BladeX 4.1.0 数据层开发指南
 
 > 基于 BladeX 4.1.0.RELEASE 框架源码验证。适用于 Agent 后端开发参考。
+>
+> **版本适配**: 本文档示例用 Swagger v3(@Schema) + jakarta.*。若参考项目是旧版(Java 8 / Swagger v2 / javax.*),
+> **必须按参考项目实际版本生成**:Swagger 用 @ApiModel/@ApiModelProperty,注解用 javax.*。参考项目版本约束优先级高于本文档。
 
 ## 概述
 
@@ -152,6 +155,12 @@ public class Dict implements Serializable {
 ---
 
 ## VO 类型与使用场景
+
+> **Hard Rule（字段一致性，违反会导致 BeanUtil.copy 丢字段、CRUD 数据流断裂，且被生成器跨文件自检拦截并强制重生成）**：
+> - **B1 字段名一致**：VO/IVO/UVO 的业务字段名必须与 Entity 逐字段同名。Entity 用 `periodName`，VO/IVO/UVO 也用 `periodName`，不要改成 `name`/`type`/`enabled`。推荐 `VO extends Entity` 仅追加展示字段；若 `implements Serializable`，字段必须与 Entity 同名。
+> - **B2 字段类型一致**：IVO/UVO/VO 的字段类型必须与 Entity 对应字段一致。Entity 是 `Date` 就用 `Date`，不要用 `LocalDate`；Entity 是 `Integer` 就用 `Integer`。日期类型统一用 `Date`（与目标项目既有约定一致）。
+> - **B3 字段有据可循**：VO 每个字段必须来自：Entity 字段、或 Base 书写字段（id/createUser/createTime/updateUser/updateTime/status/isDeleted/tenantId/createDept）、或明确的展示衍生字段（后缀 `Name`/`StatusName`/`TypeName` 等，如 `customerTypeName`）。**禁止凭空新增业务字段**（如 `weekDays`/`priority`）；如需新增表列必须同步 DDL 与 Entity。
+> - QVO 是查询对象，只含可筛选字段 + 范围字段（如 `startDateStart`/`startDateEnd`），不强制与 Entity 字段一致。
 
 BladeX 定义了 5 种 VO 类型，各司其职：
 
@@ -379,6 +388,13 @@ public interface OrderMapper extends BaseMapper<Order> {
 > - 分页方法第一个参数是 `IPage`，返回值是 `List`（MyBatis-Plus 自动填充分页信息）
 > - 没有 XML 映射文件时，可以使用 MyBatis `@Select` 注解（BladeX 标准模块不使用此方式，而是通过 MyBatis-Plus Lambda API 在 Service 层构建查询）
 
+### Mapper XML 映射文件（B8 硬约束）
+
+> **Hard Rule（违反会导致 MyBatis 映射错乱，被生成器自检拦截）**：
+> - `resultMap` 的 `type` 必须与对应 Mapper 方法返回元素类型一致：方法返回 `List<Entity>`/`Entity` 则 `type` 指向 Entity、`property` 用 Entity 字段名；方法返回 `List<XxxVO>`/`XxxVO` 则 `type` 指向 VO、`property` 用 VO 字段名。同一 `resultMap` 若被多个方法共用，这些方法返回元素类型必须相同。
+> - `resultMap` 的 `property` 必须与 `type` 指向类的字段同名，`column` 用 snake_case；不要写 `type` 类不存在的 `property`。
+> - `<select>` 里引用参数的前缀必须与 Mapper 接口 `@Param("xxx")` 一致：接口 `@Param("qvo")` 则 XML 用 `qvo.xxx`，不要用 `param.xxx`。
+
 ---
 
 ## MyBatis-Plus 查询模式
@@ -501,6 +517,13 @@ List<Dict> list = dictService.list(
 | EVO (Excel) | `{Name}Excel` | `OrderExcel` |
 
 ---
+
+## 状态机字段（B6 约束）
+
+> **约束（违反会导致依赖状态的查询永远返回空，生成器会告警提醒）**：
+> - 含**状态机字段**（`xxxStatus` 有多个枚举值且依赖时间流转，如 `periodStatus`：1-未开始/2-进行中/3-已结束）的模块，必须生成配套**定时任务**（`timed` 包 `@Scheduled` 或走 blade-xxljob）推进状态，或在审查阶段显式标注状态推进方式。
+> - 依赖该状态值的查询（如 `selectActivePeriods` 查 "进行中" 状态）若状态从不推进，会永远返回空。
+> - 日期/时间区间判断注意类型匹配：`start_date`/`end_date` 是 `DATE`、`start_time`/`end_time` 是 `TIME`，不要用 `NOW()`（`DATETIME`）直接与 `TIME` 列比较。
 
 ## 注意事项
 

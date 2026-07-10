@@ -21,6 +21,7 @@ public enum PlanStatus {
     RECEIVED("RECEIVED", "已接收"),
     EXECUTING("EXECUTING", "执行中"),
     COMPLETED("COMPLETED", "已完成"),
+    COMPLETED_WITH_ERRORS("COMPLETED_WITH_ERRORS", "完成但有未修复错误"),
     FAILED("FAILED", "失败");
 
     private final String code;

@@ -1,9 +1,9 @@
 ﻿# 启动 3 个服务到独立 PowerShell 窗口
 #
 # 读 .env(由 deploy.ps1 生成),把环境变量注入到每个子窗口,然后启动:
-#   - ai-workflow (Part B, Java)  → 8110
-#   - ai-designer BFF (Part A)    → 3001
-#   - ai-designer 前端 (Vite)     → 3000
+#   - ai-workflow (Part B, Java)  → 8111
+#   - ai-designer BFF (Part A)    → 3004
+#   - ai-designer 前端 (Vite)     → 3005
 #
 # 关闭子窗口即停服务。
 
@@ -32,14 +32,14 @@ function Start-Window($title, $workDir, $cmd) {
 
 Write-Host "启动 3 个服务..." -ForegroundColor Cyan
 
-# 启动前清理占用 8110 的旧进程(上次没正常关闭的 ai-workflow),避免端口冲突启动失败
+# 启动前清理占用 8111 的旧进程(上次没正常关闭的 ai-workflow),避免端口冲突启动失败
 # 与 start.bat 的清理逻辑保持一致
-$staleConn = Get-NetTCPConnection -LocalPort 8110 -State Listen -ErrorAction SilentlyContinue
+$staleConn = Get-NetTCPConnection -LocalPort 8111 -State Listen -ErrorAction SilentlyContinue
 if ($staleConn) {
     foreach ($c in @($staleConn)) {
         $p = Get-Process -Id $c.OwningProcess -ErrorAction SilentlyContinue
         if ($p) {
-            Write-Host "[清理] 停止占用 8110 的旧进程 $($p.Name) (PID $($c.OwningProcess))" -ForegroundColor Yellow
+            Write-Host "[清理] 停止占用 8111 的旧进程 $($p.Name) (PID $($c.OwningProcess))" -ForegroundColor Yellow
             Stop-Process -Id $c.OwningProcess -Force -ErrorAction SilentlyContinue
         }
     }
@@ -47,26 +47,26 @@ if ($staleConn) {
 }
 
 # Part B: ai-workflow
-Start-Window "ai-workflow (8110)" `
+Start-Window "ai-workflow (8111)" `
     (Join-Path $Root "ai-developer") `
     "mvn spring-boot:run -pl ai-workflow -Dspring-boot.run.profiles=dev"
 
 Start-Sleep -Seconds 2
 
 # Part A BFF
-Start-Window "ai-designer BFF (3001)" `
+Start-Window "ai-designer BFF (3004)" `
     (Join-Path $Root "ai-designer") `
     "npm run server"
 
 Start-Sleep -Seconds 1
 
 # Part A 前端
-Start-Window "ai-designer 前端 (3000)" `
+Start-Window "ai-designer 前端 (3005)" `
     (Join-Path $Root "ai-designer") `
     "npm run dev"
 
 Write-Host ""
 Write-Host "三个服务已在独立窗口启动,关闭窗口即停止。" -ForegroundColor Green
-Write-Host "前端:    http://localhost:3000/" -ForegroundColor Yellow
-Write-Host "BFF:     http://localhost:3001/" -ForegroundColor Yellow
-Write-Host "Part B:  http://localhost:8110/doc.html" -ForegroundColor Yellow
+Write-Host "前端:    http://localhost:3005/" -ForegroundColor Yellow
+Write-Host "BFF:     http://localhost:3004/" -ForegroundColor Yellow
+Write-Host "Part B:  http://localhost:8111/doc.html" -ForegroundColor Yellow

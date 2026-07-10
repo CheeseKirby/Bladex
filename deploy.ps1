@@ -93,8 +93,8 @@ if ($mysqlMode -eq "1") {
     Write-Host "  mysql client: OK"
     $dbHost     = Read-Host "MySQL 主机 [默认 127.0.0.1]"
     if ([string]::IsNullOrWhiteSpace($dbHost)) { $dbHost = "127.0.0.1" }
-    $dbPort     = Read-Host "MySQL 端口 [默认 3306]"
-    if ([string]::IsNullOrWhiteSpace($dbPort)) { $dbPort = "3306" }
+    $dbPort     = Read-Host "MySQL 端口 [默认 3307]"
+    if ([string]::IsNullOrWhiteSpace($dbPort)) { $dbPort = "3307" }
     $dbUser     = Read-Host "MySQL 用户 [默认 root]"
     if ([string]::IsNullOrWhiteSpace($dbUser)) { $dbUser = "root" }
     $dbPass     = Read-Secret "MySQL 密码(输入隐藏)"
@@ -102,7 +102,7 @@ if ($mysqlMode -eq "1") {
 elseif ($mysqlMode -eq "2") {
     if (-not (Test-Cmd "docker")) { Fail "未找到 docker。请装 Docker Desktop 或选 [1]。" }
     Write-Host "  docker: OK"
-    $dbHost = "127.0.0.1"; $dbPort = "3306"; $dbUser = "root"
+    $dbHost = "127.0.0.1"; $dbPort = "3307"; $dbUser = "root"
     $dbPass = Read-Secret "为 Docker MySQL 设置 root 密码"
 }
 else { Fail "无效选择: $mysqlMode" }
@@ -134,9 +134,16 @@ DB_HOST=$dbHost
 DB_PORT=$dbPort
 
 AI_WORKFLOW_OUTPUT_ROOT=../../ai-generated-modules
-TARGET_PROJECT_ROOT=../../blade_hgsjy
+TARGET_PROJECT_ROOT=../../ai-generated-modules
 CONVENTION_DOCS_PATH=classpath:bladex-docs/
-PART_A_CALLBACK_URL=http://localhost:3001/api/transmission/status-update
+# BFF 端口(默认 3004;BFF 读 PORT,vite 代理读 VITE_BFF_PORT,两者必须相同)
+PORT=3004
+VITE_BFF_PORT=3004
+# BFF 放行前端 CORS 来源(默认前端跑在 3005)
+FRONTEND_ORIGIN=http://localhost:3005
+# BFF 转发到 Part B(ai-workflow)的地址(默认 8111)
+PART_B_URL=http://localhost:8111
+PART_A_CALLBACK_URL=http://localhost:3004/api/transmission/status-update
 AI_WORKFLOW_ADMIN_TOKEN=
 "@ | Out-File -FilePath $envPath -Encoding utf8 -NoNewline
 Write-Host "  .env 已写入: $envPath"
@@ -171,7 +178,7 @@ volumes:
     # 容器不存在时 docker rm 会写 stderr(正常),Continue 策略下不抛异常,忽略即可。
     & docker rm -f ai-workflow-mysql 2>$null | Out-Null
 
-    # 端口冲突预检:3306(或配置的 dbPort)若已被占用,提示后再起,避免 compose up 报模糊错
+    # 端口冲突预检:3307(或配置的 dbPort)若已被占用,提示后再起,避免 compose up 报模糊错
     $portBusy = (Get-NetTCPConnection -LocalPort $dbPort -State Listen -ErrorAction SilentlyContinue | Measure-Object).Count
     if ($portBusy -gt 0) {
         Write-Host "[WARN] 端口 $dbPort 已被占用(可能是本机 MySQL 或其他容器)。" -ForegroundColor Yellow
@@ -237,9 +244,9 @@ Write-Host "  部署完成。下一步:" -ForegroundColor Green
 Write-Host "═══════════════════════════════════════════════════════" -ForegroundColor Green
 Write-Host ""
 Write-Host "  启动服务:  .\start.ps1" -ForegroundColor Yellow
-Write-Host "  访问前端:  http://localhost:3000/" -ForegroundColor Yellow
-Write-Host "  BFF API:   http://localhost:3001/" -ForegroundColor Yellow
-Write-Host "  Part B:    http://localhost:8110/doc.html" -ForegroundColor Yellow
+Write-Host "  访问前端:  http://localhost:3005/" -ForegroundColor Yellow
+Write-Host "  BFF API:   http://localhost:3004/" -ForegroundColor Yellow
+Write-Host "  Part B:    http://localhost:8111/doc.html" -ForegroundColor Yellow
 Write-Host ""
 if ($mysqlMode -eq "2") {
     Write-Host "  停 MySQL:  docker compose -f docker-compose.mysql.yml down" -ForegroundColor Gray

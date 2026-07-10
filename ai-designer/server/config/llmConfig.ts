@@ -27,11 +27,11 @@ export interface LlmRuntimeConfig {
 
 const ENV = {
   baseUrl: process.env.ANTHROPIC_BASE_URL || 'https://api.anthropic.com',
-  model: process.env.LLM_MODEL || 'glm-5.1',
+  model: process.env.LLM_MODEL || 'glm-latest',
   authToken: process.env.ANTHROPIC_AUTH_TOKEN || '',
   apiKey: process.env.ANTHROPIC_API_KEY || '',
   anthropicVersion: process.env.ANTHROPIC_VERSION || '2023-06-01',
-  maxTokens: Number(process.env.LLM_MAX_TOKENS || 8192),
+  maxTokens: Number(process.env.LLM_MAX_TOKENS || 16384),
 };
 
 let runtime: LlmRuntimeConfig = { ...ENV };

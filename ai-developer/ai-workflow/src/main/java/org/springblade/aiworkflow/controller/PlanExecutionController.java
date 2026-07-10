@@ -2,9 +2,11 @@ package org.springblade.aiworkflow.controller;
 
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.tags.Tag;
+import jakarta.servlet.http.HttpServletRequest;
 import jakarta.validation.constraints.NotBlank;
 import lombok.AllArgsConstructor;
 import org.springblade.aiworkflow.common.ApiResponse;
+import org.springblade.aiworkflow.controller.ConfigController.AdminTokenGuard;
 import org.springblade.aiworkflow.service.IPlanExecutionService;
 import org.springblade.aiworkflow.vo.SubPlanDetailVO;
 import org.springframework.validation.annotation.Validated;
@@ -18,11 +20,20 @@ import org.springframework.web.bind.annotation.*;
 public class PlanExecutionController {
 
     private final IPlanExecutionService planExecutionService;
+    private final AdminTokenGuard guard;
 
+    /**
+     * 触发执行方案 - 管理操作,需 admin token 鉴权。
+     *
+     * <p>trigger 可重触发任意已落库 plan(含 REAL 模式写真实项目),无鉴权会被远程利用写盘真实项目。
+     * 复用 {@link AdminTokenGuard#requireAdmin},未配 token 时仅放行本地回环。
+     */
     @PostMapping("/trigger")
     @Operation(summary = "触发执行方案")
     public ApiResponse<String> trigger(
-            @RequestParam @NotBlank(message = "接收编号不能为空") String receptionId) {
+            @RequestParam @NotBlank(message = "接收编号不能为空") String receptionId,
+            HttpServletRequest req) {
+        guard.requireAdmin(req);
         planExecutionService.executeAsync(receptionId);
         return ApiResponse.okMessage("方案已加入执行队列");
     }

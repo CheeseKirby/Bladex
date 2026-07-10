@@ -93,19 +93,10 @@ public class PartACallbackServiceImpl implements IPartACallbackService {
     }
 
     /**
-     * 仅允许 http/https scheme + 非空 host。
-     * 拒绝 file/ftp/jar/data 等可能被滥用的 scheme。
+     * 复用 ConfigController.isAllowedBaseUrl 的 SSRF 防护(scheme + 非空 host + 拒绝内网/云元数据),
+     * 避免回调 URL 被配成内网地址导致 plan 内容/状态泄露给内网服务。
      */
     private static boolean isAllowedCallbackUrl(String url) {
-        if (url == null || url.isBlank()) return false;
-        try {
-            URL u = new URL(url);
-            String scheme = u.getProtocol();
-            if (!"http".equalsIgnoreCase(scheme) && !"https".equalsIgnoreCase(scheme)) return false;
-            String host = u.getHost();
-            return host != null && !host.isBlank();
-        } catch (MalformedURLException e) {
-            return false;
-        }
+        return org.springblade.aiworkflow.controller.ConfigController.isAllowedBaseUrl(url);
     }
 }

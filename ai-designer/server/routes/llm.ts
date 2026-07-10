@@ -15,7 +15,7 @@ import { buildAuthHeaders, getLlmConfig, isLlmConfigured } from '../config/llmCo
 
 export const llmRouter = Router();
 
-const LLM_REQUEST_TIMEOUT_MS = 120_000;
+const LLM_REQUEST_TIMEOUT_MS = 300_000; // 5 分钟(大项目方案审查/拆分较慢)
 
 interface ModuleSummary { type: string; name: string; icon: string; config?: unknown }
 
@@ -394,7 +394,9 @@ llmRouter.post('/split-plan', async (req: Request, res: Response) => {
         title: typeof sp.title === 'string' ? sp.title : `子方案${i + 1}`,
         planContent: typeof sp.planContent === 'string' ? sp.planContent : '',
         prerequisites: Array.isArray(sp.prerequisites) ? sp.prerequisites : [],
-        status: i === 0 ? 'GENERATED' : 'PENDING',
+        // 拆分成功 = 全部子方案文本已生成, 统一标记 GENERATED。
+        // (原 i===0 仅标记首个, 导致列表里只有第一个状态 Tag 更新, 其余误显"待生成"。)
+        status: 'GENERATED',
       };
     });
 
@@ -746,9 +748,9 @@ function mockSplit(_planContent: string) {
     subPlans: [
       { id: 'sub_1', masterPlanId: 'plan_1', index: 1, title: '数据库DDL', planContent: '## 子方案1: 数据库DDL\n\n创建业务表 blade_order...', prerequisites: [], status: 'GENERATED' },
       { id: 'sub_2', masterPlanId: 'plan_1', index: 2, title: 'Entity与VO类', planContent: '## 子方案2: Entity与VO\n\n创建 Order Entity 与 4 个 VO...', prerequisites: ['sub_1'], status: 'GENERATED' },
-      { id: 'sub_3', masterPlanId: 'plan_1', index: 3, title: 'Mapper与Service层', planContent: '## 子方案3: Mapper与Service\n\n实现数据访问和业务逻辑...', prerequisites: ['sub_2'], status: 'PENDING' },
-      { id: 'sub_4', masterPlanId: 'plan_1', index: 4, title: 'Controller与Wrapper', planContent: '## 子方案4: Controller\n\n实现 5 个标准 CRUD REST 端点...', prerequisites: ['sub_3'], status: 'PENDING' },
-      { id: 'sub_5', masterPlanId: 'plan_1', index: 5, title: 'Excel导入导出', planContent: '## 子方案5: Excel\n\n实现订单数据 Excel 导出...', prerequisites: ['sub_4'], status: 'PENDING' },
+      { id: 'sub_3', masterPlanId: 'plan_1', index: 3, title: 'Mapper与Service层', planContent: '## 子方案3: Mapper与Service\n\n实现数据访问和业务逻辑...', prerequisites: ['sub_2'], status: 'GENERATED' },
+      { id: 'sub_4', masterPlanId: 'plan_1', index: 4, title: 'Controller与Wrapper', planContent: '## 子方案4: Controller\n\n实现 5 个标准 CRUD REST 端点...', prerequisites: ['sub_3'], status: 'GENERATED' },
+      { id: 'sub_5', masterPlanId: 'plan_1', index: 5, title: 'Excel导入导出', planContent: '## 子方案5: Excel\n\n实现订单数据 Excel 导出...', prerequisites: ['sub_4'], status: 'GENERATED' },
     ],
   };
 }

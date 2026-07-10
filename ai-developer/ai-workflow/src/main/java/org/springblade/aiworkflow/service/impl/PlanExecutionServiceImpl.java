@@ -5,12 +5,15 @@ import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.extern.slf4j.Slf4j;
 import org.springblade.aiworkflow.agent.BladeXCodeAgent;
+import org.springblade.aiworkflow.agent.ProjectWriteLockManager;
+import org.springblade.aiworkflow.config.AiWorkflowProperties;
 import org.springblade.aiworkflow.entity.AiExecutionLog;
 import org.springblade.aiworkflow.entity.AiGeneratedFile;
 import org.springblade.aiworkflow.entity.AiPlan;
 import org.springblade.aiworkflow.entity.AiSubPlan;
 import org.springblade.aiworkflow.enums.PlanStatus;
 import org.springblade.aiworkflow.enums.SubPlanStatus;
+import org.springblade.aiworkflow.enums.WriteTarget;
 import org.springblade.aiworkflow.mapper.AiExecutionLogMapper;
 import org.springblade.aiworkflow.mapper.AiGeneratedFileMapper;
 import org.springblade.aiworkflow.mapper.AiPlanMapper;
@@ -56,6 +59,8 @@ public class PlanExecutionServiceImpl implements IPlanExecutionService {
     private final AiExecutionLogMapper executionLogMapper;
     private final BladeXCodeAgent bladeXCodeAgent;
     private final ObjectMapper objectMapper;
+    private final ProjectWriteLockManager projectWriteLockManager;
+    private final AiWorkflowProperties properties;
 
     /** 进行中的 receptionId,用于幂等保护,防止控制器/重试导致同一方案并发执行。 */
     private final Set<String> inFlight = ConcurrentHashMap.newKeySet();
@@ -63,13 +68,17 @@ public class PlanExecutionServiceImpl implements IPlanExecutionService {
     public PlanExecutionServiceImpl(AiPlanMapper planMapper, AiSubPlanMapper subPlanMapper,
                                     AiGeneratedFileMapper generatedFileMapper,
                                     AiExecutionLogMapper executionLogMapper,
-                                    BladeXCodeAgent bladeXCodeAgent, ObjectMapper objectMapper) {
+                                    BladeXCodeAgent bladeXCodeAgent, ObjectMapper objectMapper,
+                                    ProjectWriteLockManager projectWriteLockManager,
+                                    AiWorkflowProperties properties) {
         this.planMapper = planMapper;
         this.subPlanMapper = subPlanMapper;
         this.generatedFileMapper = generatedFileMapper;
         this.executionLogMapper = executionLogMapper;
         this.bladeXCodeAgent = bladeXCodeAgent;
         this.objectMapper = objectMapper;
+        this.projectWriteLockManager = projectWriteLockManager;
+        this.properties = properties;
     }
 
     @Override
@@ -89,6 +98,8 @@ public class PlanExecutionServiceImpl implements IPlanExecutionService {
         if (request.getMasterPlan() != null) {
             plan.setMasterPlanContent(request.getMasterPlan().getContent());
         }
+        // 阶段2: 写入目标(空/非法→ISOLATED,安全默认)。决定后续写盘 root 与是否查重。
+        plan.setWriteTarget(WriteTarget.parse(request.getWriteTarget()).getCode());
         plan.setCreateTime(LocalDateTime.now());
         planMapper.insert(plan);
 
@@ -170,14 +181,29 @@ public class PlanExecutionServiceImpl implements IPlanExecutionService {
             return;
         }
         log.info("异步触发工作流执行: receptionId={}", receptionId);
+        // C3: REAL 模式对同一 targetProjectRoot 加进程级写锁, 串行化"查重+写盘"防并发覆盖真实项目
+        AiPlan plan = planMapper.selectOne(
+                new LambdaQueryWrapper<AiPlan>().eq(AiPlan::getReceptionId, receptionId));
+        java.util.concurrent.locks.ReentrantLock writeLock = null;
+        if (plan != null && WriteTarget.parse(plan.getWriteTarget()).isReal()) {
+            writeLock = projectWriteLockManager.lockFor(properties.getTargetProjectRoot());
+            writeLock.lock();
+            log.info("REAL 模式已获取项目写锁: receptionId={}, root={}", receptionId, properties.getTargetProjectRoot());
+        }
         try {
             bladeXCodeAgent.executeWorkflow(receptionId);
         } catch (Throwable t) {
+            // 优雅停机时工作线程被 interrupt,恢复中断标志让线程池感知(否则 catch Throwable 吞掉中断,
+            // 工作流不响应停机,可能超出 30s 窗口被强杀,留下 EXECUTING 残留)。
+            if (t instanceof InterruptedException) {
+                Thread.currentThread().interrupt();
+            }
             // catch Throwable (含 OOM/Assertion/未知异常),确保数据库状态收敛,
             // 否则 EXECUTING 的子方案永远不会被标记 FAILED。
             log.error("工作流执行异常: receptionId={}", receptionId, t);
             markPlanFailed(receptionId, t.getMessage());
         } finally {
+            if (writeLock != null) writeLock.unlock();
             inFlight.remove(receptionId);
         }
     }

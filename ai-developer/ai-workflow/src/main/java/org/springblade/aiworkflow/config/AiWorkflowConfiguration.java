@@ -33,13 +33,13 @@ import java.util.concurrent.TimeUnit;
 public class AiWorkflowConfiguration {
 
     /**
-     * 给 LLM 调用用的长连接客户端: 长 readTimeout 容忍 LLM 响应时延。
+     * 给 LLM 调用用的长连接客户端: 长 readTimeout 容忍 LLM 响应时延(大项目方案生成较慢,4 分钟)。
      */
     @Bean("llmHttpClient")
     public OkHttpClient llmHttpClient() {
         return new OkHttpClient.Builder()
                 .connectTimeout(30, TimeUnit.SECONDS)
-                .readTimeout(120, TimeUnit.SECONDS)
+                .readTimeout(240, TimeUnit.SECONDS)
                 .writeTimeout(60, TimeUnit.SECONDS)
                 .retryOnConnectionFailure(true)
                 .followRedirects(false)         // 防止重定向到内网导致 SSRF 放大
@@ -128,13 +128,25 @@ public class AiWorkflowConfiguration {
 
     @Bean
     public FileWriteExecutor fileWriteExecutor(AiWorkflowProperties properties) {
-        // 产物写入独立输出目录 outputRoot（与真实 blade_hgsjy 隔离）
+        // 产物写入独立输出目录 outputRoot
         return new FileWriteExecutor(properties.getOutputRoot());
     }
 
     @Bean
     public BuildVerifier buildVerifier(AiWorkflowProperties properties) {
         return new BuildVerifier(properties.getTargetProjectRoot());
+    }
+
+    @Bean
+    public ExistingProjectIndex existingProjectIndex(AiWorkflowProperties properties) {
+        // 阶段1:已有项目结构索引。懒加载(构造不扫),复用 target-project-root 配置。
+        return new ExistingProjectIndex(properties);
+    }
+
+    @Bean
+    public ReferenceProjectIndex referenceProjectIndex() {
+        // 阶段2增强:参考项目索引。root 可变(用户通过 API 设置),构造时不扫。
+        return new ReferenceProjectIndex();
     }
 
     @Bean
@@ -153,11 +165,14 @@ public class AiWorkflowConfiguration {
                                             BuildVerifier buildVerifier,
                                             ObjectMapper objectMapper,
                                             AiWorkflowProperties properties,
-                                            IPartACallbackService callbackService) {
+                                            IPartACallbackService callbackService,
+                                            ExistingProjectIndex existingProjectIndex,
+                                            ReferenceProjectIndex referenceProjectIndex) {
         return new BladeXCodeAgent(planMapper, subPlanMapper, executionLogMapper, generatedFileMapper,
                 codeGenRouter, conventionValidator, changeEvaluator, fileWriteExecutor,
                 buildVerifier, objectMapper, properties.getMaxReviewRetries(),
                 properties.isAutoCommit(),
-                callbackService::notifyStatusUpdate);
+                callbackService::notifyStatusUpdate,
+                properties, existingProjectIndex, referenceProjectIndex);
     }
 }

@@ -1,6 +1,8 @@
 # BladeX 4.1.0 Feign 远程调用指南
 
 > 基于 BladeX 4.1.0.RELEASE 框架源码验证。适用于 Agent 后端开发参考。
+>
+> **版本适配**: 本文档示例基于 BladeX 4.1.0(Swagger v3 + jakarta.*)。若参考项目是旧版,按参考项目实际版本生成。
 
 ## 概述
 
@@ -139,6 +141,10 @@ public class IDictClientFallback implements IDictClient {
 ---
 
 ## Feign 接口实现（服务模块）
+
+> **Hard Rule（B5，违反会导致其他微服务 Feign 调用 404，生成器会告警提醒）**：
+> - api 模块中每个 `IXxxClient` 方法，service 模块必须有匹配的实现类 `XxxClient implements IXxxClient`（`@Hidden @RestController @AllArgsConstructor`），且每个接口方法 `@Override` + `@GetMapping(API_PREFIX + "...")` 端点路径、入参、返回类型与接口完全一致。
+> - 禁止"api 模块定义了 `IXxxClient` 但 service 模块无 `XxxClient` 实现类"--其他微服务通过 Feign 调用会 404。
 
 文件位置：`blade-service/blade-xxx/src/main/java/org/springblade/xxx/feign/*Client.java`
 

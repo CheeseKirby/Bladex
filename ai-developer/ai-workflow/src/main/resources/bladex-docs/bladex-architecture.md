@@ -157,6 +157,8 @@ public class SafetyControlApplication {
 - `org.springblade.core.launch.constant.AppConstant` — 框架内置常量（如 `APPLICATION_SYSTEM_NAME = "blade-system"`）
 - `org.springblade.common.constant.LauncherConstant` — 项目自定义常量（如 `APPLICATION_SAFETY_CONTROL_NAME = "blade-safety-control"`）
 
+> **强制规则（新模块必须遵守）**：`appName` 必须为 `blade-{module}`（如模块 `blade-permit` 的 appName 就是 `blade-permit`），与模块目录名、前端 API 路径前缀 `/api/blade-{module}`、Nacos 服务名保持完全一致。**不得加 `-service` 后缀**（如 `blade-permit-service` 是错误的）——否则网关按服务名路由时与前缀不匹配，前端请求 404。可直接写字面量 `BladeApplication.run("blade-permit", ...)`，无需走常量类。
+
 ---
 
 ## 配置文件体系
@@ -170,9 +172,9 @@ spring:
   cloud:
     nacos:
       config:
-        namespace: blade_hgsjy
+        namespace: blade
       discovery:
-        namespace: blade_hgsjy
+        namespace: blade
   config:
     activate:
       on-profile: dev

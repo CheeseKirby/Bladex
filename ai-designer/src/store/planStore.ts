@@ -23,6 +23,8 @@ interface PlanStore {
   generatedFiles: GeneratedFileSummary[];
   // Part B 执行进度时间线
   executionTimeline: ExecutionTimeline | null;
+  // 写入目标: 'ISOLATED'(默认,隔离区) | 'REAL'(真实 blade_hgsjy,需鉴权+查重)
+  writeTarget: 'ISOLATED' | 'REAL';
 
   // Actions
   createProject: (name: string) => void;
@@ -45,6 +47,8 @@ interface PlanStore {
   setPartBOverallStatus: (status: string | null) => void;
   setGeneratedFiles: (files: GeneratedFileSummary[]) => void;
   setExecutionTimeline: (timeline: ExecutionTimeline | null) => void;
+  /** 设置写入目标(ISOLATED/REAL) */
+  setWriteTarget: (target: 'ISOLATED' | 'REAL') => void;
   /** 一键载入示例数据(模块+主方案+子方案均已 REVIEWED) */
   loadDemo: (seed: DemoSeed) => void;
   resetProject: () => void;
@@ -64,6 +68,7 @@ export const usePlanStore = create<PlanStore>((set) => ({
   partBOverallStatus: null,
   generatedFiles: [],
   executionTimeline: null,
+  writeTarget: 'ISOLATED',
 
   createProject: (name: string) =>
     set({
@@ -191,6 +196,8 @@ export const usePlanStore = create<PlanStore>((set) => ({
   setGeneratedFiles: (files: GeneratedFileSummary[]) => set({ generatedFiles: files }),
 
   setExecutionTimeline: (timeline: ExecutionTimeline | null) => set({ executionTimeline: timeline }),
+
+  setWriteTarget: (target: 'ISOLATED' | 'REAL') => set({ writeTarget: target }),
 
   loadDemo: (seed: DemoSeed) =>
     set(() => {

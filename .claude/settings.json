@@ -1,7 +1,23 @@
 {
   "permissions": {
     "allow": [
-      "Bash(grep -v \"/src/main/java/org/springblade/product/\\\\|/src/main/java/org/springblade/employee/\")"
+      "Bash(grep -v \"/src/main/java/org/springblade/product/\\\\|/src/main/java/org/springblade/employee/\")",
+      "Bash(powershell -NoProfile -Command '$c=Get-NetTCPConnection -LocalPort 3005 -State Listen -ErrorAction SilentlyContinue; if\\($c\\){ foreach\\($x in $c\\){ $p=Get-Process -Id $x.OwningProcess -ErrorAction SilentlyContinue; if\\($p\\){ Write-Host \\('\\\\''PID='\\\\''+$x.OwningProcess+'\\\\'' 进程='\\\\''+$p.Name\\) } } }')",
+      "Bash(powershell -NoProfile -Command '$c=Get-NetTCPConnection -LocalPort __TRACKED_VAR__ -State Listen -ErrorAction SilentlyContinue; if\\($c\\){ foreach\\($x in $c\\){ $p=Get-Process -Id $x.OwningProcess -ErrorAction SilentlyContinue; if\\($p\\){ Write-Host \\('\\\\''端口 __TRACKED_VAR__ 占用: PID='\\\\''+$x.OwningProcess+'\\\\'' 进程='\\\\''+$p.Name\\) } } } else { Write-Host '\\\\''端口 __TRACKED_VAR__ 空闲'\\\\'' }')",
+      "Bash(powershell -NoProfile -Command ' *)",
+      "Bash(docker exec *)",
+      "Bash(grep -vE \"Warning|^$\")",
+      "Bash(sed -n '18,30p' ai-developer/ai-workflow/src/test/java/org/springblade/aiworkflow/agent/EntityNameExtractionTest.java)",
+      "Bash(sed -n '26,33p' ai-developer/sql/init.sql)",
+      "Read(//tmp/**)",
+      "Bash(powershell -NoProfile -Command '$c=Get-NetTCPConnection -LocalPort 8111 -State Listen -ErrorAction SilentlyContinue; if\\($c\\){Write-Host \\('\\\\''PID='\\\\''+$c[0].OwningProcess\\)} else {Write-Host '\\\\''未起来'\\\\''}')",
+      "Bash(cd e:/workspace/doc4test/houduan *)",
+      "Read(//e/workspace/doc4test/houduan/**)",
+      "Bash(rm -f blade_hgsjy/blade-service-api/blade-order-api/src/main/java/org/springblade/order/pojo/entity/Order.java)",
+      "Bash(rm -rf blade_hgsjy/blade-service-api/blade-order-api/src/main/java/org/springblade/order)",
+      "Bash(rm -rf blade_hgsjy/blade-service-api/blade-order-api)",
+      "Bash(rm -rf blade_hgsjy/doc/sql/inventory)",
+      "Bash(sleep 30; cd e:/workspace/doc4test/houduan *)"
     ]
   }
 }

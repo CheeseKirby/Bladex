@@ -391,7 +391,7 @@ ${MASTER_PLAN_MD.match(/```sql\n([\s\S]*?)\n```/)?.[1] ?? ''}
 - 自定义查询用 Wrappers.<Order>lambdaQuery()`,
       reviewedContent: '',
       prerequisites: ['__SUBPLAN_1__'],
-      status: 'PENDING',
+      status: 'CONFIRMED',
     },
     {
       index: 4,
@@ -413,7 +413,7 @@ ${MASTER_PLAN_MD.match(/```sql\n([\s\S]*?)\n```/)?.[1] ?? ''}
 - 业务接口使用 @PostMapping + @RequestParam`,
       reviewedContent: '',
       prerequisites: ['__SUBPLAN_2__'],
-      status: 'PENDING',
+      status: 'CONFIRMED',
     },
     {
       index: 5,
@@ -435,7 +435,7 @@ ${MASTER_PLAN_MD.match(/```sql\n([\s\S]*?)\n```/)?.[1] ?? ''}
 - Fallback 类加 @Component`,
       reviewedContent: '',
       prerequisites: ['__SUBPLAN_3__'],
-      status: 'PENDING',
+      status: 'CONFIRMED',
     },
   ],
 };

@@ -2,9 +2,9 @@
 chcp 65001 >nul
 :: 一键启动 3 个服务(双击即可运行,不受 PowerShell 执行策略限制)
 :: 读 .env(deploy 生成)注入环境变量,各开独立窗口:
-::   ai-workflow (Part B, Java)  -> 8110
-::   ai-designer BFF (Part A)    -> 3001
-::   ai-designer 前端 (Vite)     -> 3000
+::   ai-workflow (Part B, Java)  -> 8111
+::   ai-designer BFF (Part A)    -> 3004
+::   ai-designer 前端 (Vite)     -> 3005
 :: 关闭对应窗口即停止服务。
 ::
 :: 注意: .env 中密码若含 & | < > ^ 等 cmd 特殊字符, 需用 ^ 转义(如 secret^&pass)。
@@ -36,21 +36,21 @@ echo   启动 3 个服务(各开独立窗口)
 echo ========================================
 echo.
 
-echo [1/3] 启动 ai-workflow (Part B, 端口 8110)...
-:: 启动前清理占用 8110 的旧进程(上次没正常关闭的 ai-workflow),避免端口冲突启动失败
-powershell -NoProfile -Command "$ErrorActionPreference='Continue'; $c=Get-NetTCPConnection -LocalPort 8110 -State Listen -ErrorAction SilentlyContinue; if($c){ foreach($x in $c){ $p=Get-Process -Id $x.OwningProcess -ErrorAction SilentlyContinue; if($p){ Write-Host '  [清理] 停止占用 8110 的旧进程 '$p.Name'(PID '$x.OwningProcess')'; Stop-Process -Id $x.OwningProcess -Force } }; Start-Sleep -Seconds 2 }" 2>nul
+echo [1/3] 启动 ai-workflow (Part B, 端口 8111)...
+:: 启动前清理占用 8111 的旧进程(上次没正常关闭的 ai-workflow),避免端口冲突启动失败
+powershell -NoProfile -Command "$ErrorActionPreference='Continue'; $c=Get-NetTCPConnection -LocalPort 8111 -State Listen -ErrorAction SilentlyContinue; if($c){ foreach($x in $c){ $p=Get-Process -Id $x.OwningProcess -ErrorAction SilentlyContinue; if($p){ Write-Host '  [清理] 停止占用 8111 的旧进程 '$p.Name'(PID '$x.OwningProcess')'; Stop-Process -Id $x.OwningProcess -Force } }; Start-Sleep -Seconds 2 }" 2>nul
 :: 不用 -o:别的电脑首次可能没有完整 .m2 缓存,需联网拉依赖
-start "ai-workflow (8110)" /D "%ROOT%\ai-developer" cmd /k "mvn spring-boot:run -pl ai-workflow -Dspring-boot.run.profiles=dev"
+start "ai-workflow (8111)" /D "%ROOT%\ai-developer" cmd /k "mvn spring-boot:run -pl ai-workflow -Dspring-boot.run.profiles=dev"
 
 timeout /t 3 >nul
 
-echo [2/3] 启动 ai-designer BFF (Part A, 端口 3001)...
-start "ai-designer BFF (3001)" /D "%ROOT%\ai-designer" cmd /k "npm run server"
+echo [2/3] 启动 ai-designer BFF (Part A, 端口 3004)...
+start "ai-designer BFF (3004)" /D "%ROOT%\ai-designer" cmd /k "npm run server"
 
 timeout /t 2 >nul
 
-echo [3/3] 启动 ai-designer 前端 (端口 3000)...
-start "ai-designer 前端 (3000)" /D "%ROOT%\ai-designer" cmd /k "npm run dev"
+echo [3/3] 启动 ai-designer 前端 (端口 3005)...
+start "ai-designer 前端 (3005)" /D "%ROOT%\ai-designer" cmd /k "npm run dev"
 
 echo.
 echo ========================================
@@ -58,9 +58,9 @@ echo   启动完成! 三个窗口已打开
 echo   关闭对应窗口即停止该服务
 echo ========================================
 echo.
-echo   前端页面: http://localhost:3000/
-echo   BFF API:  http://localhost:3001/
-echo   Part B:   http://localhost:8110/doc.html
+echo   前端页面: http://localhost:3005/
+echo   BFF API:  http://localhost:3004/
+echo   Part B:   http://localhost:8111/doc.html
 echo.
 echo 提示: ai-workflow 首次启动需联网拉依赖,可能要 1-2 分钟
 echo       看到 "Started AiWorkflowApplication" 才算就绪

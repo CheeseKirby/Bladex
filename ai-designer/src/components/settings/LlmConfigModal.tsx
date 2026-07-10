@@ -245,7 +245,7 @@ const LlmConfigModal: React.FC<LlmConfigModalProps> = ({ open, onClose }) => {
 
         <Divider style={{ margin: '8px 0' }} />
 
-        <Form.Item label="同时同步到 Part B (8110)" tooltip="保存时通过 BFF 转发 PUT /api/config/llm 到 Part B,让 Java 端也使用同一组配置">
+        <Form.Item label="同时同步到 Part B (8111)" tooltip="保存时通过 BFF 转发 PUT /api/config/llm 到 Part B,让 Java 端也使用同一组配置">
           <Switch checked={syncToB} onChange={setSyncToB} />
         </Form.Item>
       </Form>
@@ -253,7 +253,7 @@ const LlmConfigModal: React.FC<LlmConfigModalProps> = ({ open, onClose }) => {
       <div style={{ background: '#fafafa', padding: 10, borderRadius: 4, fontSize: 12 }}>
         <Text strong>当前状态</Text>
         <div style={{ marginTop: 6 }}>
-          <Text type="secondary">BFF (3001):</Text>{' '}
+          <Text type="secondary">BFF (3004):</Text>{' '}
           {bffStatus ? (
             <Text code>
               {bffStatus.hasAuthToken ? 'bearer' : bffStatus.hasApiKey ? 'x-api-key' : 'NONE'} | {bffStatus.model} | {bffStatus.baseUrl}
@@ -263,7 +263,7 @@ const LlmConfigModal: React.FC<LlmConfigModalProps> = ({ open, onClose }) => {
           )}
         </div>
         <div style={{ marginTop: 4 }}>
-          <Text type="secondary">Part B (8110):</Text>{' '}
+          <Text type="secondary">Part B (8111):</Text>{' '}
           {partBStatus ? (
             <Text code>
               {partBStatus.hasAuthToken ? 'bearer' : partBStatus.hasApiKey ? 'x-api-key' : 'NONE'} | {partBStatus.model} | {partBStatus.baseUrl}

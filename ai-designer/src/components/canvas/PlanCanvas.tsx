@@ -97,32 +97,14 @@ const PlanCanvas: React.FC = () => {
     return [...moduleNodes, ...subPlanNodes];
   }, [canvasModules, project, subPlans]);
 
-  // 画布连线 — 只画有真实语义的派生关系, 不在模块之间强行连线:
+  // 画布连线 — 只画有真实语义的 DAG 依赖, 不在模块间强行连线:
   // 模块是并列的"输入素材", 互相无依赖, 不连线 (避免误导用户以为有顺序约束)。
-  // 1. 总方案 → 子方案 (虚线): 子方案由总方案拆分而来, 表达派生关系
-  // 2. 子方案 → 子方案 (实线 planEdge, 蓝, 带箭头): DAG 依赖, 可选中删除
+  // 总方案 → 子方案的派生虚线已移除(无实际用途,徒增视觉噪音)。
+  // 子方案 → 子方案 (实线 planEdge, 蓝, 带箭头): DAG 依赖, 可选中删除
   const initialEdges: Edge[] = useMemo(() => {
     const edges: Edge[] = [];
-    const hasMasterPlan = Boolean(
-      project?.masterPlan && project.status !== 'DRAFT' && project.status !== 'ANALYZING'
-    );
 
-    // 1. 总方案 → 子方案 (虚线, 派生关系)
-    if (hasMasterPlan) {
-      for (const sp of subPlans) {
-        edges.push({
-          id: `link-plan2sub-${sp.id}`,
-          source: 'master-plan-node',
-          target: sp.id,
-          // deletable: false 让 Delete 键删不掉派生边; type 非 planEdge, 即使被删也不动 store
-          deletable: false,
-          style: { stroke: '#8c8c8c', strokeDasharray: '5 4' },
-          markerEnd: { type: MarkerType.ArrowClosed, color: '#8c8c8c' },
-        });
-      }
-    }
-
-    // 2. 子方案 → 子方案 (实线 planEdge, 可选中删除)
+    // 子方案 → 子方案 (实线 planEdge, 可选中删除)
     for (const sp of subPlans) {
       for (const prereqId of sp.prerequisites) {
         edges.push({

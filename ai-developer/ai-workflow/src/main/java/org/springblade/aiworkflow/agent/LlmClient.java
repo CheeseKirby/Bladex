@@ -57,12 +57,59 @@ public class LlmClient {
         return hasToken ? "bearer" : hasKey ? "x-api-key" : "NONE (LLM 调用会失败)";
     }
 
+    /** 网络重试次数(含首次),对齐 PartACallback 的 3 次退避策略 */
+    private static final int NETWORK_MAX_RETRIES = 3;
+    /** 网络重试初始退避(ms),指数退避 1s/2s/4s */
+    private static final long NETWORK_BACKOFF_MS = 1000;
+
     /**
-     * 调用LLM生成文本
+     * 调用LLM生成文本 - 对瞬时故障(5xx/IOException/超时)指数退避重试,4xx 不重试。
+     *
+     * <p>LLM 是核心依赖,此前零重试:单次网络抖动即致原子任务失败 -> 子方案 FAILED。
+     * max_tokens 减半仍由 {@link #generateWithMaxTokens} 内部递归处理。
      */
     public String generate(String systemPrompt, String userPrompt) {
+        return generateWithRetry(systemPrompt, userPrompt, config.getMaxTokens());
+    }
+
+    private String generateWithRetry(String systemPrompt, String userPrompt, int maxTokens) {
+        RuntimeException last = null;
+        for (int attempt = 1; attempt <= NETWORK_MAX_RETRIES; attempt++) {
+            try {
+                return generateWithMaxTokens(systemPrompt, userPrompt, maxTokens, true);
+            } catch (RuntimeException e) {
+                if (!isRetryable(e)) throw e;
+                last = e;
+                log.warn("LLM调用可重试异常(第{}/{}次): {}", attempt, NETWORK_MAX_RETRIES, e.getMessage());
+                if (attempt < NETWORK_MAX_RETRIES) {
+                    try {
+                        Thread.sleep(NETWORK_BACKOFF_MS * (long) Math.pow(2, attempt - 1));
+                    } catch (InterruptedException ie) {
+                        Thread.currentThread().interrupt();
+                        throw new RuntimeException("LLM调用被中断", ie);
+                    }
+                }
+            }
+        }
+        throw last;
+    }
+
+    /** 可重试判定: 网络异常(IOException cause)或 5xx;4xx(含 max_tokens 400 已减半处理)不重试 */
+    private boolean isRetryable(RuntimeException e) {
+        if (e.getCause() instanceof IOException) return true;
+        String msg = e.getMessage();
+        return msg != null && msg.contains("HTTP 5");
+    }
+
+    /**
+     * 带 max_tokens 调整的生成 — 阶段2增强兜底。
+     *
+     * <p>若首次调用因 max_tokens 过大返回 400(模型上限 < 配置值),自动减半重试一次,
+     * 避免整个生成流水线因模型 token 上限不匹配而全线失败。allowHalve=false 时不再降级(防无限递归)。
+     */
+    private String generateWithMaxTokens(String systemPrompt, String userPrompt, int maxTokens, boolean allowHalve) {
         try {
-            Map<String, Object> requestBody = buildRequestBody(systemPrompt, userPrompt, config.getMaxTokens());
+            Map<String, Object> requestBody = buildRequestBody(systemPrompt, userPrompt, maxTokens);
             String json = objectMapper.writeValueAsString(requestBody);
 
             Request.Builder builder = new Request.Builder()
@@ -82,6 +129,13 @@ public class LlmClient {
             try (Response response = httpClient.newCall(request).execute()) {
                 if (!response.isSuccessful()) {
                     String errorBody = readBodyLimited(response, 1000);
+                    // max_tokens 过大导致 400 时,自动减半重试一次(兜底模型上限不匹配)
+                    if (response.code() == 400 && allowHalve && maxTokens > 1024
+                            && errorBody != null && errorBody.toLowerCase().contains("max_tokens")) {
+                        int halved = maxTokens / 2;
+                        log.warn("LLM 调用 400 (max_tokens={} 过大?), 减半重试 max_tokens={}", maxTokens, halved);
+                        return generateWithMaxTokens(systemPrompt, userPrompt, halved, false);
+                    }
                     log.error("LLM调用失败: HTTP {} - {}", response.code(), errorBody);
                     throw new RuntimeException("LLM调用失败: HTTP " + response.code());
                 }
@@ -139,17 +193,37 @@ public class LlmClient {
     }
 
     /**
-     * 从Anthropic响应中提取文本内容
+     * 从Anthropic响应中提取文本内容。
+     *
+     * <p>content 是 block 数组,可能含多种 type:
+     * <ul>
+     *   <li>{@code text} — 实际文本输出,需提取;</li>
+     *   <li>{@code thinking} — 推理过程(GLM/Claude 偶发返回,且可能排在 text 之前),无 text 字段,需跳过;</li>
+     *   <li>其它(如 tool_use)— 非 LLM 生成代码场景,跳过。</li>
+     * </ul>
+     *
+     * <p>关键:不能只取 content[0]。火山方舟 glm-latest 会偶发返回
+     * {@code [thinking, text]} 结构,若取首位 thinking block 会得到空串,
+     * 导致下游 "LLM 响应未包含可识别的代码块 (rawPreview=)" 报错。
+     * 正确做法是遍历所有 block,拼接全部 type=text 的内容。
      */
     @SuppressWarnings("unchecked")
     private String extractTextContent(String responseBody) throws JsonProcessingException {
         Map<String, Object> response = objectMapper.readValue(responseBody, Map.class);
         List<Map<String, Object>> content = (List<Map<String, Object>>) response.get("content");
-        if (content != null && !content.isEmpty()) {
-            Map<String, Object> firstBlock = content.get(0);
-            return (String) firstBlock.getOrDefault("text", "");
+        if (content == null || content.isEmpty()) {
+            return "";
         }
-        return "";
+        StringBuilder sb = new StringBuilder();
+        for (Map<String, Object> block : content) {
+            if ("text".equals(block.get("type"))) {
+                Object text = block.get("text");
+                if (text instanceof String s && !s.isEmpty()) {
+                    sb.append(s);
+                }
+            }
+        }
+        return sb.toString();
     }
 
     /**
