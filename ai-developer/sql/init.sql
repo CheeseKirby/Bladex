@@ -18,8 +18,8 @@ CREATE TABLE IF NOT EXISTS ai_workflow_plan (
     project_name VARCHAR(200) COMMENT '项目名称',
     master_plan_content MEDIUMTEXT COMMENT '总方案内容(Markdown)',
     reception_id VARCHAR(100) UNIQUE COMMENT '接收编号',
-    status VARCHAR(20) DEFAULT 'RECEIVED'
-        COMMENT '状态: RECEIVED/EXECUTING/COMPLETED/FAILED',
+    status VARCHAR(30) DEFAULT 'RECEIVED'
+        COMMENT '状态: RECEIVED/EXECUTING/COMPLETED/COMPLETED_WITH_ERRORS/FAILED',
     source_service VARCHAR(100) COMMENT '来源服务',
     create_time DATETIME DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
     update_time DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '修改时间',
@@ -54,6 +54,10 @@ CALL add_column_if_missing('ai_workflow_plan', 'write_target',
 
 DROP PROCEDURE IF EXISTS add_column_if_missing;
 
+-- H3: status 扩到 VARCHAR(30) 容纳 COMPLETED_WITH_ERRORS(21 字符)。MODIFY 幂等,可重复执行。
+ALTER TABLE ai_workflow_plan MODIFY COLUMN status VARCHAR(30) DEFAULT 'RECEIVED' COMMENT '状态: RECEIVED/EXECUTING/COMPLETED/COMPLETED_WITH_ERRORS/FAILED';
+ALTER TABLE ai_workflow_sub_plan MODIFY COLUMN status VARCHAR(30) DEFAULT 'QUEUED' COMMENT '状态: QUEUED/EXECUTING/COMPLETED/COMPLETED_WITH_ERRORS/FAILED';
+
 -- -----------------------------------------------------------
 -- 2. 子方案执行记录
 -- -----------------------------------------------------------
@@ -65,8 +69,8 @@ CREATE TABLE IF NOT EXISTS ai_workflow_sub_plan (
     title VARCHAR(200) COMMENT '标题',
     plan_content MEDIUMTEXT COMMENT '子方案内容(Markdown)',
     prerequisites_json JSON COMMENT '前置依赖子方案ID列表',
-    status VARCHAR(20) DEFAULT 'QUEUED'
-        COMMENT '状态: QUEUED/EXECUTING/COMPLETED/FAILED',
+    status VARCHAR(30) DEFAULT 'QUEUED'
+        COMMENT '状态: QUEUED/EXECUTING/COMPLETED/COMPLETED_WITH_ERRORS/FAILED',
     error_message TEXT COMMENT '失败原因',
     git_commit_hash VARCHAR(40) COMMENT 'Git提交哈希',
     started_at DATETIME COMMENT '开始时间',
