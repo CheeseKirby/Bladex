@@ -42,9 +42,9 @@ spring:
   cloud:
     nacos:
       config:
-        namespace: blade_hgsjy        # Nacos 命名空间
+        namespace: blade         # Nacos 命名空间
       discovery:
-        namespace: blade_hgsjy        # 服务发现命名空间（通常与 config 一致）
+        namespace: blade         # 服务发现命名空间（通常与 config 一致）
   config:
     activate:
       on-profile: dev                 # 默认激活的环境

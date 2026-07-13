@@ -23,13 +23,13 @@ public class AiWorkflowProperties {
     @Valid
     private LlmProperties llm = new LlmProperties();
 
-    /** 目标BladeX项目根路径（代码写入目标） */
+    /** 生成产物写入根 + 现有项目索引根(默认隔离区 ai-generated-modules) */
     @NotBlank
-    private String targetProjectRoot = "../../blade_hgsjy";
+    private String targetProjectRoot = "../../ai-generated-modules";
 
     /**
      * 生成产物独立输出根（BladeX 多模块结构落盘点）。
-     * 默认与 target-project-root 同基准，落点为 hogan/ai-generated-modules，与 blade_hgsjy 物理隔离。
+     * 默认与 target-project-root 同基准,落点 ai-generated-modules。
      * 产物按 blade-service/blade-{module} + blade-service-api/blade-{module}-api 多模块格式组织，
      * 结构 1:1 对齐参考 BladeX 项目；独立目录内不要求可编译（缺平台 jar）。
      */
@@ -53,7 +53,7 @@ public class AiWorkflowProperties {
 
     /** Part A回调地址 */
     @NotBlank
-    private String partACallbackUrl = "http://localhost:3001/api/transmission/status-update";
+    private String partACallbackUrl = "http://localhost:3004/api/transmission/status-update";
 
     /** 管理端配置 */
     private AdminProperties admin = new AdminProperties();
@@ -74,9 +74,9 @@ public class AiWorkflowProperties {
         @NotBlank
         private volatile String baseUrl = "https://api.anthropic.com";
 
-        /** 模型名称 */
+        /** 模型名称(默认 glm-latest,火山方舟 GLM 系列代码生成模型) */
         @NotBlank
-        private volatile String model = "glm-5.1";
+        private volatile String model = "glm-latest";
 
         /** Anthropic API Key (通过环境变量 ANTHROPIC_API_KEY 注入, 使用 x-api-key 头) */
         private volatile String apiKey;
@@ -91,8 +91,8 @@ public class AiWorkflowProperties {
         @NotBlank
         private volatile String anthropicVersion = "2023-06-01";
 
-        /** 最大Token数 */
-        private volatile int maxTokens = 8192;
+        /** 最大Token数(glm-latest 上限 16384,若模型报 400 max_tokens too large 再调) */
+        private volatile int maxTokens = 16384;
 
         /** 温度参数 */
         private volatile double temperature = 0.1;

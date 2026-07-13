@@ -1,6 +1,9 @@
 # BladeX 4.1.0 业务层开发指南
 
 > 基于 BladeX 4.1.0.RELEASE 框架源码验证。适用于 Agent 后端开发参考。
+>
+> **版本适配**: 本文档示例用 Swagger v3(@Schema/@Tag/@Operation) + jakarta.*。若参考项目是旧版(Java 8 / Swagger v2 / javax.*),
+> **必须按参考项目实际版本生成**:Swagger 用 @ApiModel/@Api/@ApiOperation,注解用 javax.*。参考项目版本约束优先级高于本文档。
 
 ## 概述
 
@@ -327,6 +330,12 @@ public R remove(@Parameter(description = "主键集合", required = true)
 
 来源：`ParamController`（标准 CRUD 模板）、`BannerController`（带 IVO/UVO 变体）
 
+> **Hard Rule（B7，违反会导致 QVO 区间字段失效/死代码，生成器会告警提醒）**：
+> - `/list` 端点与 Mapper 自定义分页方法必须**二选一一致**：
+>   - 方式一：`/list` 用 `Condition.getQueryWrapper(params, Entity.class)` + `service.page(...)`，此时 Mapper**不应**定义自定义分页方法，QVO 不含区间字段。
+>   - 方式二：`/list` 用 `service.selectXxxPage(IPage, QVO)` 调用 Mapper 自定义分页，此时 QVO 的区间字段（如 `startDateStart`/`startDateEnd`）必须在 Mapper XML 生效。
+> - 禁止"Mapper 定义了 `selectXxxPage` 但 Controller `/list` 没调用它"——这会让 QVO 区间字段被忽略（死代码）。
+
 ### 使用 IVO/UVO 的端点（更严格的参数校验）
 
 ```java
@@ -353,6 +362,10 @@ public R update(@Valid @RequestBody OrderUVO orderUVO) {
 ```
 
 来源：`BannerController.save()` 和 `BannerController.update()`
+
+> **Hard Rule（B4，违反会使业务校验成死代码，生成器会告警提醒）**：
+> - Service 若定义了带业务校验的方法（如 `submit`/`checkXxx`/`validateXxx`），Controller 的 `/save`、`/update` 端点**必须调用该方法**，而非基类 `save()`/`updateById()`。否则校验逻辑成为死代码，非法数据直接落库。
+> - 示例：`ISpecialPeriodService.submit()` 含时段重叠校验，则 Controller `/save` 应调 `service.submit(wrapper.entity(ivo))`，不要调 `service.save(...)`。
 
 ### 权限控制
 

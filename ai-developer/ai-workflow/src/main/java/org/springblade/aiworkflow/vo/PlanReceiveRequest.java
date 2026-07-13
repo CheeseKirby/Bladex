@@ -30,6 +30,14 @@ public class PlanReceiveRequest {
     @Schema(description = "元数据")
     private MetadataVO metadata;
 
+    /**
+     * 写入目标 — 阶段2 控制:ISOLATED(默认,落隔离区) / REAL(落目标项目根,需鉴权+查重)。
+     * 空/非法值按 ISOLATED 处理(安全默认)。
+     */
+    @Schema(description = "写入目标: ISOLATED(隔离区,默认) / REAL(真实项目,需鉴权)",
+            defaultValue = "ISOLATED")
+    private String writeTarget;
+
     @Data
     @Schema(description = "总方案")
     public static class MasterPlanVO {

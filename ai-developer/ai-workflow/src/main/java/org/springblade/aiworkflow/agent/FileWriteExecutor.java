@@ -14,7 +14,7 @@ import java.util.*;
 /**
  * 安全文件写入执行器
  *
- * <p>三阶段写入:快照 → 写入 → 回滚(失败时)。所有文件路径相对于 target-project-root(指向 blade_hgsjy/)。
+ * <p>三阶段写入:快照 → 写入 → 回滚(失败时)。所有文件路径相对于 target-project-root(默认隔离区 ai-generated-modules)。
  *
  * <p>路径安全策略(防止路径遍历 / SSRF-on-disk):
  * <ul>
@@ -33,10 +33,9 @@ import java.util.*;
 @Slf4j
 public class FileWriteExecutor {
 
-    /** 允许写入的文件后缀(白名单)。 */
+    /** 允许写入的文件后缀(白名单)- L7: 收窄到 BladeX 后端生成所需, 避免非后端文件(html/css/vue/ts 等)落盘。 */
     private static final Set<String> ALLOWED_EXTENSIONS = Set.of(
-            "java", "sql", "xml", "yml", "yaml", "properties",
-            "md", "json", "ts", "tsx", "js", "jsx", "vue", "html", "css"
+            "java", "sql", "xml", "yml", "yaml", "properties"
     );
 
     private final String targetProjectRoot;
@@ -46,22 +45,34 @@ public class FileWriteExecutor {
     }
 
     /**
-     * 安全写入文件,支持全部回滚。
+     * 安全写入文件(默认根),支持全部回滚。委托 {@link #write(List, String)}。
      * 所有路径必须位于 target-project-root 之内,防止路径遍历攻击。
      */
     public WriteResult write(List<FileWriteTask> tasks) {
+        return write(tasks, this.targetProjectRoot);
+    }
+
+    /**
+     * 安全写入文件(指定根),支持全部回滚。阶段2 支持 per-request 切换写盘目标
+     * (ISOLATED→outputRoot / REAL→targetProjectRoot),root 作为参数传入,不改单例字段,
+     * 多 plan 并发写不同 root 互不干扰(线程安全)。
+     *
+     * <p>所有路径必须位于 rootOverride 之内,防止路径遍历攻击。rootOverride 为空则回退默认根。
+     */
+    public WriteResult write(List<FileWriteTask> tasks, String rootOverride) {
+        String rootStr = (rootOverride != null && !rootOverride.isBlank()) ? rootOverride : this.targetProjectRoot;
         // 0. 验证 rootPath 本身可访问。独立输出目录可能尚未存在，先自动创建根目录再取 realPath。
         //    路径遍历 / 符号链接逃逸的防护不变（resolve+normalize+startsWith 在下面 per-task 校验）。
         Path rootPath;
         try {
-            Path root = Paths.get(targetProjectRoot);
+            Path root = Paths.get(rootStr);
             if (!Files.exists(root, LinkOption.NOFOLLOW_LINKS)) {
                 Files.createDirectories(root);
                 log.info("已创建输出根目录: {}", root);
             }
             rootPath = root.toRealPath();
         } catch (IOException e) {
-            return WriteResult.failure("输出根目录无法创建或访问: " + targetProjectRoot + " - " + e.getMessage());
+            return WriteResult.failure("输出根目录无法创建或访问: " + rootStr + " - " + e.getMessage());
         }
 
         // 一次性把每个 task 的 "安全绝对路径" 解析出来并缓存,后续阶段全部复用,
@@ -180,7 +191,8 @@ public class FileWriteExecutor {
     }
 
     /**
-     * 目标根目录是否可访问。输出根目录不存在时自动创建，避免独立目录首次使用即被判定不可用。
+     * 默认根(隔离区 outputRoot)是否可访问。不存在时自动创建,避免独立目录首次使用即被判定不可用。
+     * 保持原有 ISOLATED 模式行为(向后兼容)。
      */
     public boolean isTargetRootAvailable() {
         if (targetProjectRoot == null || targetProjectRoot.isBlank()) return false;
@@ -189,6 +201,23 @@ public class FileWriteExecutor {
             if (!Files.exists(p, LinkOption.NOFOLLOW_LINKS)) {
                 Files.createDirectories(p);
             }
+            return Files.isDirectory(p.toRealPath());
+        } catch (IOException e) {
+            return false;
+        }
+    }
+
+    /**
+     * 指定根是否可访问。阶段2 用于判断 REAL 模式的目标项目根是否可写。
+     * 与默认根不同:真实项目根不存在时<strong>不自动创建</strong>(避免误造目标项目目录),
+     * 仅在已存在且是目录时返回 true。
+     */
+    public boolean isRootAvailable(String root) {
+        if (root == null || root.isBlank()) return false;
+        try {
+            Path p = Paths.get(root);
+            // 真实项目根不自动创建 — 必须已存在(避免误造)
+            if (!Files.exists(p, LinkOption.NOFOLLOW_LINKS)) return false;
             return Files.isDirectory(p.toRealPath());
         } catch (IOException e) {
             return false;

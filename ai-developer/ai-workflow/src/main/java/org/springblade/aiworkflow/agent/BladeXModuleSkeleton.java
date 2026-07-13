@@ -183,13 +183,14 @@ public class %s {
     private static String bootstrapYml() {
         return """
 # BladeX 启动配置 — 由代码生成器生成
+# Nacos 命名空间默认 blade(纯净 BladeX);如目标环境不同,部署时调整。
 spring:
   cloud:
     nacos:
       config:
-        namespace: blade_hgsjy
+        namespace: blade
       discovery:
-        namespace: blade_hgsjy
+        namespace: blade
   config:
     activate:
       on-profile: dev

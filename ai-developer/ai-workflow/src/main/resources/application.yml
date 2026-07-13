@@ -1,5 +1,5 @@
 server:
-  port: 8110
+  port: 8111
   # 优雅停机,给进行中的工作流一些时间收尾
   shutdown: graceful
 
@@ -8,7 +8,7 @@ spring:
     name: ai-workflow
   datasource:
     driver-class-name: com.mysql.cj.jdbc.Driver
-    url: "jdbc:mysql://${DB_HOST:127.0.0.1}:${DB_PORT:3306}/ai_workflow?useUnicode=true&characterEncoding=UTF-8&serverTimezone=Asia/Shanghai"
+    url: "jdbc:mysql://${DB_HOST:127.0.0.1}:${DB_PORT:3307}/ai_workflow?useUnicode=true&characterEncoding=UTF-8&serverTimezone=Asia/Shanghai"
     username: ${DB_USERNAME:root}
     password: ${DB_PASSWORD:root}
     hikari:
@@ -42,23 +42,25 @@ ai-workflow:
     provider: anthropic
     # API Base URL - 默认 Anthropic 官方,可指向 ccswitch/代理网关
     base-url: ${ANTHROPIC_BASE_URL:https://api.anthropic.com}
-    model: ${LLM_MODEL:glm-5.1}
+    model: ${LLM_MODEL:glm-latest}
     # 两种鉴权择一: AUTH_TOKEN(Bearer) 优先, API_KEY(x-api-key) 次之
     api-key: ${ANTHROPIC_API_KEY:}
     auth-token: ${ANTHROPIC_AUTH_TOKEN:}
-    anthropic-version: ${ANTHROPIC_VERSION:2023-06-01}
-    max-tokens: 8192
+    # anthropic-version 不在配置暴露,代码默认 2023-06-01(AiWorkflowProperties.anthropicVersion)
+    max-tokens: 16384
     temperature: 0.1
-  # 目标 BladeX 项目根路径（代码写入目标），通过环境变量覆盖
-  target-project-root: ${TARGET_PROJECT_ROOT:../../blade_hgsjy}
-  # 生成产物独立输出根（BladeX 多模块结构落盘点），与 blade_hgsjy 物理隔离
+  # 现有 BladeX 项目根 — ExistingProjectIndex 扫描根(阶段1) + REAL 模式写入根(阶段2)。
+  # 默认 ai-generated-modules(隔离区)。REAL 模式才写这里,ISOLATED 模式写 output-root。
+  # 与 AiWorkflowProperties 字段默认值保持一致,避免未配环境变量时误指真实参考项目。
+  target-project-root: ${TARGET_PROJECT_ROOT:../../ai-generated-modules}
+  # 生成产物独立输出根(ISOLATED 模式落盘点,BladeX 多模块结构)
   output-root: ${AI_WORKFLOW_OUTPUT_ROOT:../../ai-generated-modules}
   # BladeX 规范文档路径（默认从 classpath 加载内置规范文档,可通过环境变量切换到本地文件系统）
   convention-docs-path: ${CONVENTION_DOCS_PATH:classpath:bladex-docs/}
   max-review-retries: 3
   auto-commit: false
   # Part A 回调地址
-  part-a-callback-url: ${PART_A_CALLBACK_URL:http://localhost:3001/api/transmission/status-update}
+  part-a-callback-url: ${PART_A_CALLBACK_URL:http://localhost:3004/api/transmission/status-update}
   admin:
     # 管理端 token: /api/config 等写入端点要求 X-Admin-Token 头与之匹配。
     # 未配置时,写入端点只接受 127.0.0.1 / ::1 的请求。

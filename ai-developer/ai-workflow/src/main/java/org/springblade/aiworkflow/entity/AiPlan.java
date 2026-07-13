@@ -47,6 +47,13 @@ public class AiPlan implements Serializable {
     @Schema(description = "来源服务")
     private String sourceService;
 
+    /**
+     * 写入目标 — 阶段2:ISOLATED(落隔离区) / REAL(落目标项目根)。
+     * 空/非法按 ISOLATED。决定 executeSubPlan 的写盘 root 与是否查重。
+     */
+    @Schema(description = "写入目标: ISOLATED / REAL")
+    private String writeTarget;
+
     @Schema(description = "创建时间")
     private LocalDateTime createTime;
 

@@ -113,8 +113,8 @@ public class ConventionValidator {
     private static final Pattern IMPORT_PLATFORM_CACHE = Pattern.compile(
             "import\\s+org\\.springblade\\.system\\.cache\\.(\\w+Cache)\\s*;");
 
-    /** BladeX 平台真实存在的 system.cache 类（白名单，其余均为幻觉） */
-    private static final java.util.Set<String> KNOWN_PLATFORM_CACHES = java.util.Set.of(
+    /** BladeX 平台真实存在的 system.cache 类（白名单，其余均为幻觉）。M10: public 供 CrossFileValidator 复用,避免两份漂移。 */
+    public static final java.util.Set<String> KNOWN_PLATFORM_CACHES = java.util.Set.of(
             "DictCache", "DictBizCache", "ParamCache", "RegionCache",
             "SysCache", "UserCache", "ApiScopeCache", "DataScopeCache");
 
@@ -313,14 +313,30 @@ public class ConventionValidator {
     private void checkPlatformCacheHallucination(String code,
                                                    List<ValidationResult.ValidationIssue> issues) {
         if (code == null) return;
+        java.util.Set<String> reported = new java.util.HashSet<>();
+        // 1. 检 import: import org.springblade.system.cache.XxxCache;
         java.util.regex.Matcher m = IMPORT_PLATFORM_CACHE.matcher(code);
         while (m.find()) {
             String cacheClass = m.group(1);
-            if (!KNOWN_PLATFORM_CACHES.contains(cacheClass)) {
+            if (!KNOWN_PLATFORM_CACHES.contains(cacheClass) && reported.add(cacheClass)) {
                 issues.add(ValidationResult.ValidationIssue.error("GEN-PLATFORM-CACHE",
                         "禁止臆造平台 Cache 类: " + cacheClass
                                 + " 不存在于 org.springblade.system.cache（BladeX 无 DeptCache 等）。"
                                 + "翻译字段请改用白名单内的类或留 TODO，移除该 import。"));
+            }
+        }
+        // 2. M10: 检全限定用法(代码内 org.springblade.system.cache.XxxCache.xxx(), 不 import)
+        //    LLM 可能不 import 而直接全限定调用, 仅检 import 会漏。reported 去重避免与 import 重复报。
+        java.util.regex.Matcher fqm = java.util.regex.Pattern
+                .compile("org\\.springblade\\.system\\.cache\\.(\\w+Cache)")
+                .matcher(code);
+        while (fqm.find()) {
+            String cacheClass = fqm.group(1);
+            if (!KNOWN_PLATFORM_CACHES.contains(cacheClass) && reported.add(cacheClass)) {
+                issues.add(ValidationResult.ValidationIssue.error("GEN-PLATFORM-CACHE",
+                        "禁止臆造平台 Cache 类: " + cacheClass
+                                + " 不存在于 org.springblade.system.cache（全限定用法）。"
+                                + "翻译字段请改用白名单内的类或留 TODO。"));
             }
         }
     }

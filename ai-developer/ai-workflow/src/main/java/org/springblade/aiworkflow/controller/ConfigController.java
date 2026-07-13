@@ -114,7 +114,7 @@ public class ConfigController {
      * - 禁止 169.254.x.x (云元数据)、127.x、10.x、172.16-31.x、192.168.x、::1、fe80::
      *   开发期 host = "localhost" / "host.docker.internal" 例外放行
      */
-    static boolean isAllowedBaseUrl(String url) {
+    public static boolean isAllowedBaseUrl(String url) {
         URL u;
         try {
             u = new URL(url);
@@ -186,6 +186,11 @@ public class ConfigController {
             if (this.adminToken.isEmpty()) {
                 log.warn("ai-workflow.admin.token 未配置 — /api/config 的写入端点将只接受本地回环请求");
             }
+        }
+
+        /** admin token 是否已配置(REAL 模式等高危写操作要求必须配置,未配置时即使本地回环也拒绝) */
+        public boolean isTokenConfigured() {
+            return !adminToken.isEmpty();
         }
 
         public void requireAdmin(HttpServletRequest req) {
