@@ -1,7 +1,0 @@
-{
-  "permissions": {
-    "allow": [
-      "Bash(grep -v \"/src/main/java/org/springblade/product/\\\\|/src/main/java/org/springblade/employee/\")"
-    ]
-  }
-}
