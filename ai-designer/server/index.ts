@@ -7,10 +7,10 @@
  * 3. Part B 传输代理
  * 4. 运行时配置 (LLM url/token/model)
  *
- * 端口：3001（开发环境）
+ * 端口：3004（开发环境；默认值，可由 .env 的 PORT 覆盖）
  *
  * 安全:
- * - CORS 默认仅允许 FRONTEND_ORIGIN(默认 http://localhost:3000),禁止任意来源
+ * - CORS 默认仅允许 FRONTEND_ORIGIN(默认 http://localhost:3005),禁止任意来源
  * - 写入类端点(PUT/POST /api/config/llm)要求 X-Admin-Token 与 BFF_ADMIN_TOKEN 匹配,
  *   未设置 token 时只接受本地回环(127.0.0.1)
  */
@@ -24,11 +24,11 @@ import { configRouter } from './routes/config';
 import { isLlmConfigured } from './config/llmConfig';
 
 const app = express();
-const PORT = process.env.PORT || 3001;
+const PORT = process.env.PORT || 3004;
 
 // 允许的前端源 — 默认 Vite dev server。生产请通过 FRONTEND_ORIGIN 设置具体域名。
 // 用逗号分隔可以指定多个源。
-const ALLOWED_ORIGINS = (process.env.FRONTEND_ORIGIN || 'http://localhost:3000')
+const ALLOWED_ORIGINS = (process.env.FRONTEND_ORIGIN || 'http://localhost:3005')
   .split(',')
   .map((s) => s.trim())
   .filter(Boolean);
@@ -71,7 +71,7 @@ app.get('/', (_req, res) => {
     .json({
       service: 'ai-designer-bff',
       port: PORT,
-      frontend: ALLOWED_ORIGINS[0] || 'http://localhost:3000',
+      frontend: ALLOWED_ORIGINS[0] || 'http://localhost:3005',
       endpoints: ['/api/llm', '/api/plans', '/api/transmission', '/api/config', '/api/health'],
     });
 });

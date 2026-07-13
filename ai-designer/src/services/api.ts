@@ -4,10 +4,10 @@ import type { SSEMessage, Project } from '../types/plan';
 
 const api = axios.create({
   baseURL: '/api',
-  timeout: 120000,
+  timeout: 240000, // 全局 4 分钟(大项目生成/拆分等较慢)
 });
 
-const SSE_TIMEOUT_MS = 180_000; // 3 分钟无任何 chunk 视为挂死
+const SSE_TIMEOUT_MS = 360_000; // 6 分钟无任何 chunk 视为挂死(大方案流式生成较慢)
 
 // === LLM 相关 API ===
 
@@ -117,9 +117,9 @@ export async function generatePlanStream(
   return { abort: () => { cleanup(); controller.abort(); } };
 }
 
-/** 审查方案（非流式） */
+/** 审查方案（非流式） - 审查大方案 LLM 可能较慢,单独设 5 分钟超时 */
 export async function reviewPlan(planContent: string, stage: 'master' | 'subplan') {
-  const res = await api.post('/llm/review-plan', { planContent, stage });
+  const res = await api.post('/llm/review-plan', { planContent, stage }, { timeout: 300000 });
   return res.data;
 }
 

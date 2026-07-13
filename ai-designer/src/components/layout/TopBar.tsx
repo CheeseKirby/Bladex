@@ -7,10 +7,12 @@ import {
   PlusOutlined,
   RocketOutlined,
   ThunderboltFilled,
+  FolderOpenOutlined,
 } from '@ant-design/icons';
 import { usePlanStore } from '../../store/planStore';
 import { ORDER_MANAGEMENT_DEMO } from '../../demo/orderManagement';
 import LlmConfigModal from '../settings/LlmConfigModal';
+import ReferenceProjectModal from '../settings/ReferenceProjectModal';
 
 const { Header } = Layout;
 const { Text } = Typography;
@@ -33,6 +35,7 @@ const TopBar: React.FC<TopBarProps> = ({ onNewProject, onSave, onExport }) => {
   };
 
   const [llmModalOpen, setLlmModalOpen] = useState(false);
+  const [refModalOpen, setRefModalOpen] = useState(false);
 
   const statusLabel: Record<string, { text: string; color: string }> = {
     DRAFT: { text: '草稿', color: 'default' },
@@ -113,6 +116,11 @@ const TopBar: React.FC<TopBarProps> = ({ onNewProject, onSave, onExport }) => {
         <Button icon={<PlusOutlined />} size="small" onClick={onNewProject}>
           新建
         </Button>
+        <Tooltip title="设置参考项目(REAL 模式生成时参考现有代码风格)">
+          <Button icon={<FolderOpenOutlined />} size="small" onClick={() => setRefModalOpen(true)}>
+            参考项目
+          </Button>
+        </Tooltip>
         <Button icon={<SaveOutlined />} size="small" onClick={onSave} disabled={!project}>
           保存
         </Button>
@@ -126,6 +134,7 @@ const TopBar: React.FC<TopBarProps> = ({ onNewProject, onSave, onExport }) => {
         </Tooltip>
       </Space>
       <LlmConfigModal open={llmModalOpen} onClose={() => setLlmModalOpen(false)} />
+      <ReferenceProjectModal open={refModalOpen} onClose={() => setRefModalOpen(false)} />
     </Header>
   );
 };

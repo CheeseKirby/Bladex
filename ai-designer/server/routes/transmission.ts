@@ -2,7 +2,7 @@
  * Part B 传输代理路由
  *
  * 当 PART_B_URL 未设置且 BFF_MOCK_PART_B=true 时使用 Mock 响应,便于离开 Part B 单独开发 Part A。
- * 否则透传到真实 Part B(默认 http://localhost:8110)。
+ * 否则透传到真实 Part B(默认 http://localhost:8111)。
  *
  * 所有透传调用都带 10s 超时,避免上游慢响应拖死 BFF。
  */
@@ -11,16 +11,18 @@ import { Router, Request, Response } from 'express';
 
 export const transmissionRouter = Router();
 
-const PART_B_URL = process.env.PART_B_URL || 'http://localhost:8110';
+const PART_B_URL = process.env.PART_B_URL || 'http://localhost:8111';
 const USE_MOCK = process.env.BFF_MOCK_PART_B === 'true';
-const PROXY_TIMEOUT_MS = 10_000;
+const PROXY_TIMEOUT_MS = 20_000;
 // 远程文件/时间线拉取允许更长一些(包含 LLM 响应时间)
-const LONG_PROXY_TIMEOUT_MS = 30_000;
+const LONG_PROXY_TIMEOUT_MS = 60_000;
 
 interface FetchOpts {
   method?: string;
   body?: unknown;
   timeoutMs?: number;
+  /** 透传给 Part B 的额外请求头(如 REAL 模式的 X-Admin-Token) */
+  extraHeaders?: Record<string, string>;
 }
 
 function errorMessage(e: unknown): string {
@@ -38,9 +40,10 @@ async function proxy<T>(path: string, opts: FetchOpts = {}): Promise<{ ok: true;
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), opts.timeoutMs ?? PROXY_TIMEOUT_MS);
   try {
+    const headers: Record<string, string> = { 'Content-Type': 'application/json', ...(opts.extraHeaders ?? {}) };
     const init: RequestInit = {
       method: opts.method ?? 'GET',
-      headers: { 'Content-Type': 'application/json' },
+      headers,
       signal: controller.signal,
     };
     if (opts.body !== undefined) init.body = JSON.stringify(opts.body);
@@ -80,10 +83,20 @@ transmissionRouter.post('/send', async (req: Request, res: Response) => {
   }
 
   // 真实调用 Part B
+  // 阶段2: writeTarget=REAL(写真实 blade_hgsjy)需带 X-Admin-Token,Part B 会校验
+  const writeTarget = (planData && typeof planData === 'object' && 'writeTarget' in planData)
+    ? String((planData as { writeTarget: unknown }).writeTarget)
+    : '';
+  const extraHeaders: Record<string, string> = {};
+  if (writeTarget.toUpperCase() === 'REAL') {
+    const adminToken = process.env.AI_WORKFLOW_ADMIN_TOKEN || '';
+    if (adminToken) extraHeaders['X-Admin-Token'] = adminToken;
+  }
   const result = await proxy<unknown>('/api/plans/receive', {
     method: 'POST',
     body: planData,
     timeoutMs: LONG_PROXY_TIMEOUT_MS,
+    extraHeaders,
   });
   if (!result.ok) {
     res.status(502).json({ code: 502, success: false, msg: result.msg });
@@ -168,6 +181,52 @@ transmissionRouter.get('/file/:fileId', async (req: Request, res: Response) => {
 transmissionRouter.get('/timeline/:receptionId', async (req: Request, res: Response) => {
   const { receptionId } = req.params;
   const result = await proxy<unknown>(`/api/plans/${encodeURIComponent(receptionId)}/timeline`);
+  if (!result.ok) {
+    res.status(502).json({ success: false, msg: result.msg });
+    return;
+  }
+  res.json(result.data);
+});
+
+// ─── 阶段2增强:参考项目(REAL 模式生成时参考现有代码风格)───
+
+/** 设置参考项目路径并扫描(需 Part B 鉴权) */
+transmissionRouter.post('/reference', async (req: Request, res: Response) => {
+  const adminToken = process.env.AI_WORKFLOW_ADMIN_TOKEN || '';
+  const extraHeaders: Record<string, string> = {};
+  if (adminToken) extraHeaders['X-Admin-Token'] = adminToken;
+  const result = await proxy<unknown>('/api/project/reference', {
+    method: 'POST',
+    body: req.body,
+    timeoutMs: 60_000, // 扫描大项目可能耗时
+    extraHeaders,
+  });
+  if (!result.ok) {
+    res.status(502).json({ success: false, msg: result.msg });
+    return;
+  }
+  res.json(result.data);
+});
+
+/** 查询参考项目状态(只读,无鉴权) */
+transmissionRouter.get('/reference', async (_req: Request, res: Response) => {
+  const result = await proxy<unknown>('/api/project/reference');
+  if (!result.ok) {
+    res.status(502).json({ success: false, msg: result.msg });
+    return;
+  }
+  res.json(result.data);
+});
+
+/** 浏览本机目录(选参考项目路径,需鉴权 — 转发带 X-Admin-Token) */
+transmissionRouter.get('/browse', async (req: Request, res: Response) => {
+  const adminToken = process.env.AI_WORKFLOW_ADMIN_TOKEN || '';
+  const extraHeaders: Record<string, string> = {};
+  if (adminToken) extraHeaders['X-Admin-Token'] = adminToken;
+  // 透传 path 查询参数
+  const path = (req.query.path as string) || '';
+  const qs = path ? `?path=${encodeURIComponent(path)}` : '';
+  const result = await proxy<unknown>(`/api/project/browse${qs}`, { extraHeaders });
   if (!result.ok) {
     res.status(502).json({ success: false, msg: result.msg });
     return;

@@ -3,7 +3,7 @@
  *
  * - GET  /api/config/llm  → 返回脱敏的当前 LLM 配置(无需鉴权)
  * - PUT  /api/config/llm  → 更新配置(需要 X-Admin-Token,或来源为本地回环)
- * - POST /api/config/llm/sync-to-partb → 同步到 Part B (转发 PUT 到 8110,带 X-Admin-Token)
+ * - POST /api/config/llm/sync-to-partb → 同步到 Part B (转发 PUT 到 8111,带 X-Admin-Token)
  */
 
 import { Router, Request, Response, NextFunction } from 'express';
@@ -88,7 +88,7 @@ configRouter.put('/llm', requireAdmin, (req: Request, res: Response) => {
 
 /** 把当前配置同步到 Part B */
 configRouter.post('/llm/sync-to-partb', requireAdmin, async (_req: Request, res: Response) => {
-  const partBUrl = process.env.PART_B_URL || 'http://localhost:8110';
+  const partBUrl = process.env.PART_B_URL || 'http://localhost:8111';
   const cfg = getLlmConfig();
 
   try {

@@ -26,6 +26,34 @@ CREATE TABLE IF NOT EXISTS ai_workflow_plan (
     is_deleted INT DEFAULT 0 COMMENT '逻辑删除'
 ) COMMENT 'AI工作流-接收的方案';
 
+-- 阶段2: 写入目标列(幂等: 已存在则跳过, init.sql 可重复执行)
+-- MySQL 8.0 的 ALTER TABLE ... ADD COLUMN 不支持 IF NOT EXISTS(MariaDB 才有),
+-- 用 INFORMATION_SCHEMA 判断列是否存在,避免重复执行报错。
+DROP PROCEDURE IF EXISTS add_column_if_missing;
+DELIMITER $$
+CREATE PROCEDURE add_column_if_missing(
+    IN tbl VARCHAR(64),
+    IN col VARCHAR(64),
+    IN col_def VARCHAR(500)
+)
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS
+        WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = tbl AND COLUMN_NAME = col
+    ) THEN
+        SET @sql = CONCAT('ALTER TABLE `', tbl, '` ADD COLUMN `', col, '` ', col_def);
+        PREPARE stmt FROM @sql;
+        EXECUTE stmt;
+        DEALLOCATE PREPARE stmt;
+    END IF;
+END$$
+DELIMITER ;
+
+CALL add_column_if_missing('ai_workflow_plan', 'write_target',
+    "VARCHAR(10) NOT NULL DEFAULT 'ISOLATED' COMMENT '写入目标: ISOLATED(隔离区) / REAL(真实项目)'");
+
+DROP PROCEDURE IF EXISTS add_column_if_missing;
+
 -- -----------------------------------------------------------
 -- 2. 子方案执行记录
 -- -----------------------------------------------------------

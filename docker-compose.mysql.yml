@@ -1,0 +1,14 @@
+﻿services:
+  ai-workflow-mysql:
+    image: mysql:8.0
+    container_name: ai-workflow-mysql
+    environment:
+      MYSQL_ROOT_PASSWORD: 123456
+      MYSQL_DATABASE: ai_workflow
+    ports:
+      - "3307:3306"
+    volumes:
+      - ai-workflow-mysql-data:/var/lib/mysql
+    command: --character-set-server=utf8mb4 --collation-server=utf8mb4_unicode_ci
+volumes:
+  ai-workflow-mysql-data:

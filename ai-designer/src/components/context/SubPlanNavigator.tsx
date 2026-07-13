@@ -1,5 +1,5 @@
 import React, { useEffect, useRef } from 'react';
-import { Tree, Tag, Empty, Typography, Button, Space, Popconfirm, Alert, message } from 'antd';
+import { Tree, Tag, Empty, Typography, Button, Space, Popconfirm, Alert, message, Switch, Tooltip } from 'antd';
 import { DeleteOutlined } from '@ant-design/icons';
 import type { DataNode } from 'antd/es/tree';
 import { usePlanStore } from '../../store/planStore';
@@ -42,6 +42,8 @@ const SubPlanNavigator: React.FC<SubPlanNavigatorProps> = ({ onSwitchTab }) => {
   const partBStatuses = usePlanStore((s) => s.partBStatuses);
   const partBOverallStatus = usePlanStore((s) => s.partBOverallStatus);
   const generatedFilesCount = usePlanStore((s) => s.generatedFiles.length);
+  const writeTarget = usePlanStore((s) => s.writeTarget);
+  const setWriteTarget = usePlanStore((s) => s.setWriteTarget);
   const { startPolling, stopPolling } = usePartBStatusPoll();
 
   // 进入终态时给用户一次性提示
@@ -158,6 +160,7 @@ const SubPlanNavigator: React.FC<SubPlanNavigatorProps> = ({ onSwitchTab }) => {
           generatedBy: 'claude',
           transmittedAt: new Date().toISOString(),
         },
+        writeTarget,
       });
 
       if (result.success && result.data?.receptionId) {
@@ -219,6 +222,16 @@ const SubPlanNavigator: React.FC<SubPlanNavigatorProps> = ({ onSwitchTab }) => {
           >
             🚀 传输到 Part B
           </Button>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: 6, padding: '0 2px' }}>
+            <Tooltip title="开启后,生成的代码直接写入真实 blade_hgsjy 项目(需 Part B 配置 X-Admin-Token,且自动查重,冲突即拒绝)。默认关闭,落隔离区。">
+              <span style={{ fontSize: 11 }}>写入真实项目</span>
+            </Tooltip>
+            <Switch
+              size="small"
+              checked={writeTarget === 'REAL'}
+              onChange={(checked) => setWriteTarget(checked ? 'REAL' : 'ISOLATED')}
+            />
+          </div>
         </div>
       )}
       {receptionId && (
