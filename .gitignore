@@ -49,3 +49,6 @@ logs/
 Thumbs.db
 Desktop.ini
 .DS_Store
+
+# ─── Claude Code 本地配置(不提交)─────────────────────
+.claude/

@@ -51,12 +51,15 @@ public class BladeXCodeAgent {
     /** 阶段2: 配置(取 targetProjectRoot/outputRoot 决定写盘 root) */
     private final AiWorkflowProperties properties;
     /** 阶段2: 已有项目索引(REAL 模式查重用) */
-    private final ExistingProjectIndex existingProjectIndex;
+    private final ConflictDetector conflictDetector;
     /** 阶段2增强: 参考项目索引(REAL 模式生成时参考现有风格) */
     private final ReferenceProjectIndex referenceProjectIndex;
 
     /** 跨文件契约校验器 — 无状态工具, 直接持有实例 */
     private final CrossFileValidator crossFileValidator = new CrossFileValidator();
+
+    /** 拓扑排序器(H8 拆出)- 子方案 DAG 排序 + 依赖解析 */
+    private final TopologySorter topologySorter;
 
     public BladeXCodeAgent(AiPlanMapper planMapper, AiSubPlanMapper subPlanMapper,
                            AiExecutionLogMapper executionLogMapper,
@@ -70,8 +73,9 @@ public class BladeXCodeAgent {
                            int maxReviewRetries, boolean autoCommit,
                            Consumer<StatusUpdateRequest> callbackNotifier,
                            AiWorkflowProperties properties,
-                           ExistingProjectIndex existingProjectIndex,
-                           ReferenceProjectIndex referenceProjectIndex) {
+                           ConflictDetector conflictDetector,
+                           ReferenceProjectIndex referenceProjectIndex,
+                           TopologySorter topologySorter) {
         this.planMapper = planMapper;
         this.subPlanMapper = subPlanMapper;
         this.executionLogMapper = executionLogMapper;
@@ -86,8 +90,9 @@ public class BladeXCodeAgent {
         this.autoCommit = autoCommit;
         this.callbackNotifier = callbackNotifier;
         this.properties = properties;
-        this.existingProjectIndex = existingProjectIndex;
+        this.conflictDetector = conflictDetector;
         this.referenceProjectIndex = referenceProjectIndex;
+        this.topologySorter = topologySorter;
     }
 
     /**
@@ -117,7 +122,7 @@ public class BladeXCodeAgent {
         log.info("加载方案完成: planId={}, subPlanCount={}", plan.getId(), subPlans.size());
 
         // 2. 构建DAG并验证无环
-        List<AiSubPlan> executionOrder = buildExecutionOrder(subPlans);
+        List<AiSubPlan> executionOrder = topologySorter.buildExecutionOrder(subPlans);
         if (executionOrder == null) {
             log.error("子方案依赖关系中存在循环");
             plan.setStatus(PlanStatus.FAILED);
@@ -130,10 +135,10 @@ public class BladeXCodeAgent {
         //    无依赖关系的并列子方案继续执行,让 Part A 拿到尽可能多的部分结果。
         boolean allSuccess = true;
         Set<Long> failedIds = new HashSet<>();
-        Map<Long, List<String>> reverseDeps = buildReverseDependencies(executionOrder);
+        Map<Long, List<String>> reverseDeps = topologySorter.buildReverseDependencies(executionOrder);
         for (AiSubPlan subPlan : executionOrder) {
             // 判断当前子方案是否依赖某个已失败的子方案 -> 直接 SKIPPED
-            if (dependsOnFailed(subPlan, failedIds)) {
+            if (topologySorter.dependsOnFailed(subPlan, failedIds)) {
                 subPlan.setStatus(SubPlanStatus.SKIPPED);
                 subPlan.setErrorMessage("前置依赖失败,跳过执行");
                 subPlan.setCompletedAt(LocalDateTime.now());
@@ -394,7 +399,7 @@ public class BladeXCodeAgent {
 
         // REAL 模式: 写盘前查重 — 类名/表名冲突即拒绝(不覆盖现有代码)
         if (writeTarget.isReal()) {
-            String conflict = detectNameConflicts(allGeneratedFiles);
+            String conflict = conflictDetector.detectNameConflicts(allGeneratedFiles);
             if (conflict != null) {
                 log.warn("REAL 模式查重冲突,拒绝写盘: {}", conflict);
                 logExecution(subPlan.getId(), "FILE_WRITE", "", "SKIPPED",
@@ -477,38 +482,64 @@ public class BladeXCodeAgent {
     private void retryCrossFileContractMismatches(AiSubPlan subPlan,
                                                    List<GeneratedFile> allFiles,
                                                    Map<String, AtomicTask> taskByPath) {
-        // 可修复规则: 以 IService 接口为契约源头重生成实现类(Controller / ServiceImpl)
+        // M9: 子方案级跨文件契约修复, 以 IService 为契约源头重生成实现类(Controller/ServiceImpl)。
+        // 不写回(只内存 replaceFile); 写盘在 executeSubPlan 主流程统一做。
         Set<String> FIXABLE_RULES = Set.of(
-                "CROSS-CONTROLLER-SERVICE-MISMATCH",
-                "CROSS-SERVICE-IMPL-IFACE-MISMATCH");
+                "CROSS-CONTROLLER-SERVICE-MISMATCH", "CROSS-SERVICE-IMPL-IFACE-MISMATCH");
+        runRepairLoop(allFiles, FIXABLE_RULES,
+                (src, contract, task, desc) -> codeGenRouter.fixWithCrossFileContext(src, contract, task, desc),
+                taskByPath::get,
+                subPlan.getId(), "CROSS_FILE_FIX", "跨文件契约",
+                null, null);
+    }
 
+    /**
+     * M9: 三个 retry* 的共同修复循环骨架。参数化差异(规则集/fixer/task 解析/写回/subPlanId/日志)。
+     *
+     * <p>骨架: 循环 maxReviewRetries -> validate -> 过滤 isError&&规则集 -> 空则完成 -> 达上限失败 ->
+     * 按 sourceFilePath 分组 -> findFileByPath(source+contract) + taskResolver -> fixer 修复 ->
+     * passesConventionAfterFix + replaceFile + writeBack(可选) + logExecution。
+     *
+     * @param files        待校验文件(会被 replaceFile 修改)
+     * @param rules        可修复规则集
+     * @param fixer        修复函数(sourceFile, contractCode, task, desc) -> GenerationResult
+     * @param taskResolver 从 sourcePath 解析 task(返回 null 则跳过该 source)
+     * @param subPlanId    日志用(子方案级=subPlan.getId(); plan 级=null)
+     * @param stage        日志 stage("CROSS_FILE_FIX"/"PLAN_CROSS_FIX")
+     * @param label        日志标签("跨文件契约"/"Entity↔DDL"/"VO↔Entity")
+     * @param writeBack    写回函数(plan 级: persistSingleFile+updateDB; 子方案级: null-只内存 replaceFile)
+     * @param plan         writeBack 用(plan 级; 子方案级 null)
+     */
+    private void runRepairLoop(List<GeneratedFile> files, Set<String> rules,
+                                RepairFixer fixer, java.util.function.Function<String, AtomicTask> taskResolver,
+                                Long subPlanId, String stage, String label,
+                                java.util.function.BiConsumer<AiPlan, GeneratedFile> writeBack, AiPlan plan) {
         for (int attempt = 0; attempt <= maxReviewRetries; attempt++) {
-            List<CrossFileValidator.ContractIssue> issues = crossFileValidator.validate(allFiles);
+            List<CrossFileValidator.ContractIssue> issues = crossFileValidator.validate(files);
             List<CrossFileValidator.ContractIssue> fixable = issues.stream()
-                    .filter(i -> i.isError() && FIXABLE_RULES.contains(i.rule))
+                    .filter(i -> i.isError() && rules.contains(i.rule))
                     .toList();
             if (fixable.isEmpty()) {
                 if (attempt > 0) {
-                    log.info("跨文件契约修复完成: 第 {} 次重试后无可修复 ERROR", attempt);
-                    logExecution(subPlan.getId(), "CROSS_FILE_FIX", "",
-                            "SUCCESS", "跨文件契约修复完成 (" + attempt + " 次重试)", null);
+                    log.info("{} 修复完成: 第 {} 次重试后无 ERROR", label, attempt);
+                    logExecution(subPlanId, stage, "", "SUCCESS",
+                            label + " 修复完成 (" + attempt + " 次重试)", null);
                 }
                 return;
             }
             if (attempt == maxReviewRetries) {
-                String summary = "跨文件契约不一致, 已达最大重试次数 (" + (maxReviewRetries + 1)
+                String summary = label + " 不一致, 已达最大重试次数 (" + (maxReviewRetries + 1)
                         + ") 仍未修复: " + fixable.size() + " 项; "
                         + fixable.stream().map(Object::toString).limit(5)
                                 .reduce((a, b) -> a + " | " + b).orElse("");
                 log.warn(summary);
-                logExecution(subPlan.getId(), "CROSS_FILE_FIX", "", "FAILED", summary, null);
+                logExecution(subPlanId, stage, "", "FAILED", summary, null);
                 return;
             }
-            log.info("跨文件契约不一致 (第 {}/{} 次重试): {} 项",
-                    attempt + 1, maxReviewRetries + 1, fixable.size());
+            log.info("{} 不一致 (第 {}/{} 次重试): {} 项",
+                    label, attempt + 1, maxReviewRetries + 1, fixable.size());
 
-            // 按"需重生成的文件(sourceFilePath)"分组: 同一文件的多个问题合并为一次重生成,
-            // 避免逐个修又把前一个修好的改回去。
+            // 按"需重生成的文件(sourceFilePath)"分组: 同一文件多个问题合并为一次重生成
             Map<String, List<CrossFileValidator.ContractIssue>> bySource = new LinkedHashMap<>();
             for (CrossFileValidator.ContractIssue err : fixable) {
                 bySource.computeIfAbsent(err.sourceFilePath, k -> new ArrayList<>()).add(err);
@@ -516,33 +547,56 @@ public class BladeXCodeAgent {
             for (Map.Entry<String, List<CrossFileValidator.ContractIssue>> entry : bySource.entrySet()) {
                 String sourcePath = entry.getKey();
                 List<CrossFileValidator.ContractIssue> errs = entry.getValue();
-                GeneratedFile sourceFile = findFileByPath(allFiles, sourcePath);
-                // 契约对端: IService 接口(两类规则的 contractFilePath 都指向它)
-                GeneratedFile contractFile = findFileByPath(allFiles, errs.get(0).contractFilePath);
-                AtomicTask task = taskByPath.get(sourcePath);
-                if (sourceFile == null || contractFile == null || task == null) {
-                    log.warn("跨文件修复跳过: 无法定位文件 (source={}, contract={}, hasTask={})",
-                            sourcePath, errs.get(0).contractFilePath, task != null);
+                GeneratedFile sourceFile = findFileByPath(files, sourcePath);
+                GeneratedFile contractFile = findFileByPath(files, errs.get(0).contractFilePath);
+                if (sourceFile == null || contractFile == null) {
+                    log.warn("{} 修复跳过: 无法定位文件 (source={}, contract={})",
+                            label, sourcePath, errs.get(0).contractFilePath);
+                    continue;
+                }
+                AtomicTask task = taskResolver.apply(sourcePath);
+                if (task == null) {
+                    log.warn("{} 修复跳过: 无法解析 task: {}", label, sourcePath);
                     continue;
                 }
                 String mergedDesc = errs.stream().map(e -> e.message)
                         .reduce((a, b) -> a + "\n" + b).orElse("");
-                GenerationResult fix = codeGenRouter.fixWithCrossFileContext(
-                        sourceFile, contractFile.getContent(), task, mergedDesc);
+                GenerationResult fix = fixer.fix(sourceFile, contractFile.getContent(), task, mergedDesc);
                 if (fix.isSuccess()) {
                     GeneratedFile newFile = fix.getGeneratedFiles().get(0);
                     if (!passesConventionAfterFix(newFile)) {
-                        log.warn("跨文件修复被拒(引入 Layer1 违规), 保留原文件: path={}", sourcePath);
+                        log.warn("{} 修复被拒(引入 Layer1 违规), 保留原文件: path={}", label, sourcePath);
                         continue;
                     }
-                    replaceFile(allFiles, sourcePath, newFile);
-                    logExecution(subPlan.getId(), "CROSS_FILE_FIX", sourcePath,
-                            "CREATED", "跨文件契约修复: " + mergedDesc, null);
+                    replaceFile(files, sourcePath, newFile);
+                    if (writeBack != null) {
+                        writeBack.accept(plan, newFile);
+                    }
+                    logExecution(subPlanId, stage, sourcePath,
+                            "CREATED", label + " 修复: " + mergedDesc, null);
                 } else {
-                    log.warn("跨文件修复 LLM 失败: {}", fix.getErrorMessage());
+                    log.warn("{} 修复 LLM 失败: {}", label, fix.getErrorMessage());
                 }
             }
         }
+    }
+
+    /** M9: 修复函数接口(参数化 fixWithCrossFileContext/fixEntityWithDdl/fixVoWithEntity) */
+    @FunctionalInterface
+    private interface RepairFixer {
+        GenerationResult fix(GeneratedFile sourceFile, String contractCode, AtomicTask task, String issueDescription);
+    }
+
+    /** 从 DB 加载 plan 的全部生成文件为 GeneratedFile(供 plan 级修复循环校验+修复注入) */
+    private List<GeneratedFile> loadPlanFilesFromDb(AiPlan plan) {
+        List<AiGeneratedFile> dbFiles = generatedFileMapper.selectByPlanId(plan.getId());
+        if (dbFiles == null || dbFiles.isEmpty()) return new ArrayList<>();
+        List<GeneratedFile> files = new ArrayList<>();
+        for (AiGeneratedFile f : dbFiles) {
+            if (f.getFilePath() == null || f.getContent() == null) continue;
+            files.add(new GeneratedFile(null, f.getFilePath(), f.getContent(), f.getAction()));
+        }
+        return files;
     }
 
     private GeneratedFile findFileByPath(List<GeneratedFile> files, String path) {
@@ -676,45 +730,6 @@ public class BladeXCodeAgent {
             case FEIGN_CLIENT -> ClassType.FEIGN;
             default -> null; // DDL_STATEMENT / MAPPER_XML / NACOS_CONFIG / EXCEL_IMPORT_EXPORT / OTHER 不参考
         };
-    }
-
-    private String detectNameConflicts(List<GeneratedFile> files) {
-        // REAL 模式查重必须用最新索引 — 目标项目可能在上次扫描后被改动(如并发写、手动改、
-        // 或本 plan 前序子方案刚写入新文件)。用 force=true 强制重扫,确保不漏(代价 ~1.5s,
-        // REAL 模式低频可接受)。降级策略:扫描失败才用缓存,且记 WARN(有覆盖风险)。
-        try {
-            existingProjectIndex.scan(true);
-        } catch (Exception e) {
-            log.warn("REAL 模式查重: 强制重扫失败, 回退缓存(有覆盖风险): {}", e.getMessage());
-        }
-        if (existingProjectIndex.getCachedScan() == null) {
-            log.warn("REAL 模式查重: 索引仍为空, 降级不查重(有覆盖风险)");
-            return null;
-        }
-
-        for (GeneratedFile f : files) {
-            if (f.getFilePath() == null || !f.getFilePath().endsWith(".java")) continue;
-            // 类名 = 文件名去 .java
-            String path = f.getFilePath();
-            String simpleName = path.substring(path.lastIndexOf('/') + 1).replace(".java", "");
-            if (existingProjectIndex.findBySimpleName(simpleName).isPresent()) {
-                return "类名 " + simpleName + " 已存在于目标项目(" + path + ")";
-            }
-            // 表名: 从 content 提 @TableName("xxx")
-            if (f.getContent() != null) {
-                java.util.regex.Matcher m = java.util.regex.Pattern
-                        .compile("@TableName\\s*\\(\\s*\"([^\"]+)\"").matcher(f.getContent());
-                if (m.find()) {
-                    String tableName = m.group(1);
-                    boolean tableConflict = existingProjectIndex.getCachedClasses().stream()
-                            .anyMatch(c -> tableName.equals(c.tableName()));
-                    if (tableConflict) {
-                        return "表名 " + tableName + " 已存在于目标项目(" + simpleName + ")";
-                    }
-                }
-            }
-        }
-        return null;
     }
 
     /**
@@ -1000,123 +1015,6 @@ public class BladeXCodeAgent {
                 + "- 只输出一个接口文件,不要输出 Fallback 和实现类(本任务只生成接口)";
     }
 
-    private String extractTargetPath(String line) {
-        if (line.contains("src/main/java")) {
-            int idx = line.indexOf("src/main/java");
-            return line.substring(idx);
-        }
-        throw new IllegalArgumentException("无法从行中提取目标路径: " + line);
-    }
-
-    private String extractTargetPathOrDefault(String line, String fallback) {
-        if (line != null && line.contains("src/main/")) {
-            int idx = line.indexOf("src/main/");
-            String tail = line.substring(idx);
-            int end = tail.length();
-            for (int i = 0; i < tail.length(); i++) {
-                char c = tail.charAt(i);
-                if (Character.isWhitespace(c) || c == '`' || c == '"') {
-                    end = i;
-                    break;
-                }
-            }
-            return tail.substring(0, end);
-        }
-        return fallback;
-    }
-
-    /**
-     * 从子方案内容中提取包路径匹配的类名,推导目标文件路径。
-     * 例如: "包路径: org.springblade.order.entity" + "类名: Order"
-     *    → "src/main/java/org/springblade/order/entity/Order.java"
-     */
-    private String derivePathFromPkg(TaskType type, AiSubPlan subPlan, String fallback) {
-        String content = subPlan.getPlanContent();
-        if (content == null) return fallback;
-
-        // 按 type 选择期望的 package 后缀(.entity / .controller / .service ...)
-        String preferredSuffix = switch (type) {
-            case STANDARD_CRUD_ENTITY -> ".entity";
-            case STANDARD_CRUD_CONTROLLER -> ".controller";
-            case STANDARD_CRUD_SERVICE, COMPLEX_BUSINESS_SERVICE -> ".service";
-            case CUSTOM_MAPPER -> ".mapper";
-            case FEIGN_CLIENT -> ".feign";
-            case EXCEL_IMPORT_EXPORT -> ".excel";
-            default -> null;
-        };
-
-        // 收集所有候选包路径
-        java.util.regex.Matcher pkgMatcher = java.util.regex.Pattern.compile(
-                "(?:包路径|位于|package)[:：\\s]*(org\\.springblade\\.[\\w.]+)")
-                .matcher(content);
-        String pkgPath = null;
-        while (pkgMatcher.find()) {
-            String candidate = pkgMatcher.group(1);
-            // 优先匹配 type 期望的后缀
-            if (preferredSuffix != null && candidate.endsWith(preferredSuffix)) {
-                pkgPath = candidate.replace('.', '/');
-                break;
-            }
-            // 否则保留首个找到的(兜底)
-            if (pkgPath == null) {
-                pkgPath = candidate.replace('.', '/');
-            }
-        }
-        if (pkgPath == null) return fallback;
-
-        // 提取类名(如 Order / OrderMapper / OrderController)
-        // 注意: 所有 pattern 必须包含 group(1)
-        String className = null;
-        String[] classPatterns = switch (type) {
-            case STANDARD_CRUD_ENTITY -> new String[]{"类名[:：\\s]*(\\w+)", "Entity[:：\\s]*(\\w+)"};
-            case STANDARD_CRUD_CONTROLLER -> new String[]{"Controller[:：\\s]*(\\w+)", "(\\w+Controller)\\b"};
-            case STANDARD_CRUD_SERVICE, COMPLEX_BUSINESS_SERVICE -> new String[]{"(I\\w+Service)\\b", "(\\w+ServiceImpl)\\b"};
-            case CUSTOM_MAPPER -> new String[]{"Mapper[:：\\s]*(\\w+)", "(\\w+Mapper)\\b"};
-            case FEIGN_CLIENT -> new String[]{"(I\\w+Client)\\b"};
-            case EXCEL_IMPORT_EXPORT -> new String[]{"(\\w+Excel)\\b", "(\\w+EVO)\\b"};
-            default -> new String[]{"类名[:：\\s]*(\\w+)"};
-        };
-        for (String pat : classPatterns) {
-            try {
-                java.util.regex.Matcher cm = java.util.regex.Pattern.compile(pat).matcher(content);
-                if (cm.find() && cm.groupCount() >= 1) {
-                    className = cm.group(1);
-                    break;
-                }
-            } catch (Exception ex) {
-                log.debug("提取类名异常 pattern={}: {}", pat, ex.getMessage());
-            }
-        }
-        if (className == null) {
-            // 尝试从子方案标题推断默认类名
-            className = switch (type) {
-                case STANDARD_CRUD_ENTITY -> "Order";
-                case STANDARD_CRUD_CONTROLLER -> "OrderController";
-                case STANDARD_CRUD_SERVICE -> "IOrderService";
-                case CUSTOM_MAPPER -> "OrderMapper";
-                case FEIGN_CLIENT -> "IOrderClient";
-                case EXCEL_IMPORT_EXPORT -> "OrderExcel";
-                default -> "Code";
-            };
-        }
-
-        return "src/main/java/" + pkgPath + "/" + className + ".java";
-    }
-
-    private String defaultPathForType(TaskType type, AiSubPlan subPlan) {
-        String slug = "subplan-" + subPlan.getId();
-        return switch (type) {
-            case DDL_STATEMENT -> "ai-generated/" + slug + "/migration.sql";
-            case STANDARD_CRUD_ENTITY -> "ai-generated/" + slug + "/Entity.java";
-            case STANDARD_CRUD_CONTROLLER -> "ai-generated/" + slug + "/Controller.java";
-            case STANDARD_CRUD_SERVICE, COMPLEX_BUSINESS_SERVICE -> "ai-generated/" + slug + "/Service.java";
-            case FEIGN_CLIENT -> "ai-generated/" + slug + "/FeignClient.java";
-            case EXCEL_IMPORT_EXPORT -> "ai-generated/" + slug + "/Excel.java";
-            case CUSTOM_MAPPER -> "ai-generated/" + slug + "/Mapper.java";
-            default -> "ai-generated/" + slug + "/Code.java";
-        };
-    }
-
     /**
      * 把生成的代码文件落库,供 Part A 查看。
      * 失败不影响主流程。
@@ -1158,157 +1056,6 @@ public class BladeXCodeAgent {
         if (name == null) return null;
         int dot = name.lastIndexOf('.');
         return dot >= 0 ? name.substring(dot + 1) : "";
-    }
-
-    /**
-     * 构建子方案拓扑执行顺序。
-     *
-     * <p>关键细节:Part A 传过来的 prerequisites 是 Part A 自己的字符串 ID(如 "sub_1"),
-     * 不是 Part B 的 AiSubPlan.id。所以这里必须先建立
-     * {@code partASubPlanId -> Part B 内部 Long id} 的映射,
-     * 否则 Long.parseLong 会抛 NumberFormatException 并被静默忽略,
-     * 导致整个 DAG 退化成"全部 in-degree 为 0、按插入顺序串行"的伪拓扑序。
-     */
-    private List<AiSubPlan> buildExecutionOrder(List<AiSubPlan> subPlans) {
-        // 使用Kahn算法进行拓扑排序
-        Map<Long, AiSubPlan> subPlanMap = new LinkedHashMap<>();
-        Map<Long, List<Long>> adjList = new HashMap<>();
-        Map<Long, Integer> inDegree = new HashMap<>();
-        // Part A 子方案 ID → Part B 内部 ID 映射
-        Map<String, Long> partAIdToInternalId = new HashMap<>();
-
-        for (AiSubPlan sp : subPlans) {
-            subPlanMap.put(sp.getId(), sp);
-            adjList.put(sp.getId(), new ArrayList<>());
-            inDegree.put(sp.getId(), 0);
-            if (sp.getPartASubPlanId() != null) {
-                partAIdToInternalId.put(sp.getPartASubPlanId(), sp.getId());
-            }
-        }
-
-        // 解析依赖关系 — prereqId 可能是 Part A 字符串 ID,也可能是 Part B 内部 Long ID
-        for (AiSubPlan sp : subPlans) {
-            List<String> prereqs = parsePrerequisites(sp.getPrerequisitesJson());
-            for (String prereqId : prereqs) {
-                Long pid = partAIdToInternalId.get(prereqId);
-                if (pid == null) {
-                    // 兜底: 尝试当成 Long ID 解析(以防未来直接传内部 ID)
-                    try {
-                        pid = Long.parseLong(prereqId);
-                    } catch (NumberFormatException ignored) {
-                        log.warn("未知前置依赖 ID,已忽略: subPlanId={}, prereq={}", sp.getId(), prereqId);
-                        continue;
-                    }
-                }
-                if (adjList.containsKey(pid)) {
-                    adjList.get(pid).add(sp.getId());
-                    inDegree.merge(sp.getId(), 1, Integer::sum);
-                }
-            }
-        }
-
-        // Kahn算法
-        Queue<Long> queue = new LinkedList<>();
-        for (Map.Entry<Long, Integer> entry : inDegree.entrySet()) {
-            if (entry.getValue() == 0) {
-                queue.offer(entry.getKey());
-            }
-        }
-
-        List<AiSubPlan> result = new ArrayList<>();
-        while (!queue.isEmpty()) {
-            Long current = queue.poll();
-            result.add(subPlanMap.get(current));
-            for (Long next : adjList.get(current)) {
-                int degree = inDegree.get(next) - 1;
-                inDegree.put(next, degree);
-                if (degree == 0) {
-                    queue.offer(next);
-                }
-            }
-        }
-
-        // 检查是否存在循环
-        if (result.size() != subPlans.size()) {
-            log.error("DAG中存在循环依赖!排序结果: {}, 原始: {}", result.size(), subPlans.size());
-            return null;
-        }
-
-        return result;
-    }
-
-    @SuppressWarnings("unchecked")
-    private List<String> parsePrerequisites(String prerequisitesJson) {
-        if (prerequisitesJson == null || prerequisitesJson.isBlank()) {
-            return Collections.emptyList();
-        }
-        try {
-            return objectMapper.readValue(prerequisitesJson, new TypeReference<List<String>>() {});
-        } catch (JsonProcessingException e) {
-            log.warn("解析前置依赖 JSON 失败,按无依赖处理: {}", prerequisitesJson);
-            return Collections.emptyList();
-        }
-    }
-
-    /**
-     * 判断给定子方案是否依赖于任何一个已失败/已跳过的子方案 id。
-     * 注意 prerequisitesJson 中存的是 Part A 子方案字符串 ID,这里需要先转换为 Part B 内部 Long ID。
-     */
-    private boolean dependsOnFailed(AiSubPlan sp, Set<Long> failedIds) {
-        if (failedIds.isEmpty()) return false;
-        List<String> prereqs = parsePrerequisites(sp.getPrerequisitesJson());
-        if (prereqs.isEmpty()) return false;
-        // 通过 plan_id 把所有子方案再拉一次,建立 partA-id -> internal-id 映射
-        // 数据量是单 plan 的子方案数,通常 <= 10
-        List<AiSubPlan> siblings = subPlanMapper.selectByPlanId(sp.getPlanId());
-        Map<String, Long> partAIdToInternalId = new HashMap<>();
-        for (AiSubPlan s : siblings) {
-            if (s.getPartASubPlanId() != null) {
-                partAIdToInternalId.put(s.getPartASubPlanId(), s.getId());
-            }
-        }
-        for (String prereqId : prereqs) {
-            Long pid = partAIdToInternalId.get(prereqId);
-            if (pid == null) {
-                try {
-                    pid = Long.parseLong(prereqId);
-                } catch (NumberFormatException ignored) {
-                    continue;
-                }
-            }
-            if (failedIds.contains(pid)) return true;
-        }
-        return false;
-    }
-
-    /**
-     * 构建反向依赖: 子方案 id -> 直接依赖它的下游子方案 id 列表。
-     * 当前主要供日志/未来优化使用,主流程通过 {@link #dependsOnFailed} 在线性遍历中按需查询。
-     */
-    private Map<Long, List<String>> buildReverseDependencies(List<AiSubPlan> subPlans) {
-        // 建立 partA-id -> internal-id 映射
-        Map<String, Long> partAIdToInternalId = new HashMap<>();
-        for (AiSubPlan sp : subPlans) {
-            if (sp.getPartASubPlanId() != null) {
-                partAIdToInternalId.put(sp.getPartASubPlanId(), sp.getId());
-            }
-        }
-        Map<Long, List<String>> reverse = new HashMap<>();
-        for (AiSubPlan sp : subPlans) {
-            List<String> prereqs = parsePrerequisites(sp.getPrerequisitesJson());
-            for (String p : prereqs) {
-                Long pid = partAIdToInternalId.get(p);
-                if (pid == null) {
-                    try {
-                        pid = Long.parseLong(p);
-                    } catch (NumberFormatException ignored) {
-                        continue;
-                    }
-                }
-                reverse.computeIfAbsent(pid, k -> new ArrayList<>()).add(String.valueOf(sp.getId()));
-            }
-        }
-        return reverse;
     }
 
     /**
@@ -1394,88 +1141,17 @@ public class BladeXCodeAgent {
      */
     private void retryPlanWideEntityDdlMismatches(AiPlan plan) {
         try {
-            List<AiGeneratedFile> dbFiles = generatedFileMapper.selectByPlanId(plan.getId());
-            if (dbFiles == null || dbFiles.isEmpty()) return;
-            // 转 GeneratedFile (带 content, 供校验 + 修复注入)
-            List<GeneratedFile> files = new ArrayList<>();
-            for (AiGeneratedFile f : dbFiles) {
-                if (f.getFilePath() == null || f.getContent() == null) continue;
-                files.add(new GeneratedFile(null, f.getFilePath(), f.getContent(), f.getAction()));
-            }
+            List<GeneratedFile> files = loadPlanFilesFromDb(plan);
             if (files.isEmpty()) return;
-
+            // M9: 以 DDL 为契约源头重生成 Entity, 写回(persistSingleFile+updateDB)
             Set<String> ENTITY_DDL_RULES = Set.of(
                     "ENTITY-DDL-COLUMN-MISSING", "ENTITY-DDL-TYPE-MISMATCH", "ENTITY-DDL-TENANT");
-
-            for (int attempt = 0; attempt <= maxReviewRetries; attempt++) {
-                List<CrossFileValidator.ContractIssue> issues = crossFileValidator.validate(files);
-                List<CrossFileValidator.ContractIssue> fixable = issues.stream()
-                        .filter(i -> i.isError() && ENTITY_DDL_RULES.contains(i.rule))
-                        .toList();
-                if (fixable.isEmpty()) {
-                    if (attempt > 0) {
-                        log.info("plan 级 Entity↔DDL 修复完成: 第 {} 次重试后无 ERROR", attempt);
-                        logExecution(null, "PLAN_CROSS_FIX", "",
-                                "SUCCESS", "Entity↔DDL 修复完成 (" + attempt + " 次重试)", null);
-                    }
-                    return;
-                }
-                if (attempt == maxReviewRetries) {
-                    String summary = "Entity↔DDL 不一致, 已达最大重试次数 (" + (maxReviewRetries + 1)
-                            + ") 仍未修复: " + fixable.size() + " 项; "
-                            + fixable.stream().map(Object::toString).limit(5)
-                                    .reduce((a, b) -> a + " | " + b).orElse("");
-                    log.warn(summary);
-                    logExecution(null, "PLAN_CROSS_FIX", "", "FAILED", summary, null);
-                    return;
-                }
-                log.info("plan 级 Entity↔DDL 不一致 (第 {}/{} 次重试): {} 项",
-                        attempt + 1, maxReviewRetries + 1, fixable.size());
-
-                // 按 Entity 文件(sourceFilePath)分组: 同一 Entity 的多个缺列/类型问题合并为一次重生成
-                Map<String, List<CrossFileValidator.ContractIssue>> byEntity = new LinkedHashMap<>();
-                for (CrossFileValidator.ContractIssue err : fixable) {
-                    byEntity.computeIfAbsent(err.sourceFilePath, k -> new ArrayList<>()).add(err);
-                }
-                for (Map.Entry<String, List<CrossFileValidator.ContractIssue>> entry : byEntity.entrySet()) {
-                    String entityPath = entry.getKey();
-                    List<CrossFileValidator.ContractIssue> errs = entry.getValue();
-                    GeneratedFile entityFile = findFileByPath(files, entityPath);
-                    // 契约对端: DDL 文件(contractFilePath 指向它)
-                    GeneratedFile ddlFile = findFileByPath(files, errs.get(0).contractFilePath);
-                    if (entityFile == null || ddlFile == null) {
-                        log.warn("Entity↔DDL 修复跳过: 无法定位文件 (entity={}, ddl={})",
-                                entityPath, errs.get(0).contractFilePath);
-                        continue;
-                    }
-                    // 从 Entity 路径反推实体名/模块名, 临时构造 task
-                    AtomicTask task = buildTaskFromEntityPath(entityPath);
-                    if (task == null) {
-                        log.warn("Entity↔DDL 修复跳过: 无法从路径反推实体名 {}", entityPath);
-                        continue;
-                    }
-                    String mergedDesc = errs.stream().map(e -> e.message)
-                            .reduce((a, b) -> a + "\n" + b).orElse("");
-                    GenerationResult fix = codeGenRouter.fixEntityWithDdl(
-                            entityFile, ddlFile.getContent(), task, mergedDesc);
-                    if (fix.isSuccess()) {
-                        GeneratedFile newEntity = fix.getGeneratedFiles().get(0);
-                        if (!passesConventionAfterFix(newEntity)) {
-                            log.warn("Entity↔DDL 修复被拒(引入 Layer1 违规), 保留原文件: path={}", entityPath);
-                            continue;
-                        }
-                        replaceFile(files, entityPath, newEntity);
-                        // 写盘成功才更新 DB, 避免 DB↔磁盘不一致(写盘失败保留磁盘旧内容, DB 也不更新)
-                        if (persistSingleFile(plan, entityPath, newEntity.getContent())) {
-                            updateGeneratedFileContent(plan.getId(), entityPath, newEntity.getContent());
-                        }
-                        logExecution(null, "PLAN_CROSS_FIX", entityPath,
-                                "CREATED", "Entity↔DDL 修复: " + mergedDesc, null);
-                    } else {
-                        log.warn("Entity↔DDL 修复 LLM 失败: {}", fix.getErrorMessage());
-                    }
-                }
-            }
+            runRepairLoop(files, ENTITY_DDL_RULES,
+                    (src, contract, task, desc) -> codeGenRouter.fixEntityWithDdl(src, contract, task, desc),
+                    this::buildTaskFromEntityPath,
+                    null, "PLAN_CROSS_FIX", "Entity↔DDL",
+                    (p, f) -> { if (persistSingleFile(p, f.getFilePath(), f.getContent())) updateGeneratedFileContent(p.getId(), f.getFilePath(), f.getContent()); },
+                    plan);
         } catch (Exception e) {
             log.warn("plan 级 Entity↔DDL 修复异常 (不影响主流程): {}", e.getMessage());
         }
@@ -1515,87 +1191,19 @@ public class BladeXCodeAgent {
      */
     private void retryPlanWideVoEntityMismatches(AiPlan plan) {
         try {
-            List<AiGeneratedFile> dbFiles = generatedFileMapper.selectByPlanId(plan.getId());
-            if (dbFiles == null || dbFiles.isEmpty()) return;
-            List<GeneratedFile> files = new ArrayList<>();
-            for (AiGeneratedFile f : dbFiles) {
-                if (f.getFilePath() == null || f.getContent() == null) continue;
-                files.add(new GeneratedFile(null, f.getFilePath(), f.getContent(), f.getAction()));
-            }
+            List<GeneratedFile> files = loadPlanFilesFromDb(plan);
             if (files.isEmpty()) return;
-
+            // M9: 以 Entity 为契约源头重生成 VO/IVO/UVO, 写回(persistSingleFile+updateDB)
             Set<String> VO_ENTITY_RULES = Set.of(
                     "VO-ENTITY-FIELD-MISMATCH", "VO-ENTITY-FIELD-TYPE-MISMATCH");
-
-            for (int attempt = 0; attempt <= maxReviewRetries; attempt++) {
-                List<CrossFileValidator.ContractIssue> issues = crossFileValidator.validate(files);
-                List<CrossFileValidator.ContractIssue> fixable = issues.stream()
-                        .filter(i -> i.isError() && VO_ENTITY_RULES.contains(i.rule))
-                        .toList();
-                if (fixable.isEmpty()) {
-                    if (attempt > 0) {
-                        log.info("plan 级 VO-Entity 修复完成: 第 {} 次重试后无 ERROR", attempt);
-                        logExecution(null, "PLAN_CROSS_FIX", "",
-                                "SUCCESS", "VO-Entity 修复完成 (" + attempt + " 次重试)", null);
-                    }
-                    return;
-                }
-                if (attempt == maxReviewRetries) {
-                    String summary = "VO-Entity 不一致, 已达最大重试次数 (" + (maxReviewRetries + 1)
-                            + ") 仍未修复: " + fixable.size() + " 项; "
-                            + fixable.stream().map(Object::toString).limit(5)
-                                    .reduce((a, b) -> a + " | " + b).orElse("");
-                    log.warn(summary);
-                    logExecution(null, "PLAN_CROSS_FIX", "", "FAILED", summary, null);
-                    return;
-                }
-                log.info("plan 级 VO-Entity 不一致 (第 {}/{} 次重试): {} 项",
-                        attempt + 1, maxReviewRetries + 1, fixable.size());
-
-                // 按 VO 文件(sourceFilePath)分组: 同一 VO 的多个字段问题合并为一次重生成
-                Map<String, List<CrossFileValidator.ContractIssue>> byVo = new LinkedHashMap<>();
-                for (CrossFileValidator.ContractIssue err : fixable) {
-                    byVo.computeIfAbsent(err.sourceFilePath, k -> new ArrayList<>()).add(err);
-                }
-                for (Map.Entry<String, List<CrossFileValidator.ContractIssue>> entry : byVo.entrySet()) {
-                    String voPath = entry.getKey();
-                    List<CrossFileValidator.ContractIssue> errs = entry.getValue();
-                    GeneratedFile voFile = findFileByPath(files, voPath);
-                    // 契约对端: Entity 文件(contractFilePath 指向它)
-                    GeneratedFile entityFile = findFileByPath(files, errs.get(0).contractFilePath);
-                    if (voFile == null || entityFile == null) {
-                        log.warn("VO-Entity 修复跳过: 无法定位文件 (vo={}, entity={})",
-                                voPath, errs.get(0).contractFilePath);
-                        continue;
-                    }
-                    AtomicTask task = buildTaskFromVoPath(voPath);
-                    if (task == null) {
-                        log.warn("VO-Entity 修复跳过: 无法从路径反推实体名 {}", voPath);
-                        continue;
-                    }
-                    String mergedDesc = errs.stream().map(e -> e.message)
-                            .reduce((a, b) -> a + "\n" + b).orElse("");
-                    GenerationResult fix = codeGenRouter.fixVoWithEntity(
-                            voFile, entityFile.getContent(), task, mergedDesc);
-                    if (fix.isSuccess()) {
-                        GeneratedFile newVo = fix.getGeneratedFiles().get(0);
-                        if (!passesConventionAfterFix(newVo)) {
-                            log.warn("VO↔Entity 修复被拒(引入 Layer1 违规), 保留原文件: path={}", voPath);
-                            continue;
-                        }
-                        replaceFile(files, voPath, newVo);
-                        if (persistSingleFile(plan, voPath, newVo.getContent())) {
-                            updateGeneratedFileContent(plan.getId(), voPath, newVo.getContent());
-                        }
-                        logExecution(null, "PLAN_CROSS_FIX", voPath,
-                                "CREATED", "VO-Entity 修复: " + mergedDesc, null);
-                    } else {
-                        log.warn("VO-Entity 修复 LLM 失败: {}", fix.getErrorMessage());
-                    }
-                }
-            }
+            runRepairLoop(files, VO_ENTITY_RULES,
+                    (src, contract, task, desc) -> codeGenRouter.fixVoWithEntity(src, contract, task, desc),
+                    this::buildTaskFromVoPath,
+                    null, "PLAN_CROSS_FIX", "VO↔Entity",
+                    (p, f) -> { if (persistSingleFile(p, f.getFilePath(), f.getContent())) updateGeneratedFileContent(p.getId(), f.getFilePath(), f.getContent()); },
+                    plan);
         } catch (Exception e) {
-            log.warn("plan 级 VO-Entity 修复异常 (不影响主流程): {}", e.getMessage());
+            log.warn("plan 级 VO↔Entity 修复异常 (不影响主流程): {}", e.getMessage());
         }
     }
 
