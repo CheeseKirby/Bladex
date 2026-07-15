@@ -60,6 +60,7 @@ public class BladeXCodeAgent {
 
     /** 拓扑排序器(H8 拆出)- 子方案 DAG 排序 + 依赖解析 */
     private final TopologySorter topologySorter;
+    private final GeneratedFileStore generatedFileStore;
 
     public BladeXCodeAgent(AiPlanMapper planMapper, AiSubPlanMapper subPlanMapper,
                            AiExecutionLogMapper executionLogMapper,
@@ -75,7 +76,8 @@ public class BladeXCodeAgent {
                            AiWorkflowProperties properties,
                            ConflictDetector conflictDetector,
                            ReferenceProjectIndex referenceProjectIndex,
-                           TopologySorter topologySorter) {
+                           TopologySorter topologySorter,
+                           GeneratedFileStore generatedFileStore) {
         this.planMapper = planMapper;
         this.subPlanMapper = subPlanMapper;
         this.executionLogMapper = executionLogMapper;
@@ -93,6 +95,7 @@ public class BladeXCodeAgent {
         this.conflictDetector = conflictDetector;
         this.referenceProjectIndex = referenceProjectIndex;
         this.topologySorter = topologySorter;
+        this.generatedFileStore = generatedFileStore;
     }
 
     /**
@@ -404,7 +407,7 @@ public class BladeXCodeAgent {
                 log.warn("REAL 模式查重冲突,拒绝写盘: {}", conflict);
                 logExecution(subPlan.getId(), "FILE_WRITE", "", "SKIPPED",
                         "类名/表名冲突: " + conflict, null);
-                persistGeneratedFiles(subPlan, plan, allGeneratedFiles, "SKIPPED");
+                generatedFileStore.saveBatch(subPlan, plan, allGeneratedFiles, "SKIPPED");
                 subPlan.setStatus(SubPlanStatus.FAILED);
                 subPlan.setErrorMessage("REAL 模式查重冲突,拒绝写盘: " + conflict);
                 subPlan.setCompletedAt(LocalDateTime.now());
@@ -420,7 +423,7 @@ public class BladeXCodeAgent {
                 : fileWriteExecutor.isTargetRootAvailable();
         if (!rootAvailable) {
             log.warn("写盘根不可用,跳过文件写入,仅把生成内容落库供 Part A 查看: {}", writeRoot);
-            persistGeneratedFiles(subPlan, plan, allGeneratedFiles, "SKIPPED");
+            generatedFileStore.saveBatch(subPlan, plan, allGeneratedFiles, "SKIPPED");
             logExecution(subPlan.getId(), "FILE_WRITE", "",
                     "SKIPPED", "写盘根不可用: " + writeRoot, null);
         } else {
@@ -433,7 +436,7 @@ public class BladeXCodeAgent {
                 logExecution(subPlan.getId(), "FILE_WRITE", "", "ROLLED_BACK",
                         writeResult.getErrorMessage(), null);
                 // 即使写入文件系统失败,我们也把生成的内容落库供 Part A 查看
-                persistGeneratedFiles(subPlan, plan, allGeneratedFiles, "FAILED");
+                generatedFileStore.saveBatch(subPlan, plan, allGeneratedFiles, "FAILED");
                 subPlan.setStatus(SubPlanStatus.FAILED);
                 subPlan.setErrorMessage(writeResult.getErrorMessage());
                 subPlan.setCompletedAt(LocalDateTime.now());
@@ -444,7 +447,7 @@ public class BladeXCodeAgent {
 
             log.info("文件写入完成: {} 个文件 (root={})", writeResult.getWrittenFiles().size(), writeRoot);
             // 把生成的代码文件落库,供 Part A /api/plans/{receptionId}/files 拉取
-            persistGeneratedFiles(subPlan, plan, allGeneratedFiles, "CREATED");
+            generatedFileStore.saveBatch(subPlan, plan, allGeneratedFiles, "CREATED");
         }
 
         // 3d. 编译验证（跳过—需要完整的目标项目环境）
@@ -585,18 +588,6 @@ public class BladeXCodeAgent {
     @FunctionalInterface
     private interface RepairFixer {
         GenerationResult fix(GeneratedFile sourceFile, String contractCode, AtomicTask task, String issueDescription);
-    }
-
-    /** 从 DB 加载 plan 的全部生成文件为 GeneratedFile(供 plan 级修复循环校验+修复注入) */
-    private List<GeneratedFile> loadPlanFilesFromDb(AiPlan plan) {
-        List<AiGeneratedFile> dbFiles = generatedFileMapper.selectByPlanId(plan.getId());
-        if (dbFiles == null || dbFiles.isEmpty()) return new ArrayList<>();
-        List<GeneratedFile> files = new ArrayList<>();
-        for (AiGeneratedFile f : dbFiles) {
-            if (f.getFilePath() == null || f.getContent() == null) continue;
-            files.add(new GeneratedFile(null, f.getFilePath(), f.getContent(), f.getAction()));
-        }
-        return files;
     }
 
     private GeneratedFile findFileByPath(List<GeneratedFile> files, String path) {
@@ -1011,49 +1002,6 @@ public class BladeXCodeAgent {
     }
 
     /**
-     * 把生成的代码文件落库,供 Part A 查看。
-     * 失败不影响主流程。
-     */
-    private void persistGeneratedFiles(AiSubPlan subPlan, AiPlan plan,
-                                       List<GeneratedFile> files, String action) {
-        if (files == null || files.isEmpty()) return;
-        for (GeneratedFile f : files) {
-            try {
-                AiGeneratedFile row = new AiGeneratedFile();
-                row.setPlanId(plan.getId());
-                row.setSubPlanId(subPlan.getId());
-                row.setFileType(f.getType() != null ? f.getType().name() : "OTHER");
-                row.setFilePath(f.getFilePath());
-                row.setFileName(extractFileName(f.getFilePath()));
-                row.setFileExtension(extractExtension(f.getFilePath()));
-                row.setAction(action);
-                String content = f.getContent() == null ? "" : f.getContent();
-                row.setContent(content);
-                row.setSizeBytes(content.getBytes(java.nio.charset.StandardCharsets.UTF_8).length);
-                row.setLineCount((int) content.lines().count());
-                row.setCreateTime(LocalDateTime.now());
-                row.setIsDeleted(0);
-                generatedFileMapper.insert(row);
-            } catch (Exception ex) {
-                log.warn("生成文件落库失败: subPlanId={}, path={}", subPlan.getId(), f.getFilePath(), ex);
-            }
-        }
-    }
-
-    private String extractFileName(String path) {
-        if (path == null) return null;
-        int slash = Math.max(path.lastIndexOf('/'), path.lastIndexOf('\\'));
-        return slash >= 0 ? path.substring(slash + 1) : path;
-    }
-
-    private String extractExtension(String path) {
-        String name = extractFileName(path);
-        if (name == null) return null;
-        int dot = name.lastIndexOf('.');
-        return dot >= 0 ? name.substring(dot + 1) : "";
-    }
-
-    /**
      * 记录执行日志
      */
     private void logExecution(Long subPlanId, String stage, String filePath,
@@ -1136,7 +1084,7 @@ public class BladeXCodeAgent {
      */
     private void retryPlanWideEntityDdlMismatches(AiPlan plan) {
         try {
-            List<GeneratedFile> files = loadPlanFilesFromDb(plan);
+            List<GeneratedFile> files = generatedFileStore.loadPlanFiles(plan);
             if (files.isEmpty()) return;
             // M9: 以 DDL 为契约源头重生成 Entity, 写回(persistSingleFile+updateDB)
             Set<String> ENTITY_DDL_RULES = Set.of(
@@ -1145,7 +1093,7 @@ public class BladeXCodeAgent {
                     (src, contract, task, desc) -> codeGenRouter.fixEntityWithDdl(src, contract, task, desc),
                     this::buildTaskFromEntityPath,
                     null, "PLAN_CROSS_FIX", "Entity↔DDL",
-                    (p, f) -> { if (persistSingleFile(p, f.getFilePath(), f.getContent())) updateGeneratedFileContent(p.getId(), f.getFilePath(), f.getContent()); },
+                    (p, f) -> generatedFileStore.persistRepair(p, f),
                     plan);
         } catch (Exception e) {
             log.warn("plan 级 Entity↔DDL 修复异常 (不影响主流程): {}", e.getMessage());
@@ -1186,7 +1134,7 @@ public class BladeXCodeAgent {
      */
     private void retryPlanWideVoEntityMismatches(AiPlan plan) {
         try {
-            List<GeneratedFile> files = loadPlanFilesFromDb(plan);
+            List<GeneratedFile> files = generatedFileStore.loadPlanFiles(plan);
             if (files.isEmpty()) return;
             // M9: 以 Entity 为契约源头重生成 VO/IVO/UVO, 写回(persistSingleFile+updateDB)
             Set<String> VO_ENTITY_RULES = Set.of(
@@ -1195,7 +1143,7 @@ public class BladeXCodeAgent {
                     (src, contract, task, desc) -> codeGenRouter.fixVoWithEntity(src, contract, task, desc),
                     this::buildTaskFromVoPath,
                     null, "PLAN_CROSS_FIX", "VO↔Entity",
-                    (p, f) -> { if (persistSingleFile(p, f.getFilePath(), f.getContent())) updateGeneratedFileContent(p.getId(), f.getFilePath(), f.getContent()); },
+                    (p, f) -> generatedFileStore.persistRepair(p, f),
                     plan);
         } catch (Exception e) {
             log.warn("plan 级 VO↔Entity 修复异常 (不影响主流程): {}", e.getMessage());
@@ -1232,54 +1180,6 @@ public class BladeXCodeAgent {
             return voClassName.substring(0, voClassName.length() - 2);
         }
         return voClassName;
-    }
-
-    /** 写盘单个文件 - 返回是否写盘成功(供调用方决定是否同步更新 DB, 避免 DB↔磁盘不一致)。 */
-    private boolean persistSingleFile(AiPlan plan, String filePath, String content) {
-        try {
-            WriteTarget wt = WriteTarget.parse(plan.getWriteTarget());
-            String writeRoot = wt.isReal()
-                    ? properties.getTargetProjectRoot()
-                    : properties.getOutputRoot();
-            boolean rootAvailable = wt.isReal()
-                    ? fileWriteExecutor.isRootAvailable(writeRoot)
-                    : fileWriteExecutor.isTargetRootAvailable();
-            if (!rootAvailable) {
-                log.warn("修复写盘跳过: 根目录不可用 path={}, writeTarget={}", filePath, plan.getWriteTarget());
-                return false;
-            }
-            List<FileWriteTask> tasks = List.of(new FileWriteTask(filePath, content, "MODIFY"));
-            fileWriteExecutor.write(tasks, writeRoot);
-            return true;
-        } catch (Exception e) {
-            log.warn("修复写盘失败(不更新 DB, 保持磁盘旧内容): path={}, err={}", filePath, e.getMessage());
-            return false;
-        }
-    }
-
-    /** 更新 DB 中该 plan + filePath 的生成文件内容(size/lineCount 同步刷新) */
-    private void updateGeneratedFileContent(Long planId, String filePath, String content) {
-        try {
-            AiGeneratedFile row = new AiGeneratedFile();
-            row.setPlanId(planId);
-            row.setFilePath(filePath);
-            row.setContent(content);
-            row.setSizeBytes(content.getBytes(java.nio.charset.StandardCharsets.UTF_8).length);
-            row.setLineCount((int) content.lines().count());
-            row.setAction("MODIFY");
-            // 用 update + LambdaUpdateWrapper 按 plan_id + file_path 定位更新 content/size/lineCount/action
-            com.baomidou.mybatisplus.core.conditions.update.LambdaUpdateWrapper<AiGeneratedFile> uw =
-                    new com.baomidou.mybatisplus.core.conditions.update.LambdaUpdateWrapper<>();
-            uw.eq(AiGeneratedFile::getPlanId, planId)
-                    .eq(AiGeneratedFile::getFilePath, filePath)
-                    .set(AiGeneratedFile::getContent, content)
-                    .set(AiGeneratedFile::getSizeBytes, row.getSizeBytes())
-                    .set(AiGeneratedFile::getLineCount, row.getLineCount())
-                    .set(AiGeneratedFile::getAction, "MODIFY");
-            generatedFileMapper.update(null, uw);
-        } catch (Exception e) {
-            log.warn("Entity↔DDL 修复更新DB失败: path={}, err={}", filePath, e.getMessage());
-        }
     }
 
     /**

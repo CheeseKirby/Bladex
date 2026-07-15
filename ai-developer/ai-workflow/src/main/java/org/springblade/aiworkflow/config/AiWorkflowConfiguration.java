@@ -168,12 +168,13 @@ public class AiWorkflowConfiguration {
                                             IPartACallbackService callbackService,
                                             ConflictDetector conflictDetector,
                                             ReferenceProjectIndex referenceProjectIndex,
-                                            TopologySorter topologySorter) {
+                                            TopologySorter topologySorter,
+                                            GeneratedFileStore generatedFileStore) {
         return new BladeXCodeAgent(planMapper, subPlanMapper, executionLogMapper, generatedFileMapper,
                 codeGenRouter, conventionValidator, changeEvaluator, fileWriteExecutor,
                 buildVerifier, objectMapper, properties.getMaxReviewRetries(),
                 properties.isAutoCommit(),
                 callbackService::notifyStatusUpdate,
-                properties, conflictDetector, referenceProjectIndex, topologySorter);
+                properties, conflictDetector, referenceProjectIndex, topologySorter, generatedFileStore);
     }
 }
