@@ -8,8 +8,16 @@
  */
 
 import { Router, Request, Response } from 'express';
+import { requireBffAdmin } from '../security/adminGuard';
 
 export const transmissionRouter = Router();
+transmissionRouter.use((req, res, next) => {
+  if (req.method === 'POST' && req.path === '/status-update') {
+    next();
+    return;
+  }
+  requireBffAdmin(req, res, next);
+});
 
 const PART_B_URL = process.env.PART_B_URL || 'http://localhost:8111';
 const USE_MOCK = process.env.BFF_MOCK_PART_B === 'true';

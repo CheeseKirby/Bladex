@@ -54,9 +54,6 @@ CALL add_column_if_missing('ai_workflow_plan', 'write_target',
 
 DROP PROCEDURE IF EXISTS add_column_if_missing;
 
--- H3: status 扩到 VARCHAR(30) 容纳 COMPLETED_WITH_ERRORS(21 字符)。MODIFY 幂等,可重复执行。
-ALTER TABLE ai_workflow_plan MODIFY COLUMN status VARCHAR(30) DEFAULT 'RECEIVED' COMMENT '状态: RECEIVED/EXECUTING/COMPLETED/COMPLETED_WITH_ERRORS/FAILED';
-ALTER TABLE ai_workflow_sub_plan MODIFY COLUMN status VARCHAR(30) DEFAULT 'QUEUED' COMMENT '状态: QUEUED/EXECUTING/COMPLETED/COMPLETED_WITH_ERRORS/FAILED';
 
 -- -----------------------------------------------------------
 -- 2. 子方案执行记录
@@ -79,6 +76,10 @@ CREATE TABLE IF NOT EXISTS ai_workflow_sub_plan (
     update_time DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '修改时间',
     is_deleted INT DEFAULT 0 COMMENT '逻辑删除'
 ) COMMENT 'AI工作流-子方案执行记录';
+
+-- H3: widen status columns after both tables exist; safe to run repeatedly.
+ALTER TABLE ai_workflow_plan MODIFY COLUMN status VARCHAR(30) DEFAULT 'RECEIVED' COMMENT 'Status: RECEIVED/EXECUTING/COMPLETED/COMPLETED_WITH_ERRORS/FAILED';
+ALTER TABLE ai_workflow_sub_plan MODIFY COLUMN status VARCHAR(30) DEFAULT 'QUEUED' COMMENT 'Status: QUEUED/EXECUTING/COMPLETED/COMPLETED_WITH_ERRORS/FAILED';
 
 -- -----------------------------------------------------------
 -- 3. 执行日志（细粒度追踪每次LLM调用和文件操作）

@@ -62,6 +62,13 @@ public class PlanReceiverController {
             guard.requireAdmin(req);
         }
         PlanReceiveResponse response = planExecutionService.receivePlan(request);
+        // Queue only newly created plans or plans still waiting in RECEIVED.
+        // Duplicate terminal/in-flight plans return the existing receptionId without re-execution.
+        if (!"RECEIVED".equals(response.getStatus())) {
+            log.info("Duplicate plan not queued again: receptionId={}, status={}",
+                    response.getReceptionId(), response.getStatus());
+            return ApiResponse.ok(response);
+        }
         // 方案落库的事务已提交,可以安全异步触发
         try {
             planExecutionService.executeAsync(response.getReceptionId());

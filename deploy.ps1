@@ -137,6 +137,7 @@ AI_WORKFLOW_OUTPUT_ROOT=../../ai-generated-modules
 TARGET_PROJECT_ROOT=../../ai-generated-modules
 CONVENTION_DOCS_PATH=classpath:bladex-docs/
 # BFF 端口(默认 3004;BFF 读 PORT,vite 代理读 VITE_BFF_PORT,两者必须相同)
+HOST=127.0.0.1
 PORT=3004
 VITE_BFF_PORT=3004
 # BFF 放行前端 CORS 来源(默认前端跑在 3005)
@@ -144,6 +145,7 @@ FRONTEND_ORIGIN=http://localhost:3005
 # BFF 转发到 Part B(ai-workflow)的地址(默认 8111)
 PART_B_URL=http://localhost:8111
 PART_A_CALLBACK_URL=http://localhost:3004/api/transmission/status-update
+BFF_ADMIN_TOKEN=
 AI_WORKFLOW_ADMIN_TOKEN=
 "@ | Out-File -FilePath $envPath -Encoding utf8 -NoNewline
 Write-Host "  .env 已写入: $envPath"

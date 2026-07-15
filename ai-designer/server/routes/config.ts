@@ -6,48 +6,20 @@
  * - POST /api/config/llm/sync-to-partb → 同步到 Part B (转发 PUT 到 8111,带 X-Admin-Token)
  */
 
-import { Router, Request, Response, NextFunction } from 'express';
+import { Router, Request, Response } from 'express';
 import { getLlmConfig, getLlmConfigMasked, updateLlmConfig } from '../config/llmConfig';
+import { requireBffAdmin } from '../security/adminGuard';
 
 export const configRouter = Router();
 
-const ADMIN_TOKEN = (process.env.BFF_ADMIN_TOKEN || '').trim();
-// 把 Part B 写入端点需要的 token 单独存,允许与 BFF_ADMIN_TOKEN 不同
+// Part B uses a separate token; BFF access is protected by requireBffAdmin.
 const PART_B_ADMIN_TOKEN = (process.env.AI_WORKFLOW_ADMIN_TOKEN || '').trim();
-
-/** 仅放行 (1) X-Admin-Token 与 BFF_ADMIN_TOKEN 匹配,或 (2) 未配置 token 且远端是回环 */
-function requireAdmin(req: Request, res: Response, next: NextFunction): void {
-  const token = (req.header('X-Admin-Token') || '').trim();
-  if (ADMIN_TOKEN) {
-    if (token === ADMIN_TOKEN) {
-      next();
-      return;
-    }
-    res.status(403).json({ success: false, msg: 'X-Admin-Token 不匹配' });
-    return;
-  }
-  // 未配置 token: 只允许本地回环 — 防止任意页面通过浏览器修改凭据
-  const remote = req.socket.remoteAddress || '';
-  const isLoopback =
-    remote === '127.0.0.1' ||
-    remote === '::1' ||
-    remote === '::ffff:127.0.0.1' ||
-    remote.startsWith('127.');
-  if (isLoopback) {
-    next();
-    return;
-  }
-  res.status(403).json({
-    success: false,
-    msg: `BFF_ADMIN_TOKEN 未配置, /api/config 写入端点拒绝非本地请求 (remoteAddr=${remote})`,
-  });
-}
 
 configRouter.get('/llm', (_req: Request, res: Response) => {
   res.json({ success: true, data: getLlmConfigMasked() });
 });
 
-configRouter.put('/llm', requireAdmin, (req: Request, res: Response) => {
+configRouter.put('/llm', requireBffAdmin, (req: Request, res: Response) => {
   const body = req.body as Record<string, unknown>;
   const patch: Record<string, unknown> = {};
 
@@ -87,7 +59,7 @@ configRouter.put('/llm', requireAdmin, (req: Request, res: Response) => {
 });
 
 /** 把当前配置同步到 Part B */
-configRouter.post('/llm/sync-to-partb', requireAdmin, async (_req: Request, res: Response) => {
+configRouter.post('/llm/sync-to-partb', requireBffAdmin, async (_req: Request, res: Response) => {
   const partBUrl = process.env.PART_B_URL || 'http://localhost:8111';
   const cfg = getLlmConfig();
 

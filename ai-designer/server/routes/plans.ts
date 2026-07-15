@@ -6,8 +6,10 @@
  */
 
 import { Router, Request, Response } from 'express';
+import { requireBffAdmin } from '../security/adminGuard';
 
 export const plansRouter = Router();
+plansRouter.use(requireBffAdmin);
 
 // 内存存储
 // eslint-disable-next-line @typescript-eslint/no-explicit-any

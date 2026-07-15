@@ -159,5 +159,7 @@ powershell -ExecutionPolicy Bypass -File deploy.ps1
 | `AI_WORKFLOW_OUTPUT_ROOT` | `../../ai-generated-modules` | 产物输出根 |
 | `CONVENTION_DOCS_PATH` | `classpath:bladex-docs/` | BladeX 规范文档路径 |
 | `PART_A_CALLBACK_URL` | `http://localhost:3004/api/transmission/status-update` | Part A 回调地址 |
+| `HOST` | `127.0.0.1` | BFF bind address; do not expose publicly without authentication |
+| `BFF_ADMIN_TOKEN` | (empty) | Required for non-loopback BFF access; keep empty for localhost-only mode |
 | `AI_WORKFLOW_ADMIN_TOKEN` | (空) | 管理端 token;未配置时写入端点仅接受本地回环 |
 | `TARGET_PROJECT_ROOT` | `../../ai-generated-modules` | 生成产物写入根 + 现有项目索引根(默认隔离区,不再指 blade_hgsjy 定制版) |

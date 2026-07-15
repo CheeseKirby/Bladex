@@ -1,0 +1,68 @@
+name: CI
+
+on:
+  push:
+    branches: [main, workflow-hardening, "codex/**"]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  frontend-bff:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ai-designer
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20.19.0
+          cache: npm
+          cache-dependency-path: ai-designer/package-lock.json
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm run test:server
+      - run: npm run build
+      - run: npm audit --audit-level=high
+
+  backend:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ai-developer
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: maven
+      - run: mvn -B clean test
+
+  mysql-schema:
+    runs-on: ubuntu-latest
+    services:
+      mysql:
+        image: mysql:8.0
+        env:
+          MYSQL_ROOT_PASSWORD: root
+          MYSQL_ROOT_HOST: "%"
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="mysqladmin ping -h 127.0.0.1 -uroot -proot"
+          --health-interval=5s
+          --health-timeout=5s
+          --health-retries=20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install MySQL client
+        run: sudo apt-get update && sudo apt-get install -y default-mysql-client
+      - name: Initialize a clean MySQL 8 database
+        run: mysql --protocol=tcp -h127.0.0.1 -P3306 -uroot -proot < ai-developer/sql/init.sql
+      - name: Verify workflow tables
+        run: |
+          count=$(mysql --protocol=tcp -h127.0.0.1 -P3306 -uroot -proot -N -e "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='ai_workflow';")
+          test "$count" -ge 4

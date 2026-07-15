@@ -25,6 +25,7 @@ import { isLlmConfigured } from './config/llmConfig';
 
 const app = express();
 const PORT = process.env.PORT || 3004;
+const HOST = process.env.HOST || '127.0.0.1';
 
 // 允许的前端源 — 默认 Vite dev server。生产请通过 FRONTEND_ORIGIN 设置具体域名。
 // 用逗号分隔可以指定多个源。
@@ -88,8 +89,8 @@ app.use((err: Error, _req: Request, res: Response, _next: NextFunction) => {
   res.status(500).json({ success: false, msg: err.message });
 });
 
-app.listen(PORT, () => {
-  console.log(`[AI Designer BFF] 服务已启动: http://localhost:${PORT}`);
+app.listen(Number(PORT), HOST, () => {
+  console.log(`[AI Designer BFF] 服务已启动: http://${HOST}:${PORT}`);
   console.log(`[AI Designer BFF] CORS 允许来源: ${ALLOWED_ORIGINS.join(', ')}`);
   console.log(`[AI Designer BFF] LLM mode: ${isLlmConfigured() ? 'live' : 'mock'} (访问 /api/config/llm 查看/修改)`);
 });

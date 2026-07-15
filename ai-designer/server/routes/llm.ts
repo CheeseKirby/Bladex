@@ -12,8 +12,12 @@
 
 import { Router, Request, Response } from 'express';
 import { buildAuthHeaders, getLlmConfig, isLlmConfigured } from '../config/llmConfig';
+import { requireBffAdmin } from '../security/adminGuard';
 
 export const llmRouter = Router();
+
+// LLM calls consume privileged server-side credentials and must never be an open proxy.
+llmRouter.use(requireBffAdmin);
 
 const LLM_REQUEST_TIMEOUT_MS = 300_000; // 5 分钟(大项目方案审查/拆分较慢)
 
