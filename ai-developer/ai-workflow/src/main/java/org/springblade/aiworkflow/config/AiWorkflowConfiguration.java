@@ -11,7 +11,7 @@ import org.springblade.aiworkflow.mapper.AiExecutionLogMapper;
 import org.springblade.aiworkflow.mapper.AiGeneratedFileMapper;
 import org.springblade.aiworkflow.mapper.AiPlanMapper;
 import org.springblade.aiworkflow.mapper.AiSubPlanMapper;
-import org.springblade.aiworkflow.service.IPartACallbackService;
+import org.springblade.aiworkflow.notification.WorkflowStatusNotifier;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
@@ -165,16 +165,15 @@ public class AiWorkflowConfiguration {
                                             BuildVerifier buildVerifier,
                                             ObjectMapper objectMapper,
                                             AiWorkflowProperties properties,
-                                            IPartACallbackService callbackService,
                                             ConflictDetector conflictDetector,
                                             ReferenceProjectIndex referenceProjectIndex,
                                             TopologySorter topologySorter,
-                                            GeneratedFileStore generatedFileStore) {
+                                            GeneratedFileStore generatedFileStore,
+                                            WorkflowStatusNotifier statusNotifier) {
         return new BladeXCodeAgent(planMapper, subPlanMapper, executionLogMapper, generatedFileMapper,
                 codeGenRouter, conventionValidator, changeEvaluator, fileWriteExecutor,
                 buildVerifier, objectMapper, properties.getMaxReviewRetries(),
                 properties.isAutoCommit(),
-                callbackService::notifyStatusUpdate,
-                properties, conflictDetector, referenceProjectIndex, topologySorter, generatedFileStore);
+                properties, conflictDetector, referenceProjectIndex, topologySorter, generatedFileStore, statusNotifier);
     }
 }

@@ -18,11 +18,10 @@ import org.springblade.aiworkflow.mapper.AiExecutionLogMapper;
 import org.springblade.aiworkflow.mapper.AiGeneratedFileMapper;
 import org.springblade.aiworkflow.mapper.AiPlanMapper;
 import org.springblade.aiworkflow.mapper.AiSubPlanMapper;
-import org.springblade.aiworkflow.vo.StatusUpdateRequest;
+import org.springblade.aiworkflow.notification.WorkflowStatusNotifier;
 
 import java.time.LocalDateTime;
 import java.util.*;
-import java.util.function.Consumer;
 
 /**
  * BladeX代码Agent — 核心编排器
@@ -47,7 +46,7 @@ public class BladeXCodeAgent {
     private final ObjectMapper objectMapper;
     private final int maxReviewRetries;
     private final boolean autoCommit;
-    private final Consumer<StatusUpdateRequest> callbackNotifier;
+    private final WorkflowStatusNotifier statusNotifier;
     /** 阶段2: 配置(取 targetProjectRoot/outputRoot 决定写盘 root) */
     private final AiWorkflowProperties properties;
     /** 阶段2: 已有项目索引(REAL 模式查重用) */
@@ -72,12 +71,12 @@ public class BladeXCodeAgent {
                            BuildVerifier buildVerifier,
                            ObjectMapper objectMapper,
                            int maxReviewRetries, boolean autoCommit,
-                           Consumer<StatusUpdateRequest> callbackNotifier,
                            AiWorkflowProperties properties,
                            ConflictDetector conflictDetector,
                            ReferenceProjectIndex referenceProjectIndex,
                            TopologySorter topologySorter,
-                           GeneratedFileStore generatedFileStore) {
+                           GeneratedFileStore generatedFileStore,
+                           WorkflowStatusNotifier statusNotifier) {
         this.planMapper = planMapper;
         this.subPlanMapper = subPlanMapper;
         this.executionLogMapper = executionLogMapper;
@@ -90,12 +89,12 @@ public class BladeXCodeAgent {
         this.objectMapper = objectMapper;
         this.maxReviewRetries = maxReviewRetries;
         this.autoCommit = autoCommit;
-        this.callbackNotifier = callbackNotifier;
         this.properties = properties;
         this.conflictDetector = conflictDetector;
         this.referenceProjectIndex = referenceProjectIndex;
         this.topologySorter = topologySorter;
         this.generatedFileStore = generatedFileStore;
+        this.statusNotifier = statusNotifier;
     }
 
     /**
@@ -148,7 +147,7 @@ public class BladeXCodeAgent {
                 subPlanMapper.updateById(subPlan);
                 failedIds.add(subPlan.getId());
                 allSuccess = false;
-                notifyPartAForSubPlan(subPlan);
+                statusNotifier.notifySubPlan(subPlan);
                 continue;
             }
             try {
@@ -165,7 +164,7 @@ public class BladeXCodeAgent {
                 subPlanMapper.updateById(subPlan);
                 failedIds.add(subPlan.getId());
                 allSuccess = false;
-                notifyPartAForSubPlan(subPlan);
+                statusNotifier.notifySubPlan(subPlan);
             }
         }
         // 静默使用避免 unused 警告 — reverseDeps 留作未来按反向依赖快速跳过整条分支
@@ -200,7 +199,7 @@ public class BladeXCodeAgent {
         planMapper.updateById(plan);
 
         // 5. 回调Part A
-        notifyPartA(plan, executionOrder);
+        statusNotifier.notifyPlan(plan, executionOrder);
 
         log.info("工作流执行完成: receptionId={}, status={}", receptionId, plan.getStatus());
     }
@@ -287,7 +286,7 @@ public class BladeXCodeAgent {
                 subPlan.setErrorMessage(genResult.getErrorMessage());
                 subPlan.setCompletedAt(LocalDateTime.now());
                 subPlanMapper.updateById(subPlan);
-                notifyPartAForSubPlan(subPlan);
+                statusNotifier.notifySubPlan(subPlan);
                 return false;
             }
 
@@ -342,7 +341,7 @@ public class BladeXCodeAgent {
                     subPlan.setErrorMessage("规范校验失败: " + errorCount + " 个 ERROR / " + validation.getIssues().size() + " 个问题");
                     subPlan.setCompletedAt(LocalDateTime.now());
                     subPlanMapper.updateById(subPlan);
-                    notifyPartAForSubPlan(subPlan);
+                    statusNotifier.notifySubPlan(subPlan);
                     return false;
                 }
             }
@@ -412,7 +411,7 @@ public class BladeXCodeAgent {
                 subPlan.setErrorMessage("REAL 模式查重冲突,拒绝写盘: " + conflict);
                 subPlan.setCompletedAt(LocalDateTime.now());
                 subPlanMapper.updateById(subPlan);
-                notifyPartAForSubPlan(subPlan);
+                statusNotifier.notifySubPlan(subPlan);
                 return false;
             }
         }
@@ -441,7 +440,7 @@ public class BladeXCodeAgent {
                 subPlan.setErrorMessage(writeResult.getErrorMessage());
                 subPlan.setCompletedAt(LocalDateTime.now());
                 subPlanMapper.updateById(subPlan);
-                notifyPartAForSubPlan(subPlan);
+                statusNotifier.notifySubPlan(subPlan);
                 return false;
             }
 
@@ -461,7 +460,7 @@ public class BladeXCodeAgent {
         subPlanMapper.updateById(subPlan);
 
         // 3f. 回调Part A
-        notifyPartAForSubPlan(subPlan);
+        statusNotifier.notifySubPlan(subPlan);
 
         return true;
     }
@@ -1180,51 +1179,5 @@ public class BladeXCodeAgent {
             return voClassName.substring(0, voClassName.length() - 2);
         }
         return voClassName;
-    }
-
-    /**
-     * 通知Part A整体状态
-     */
-    private void notifyPartA(AiPlan plan, List<AiSubPlan> subPlans) {
-        StatusUpdateRequest request = new StatusUpdateRequest();
-        request.setReceptionId(plan.getReceptionId());
-        request.setProjectId(plan.getProjectId());
-        request.setOverallStatus(plan.getStatus() != null ? plan.getStatus().name() : null);
-
-        List<StatusUpdateRequest.SubPlanStatusItem> updates = new ArrayList<>();
-        for (AiSubPlan sp : subPlans) {
-            StatusUpdateRequest.SubPlanStatusItem item = new StatusUpdateRequest.SubPlanStatusItem();
-            item.setSubPlanId(sp.getPartASubPlanId() != null ? sp.getPartASubPlanId() : String.valueOf(sp.getId()));
-            item.setStatus(sp.getStatus() != null ? sp.getStatus().name() : null);
-            item.setGitCommitHash(sp.getGitCommitHash());
-            if (sp.getCompletedAt() != null) {
-                item.setCompletedAt(sp.getCompletedAt().toString());
-            }
-            updates.add(item);
-        }
-        request.setSubPlanUpdates(updates);
-
-        callbackNotifier.accept(request);
-    }
-
-    /**
-     * 通知Part A单个子方案状态
-     */
-    private void notifyPartAForSubPlan(AiSubPlan subPlan) {
-        log.info("子方案完成通知: id={}, status={}", subPlan.getId(), subPlan.getStatus());
-        StatusUpdateRequest request = new StatusUpdateRequest();
-        request.setReceptionId(null);
-        request.setOverallStatus(subPlan.getStatus() != null ? subPlan.getStatus().name() : null);
-        StatusUpdateRequest.SubPlanStatusItem item = new StatusUpdateRequest.SubPlanStatusItem();
-        item.setSubPlanId(subPlan.getPartASubPlanId() != null ? subPlan.getPartASubPlanId() : String.valueOf(subPlan.getId()));
-        item.setStatus(subPlan.getStatus() != null ? subPlan.getStatus().name() : null);
-        item.setGitCommitHash(subPlan.getGitCommitHash());
-        if (subPlan.getCompletedAt() != null) {
-            item.setCompletedAt(subPlan.getCompletedAt().toString());
-        }
-        request.setSubPlanUpdates(List.of(item));
-        if (callbackNotifier != null) {
-            callbackNotifier.accept(request);
-        }
     }
 }

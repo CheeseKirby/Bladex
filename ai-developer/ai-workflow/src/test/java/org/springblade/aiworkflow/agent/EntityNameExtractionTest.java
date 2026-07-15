@@ -21,7 +21,7 @@ class EntityNameExtractionTest {
         // 用反射调用 private 方法 extractEntityName(String)
         BladeXCodeAgent agent = new BladeXCodeAgent(
                 null, null, null, null, null, null, null, null, null, null,
-                0, false, req -> {}, null, null, null, null, null);
+                0, false, null, null, null, null, null, null);
         Method m = BladeXCodeAgent.class.getDeclaredMethod("extractEntityName", String.class);
         m.setAccessible(true);
         return (String) m.invoke(agent, content);
