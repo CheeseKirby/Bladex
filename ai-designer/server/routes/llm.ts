@@ -13,11 +13,18 @@
 import { Router, Request, Response } from 'express';
 import { buildAuthHeaders, getLlmConfig, isLlmConfigured } from '../config/llmConfig';
 import { requireBffAdmin } from '../security/adminGuard';
+import { createPayloadGuard } from '../http/payloadGuard';
+import { createRateLimitMiddleware } from '../http/rateLimit';
 
 export const llmRouter = Router();
 
 // LLM calls consume privileged server-side credentials and must never be an open proxy.
 llmRouter.use(requireBffAdmin);
+llmRouter.use(createRateLimitMiddleware({
+  maxRequests: Number(process.env.BFF_LLM_RATE_LIMIT || 30),
+  windowMs: Number(process.env.BFF_LLM_RATE_WINDOW_MS || 60_000),
+}));
+llmRouter.use(createPayloadGuard());
 
 const LLM_REQUEST_TIMEOUT_MS = 300_000; // 5 分钟(大项目方案审查/拆分较慢)
 

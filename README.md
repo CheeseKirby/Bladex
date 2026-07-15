@@ -161,5 +161,8 @@ powershell -ExecutionPolicy Bypass -File deploy.ps1
 | `PART_A_CALLBACK_URL` | `http://localhost:3004/api/transmission/status-update` | Part A 回调地址 |
 | `HOST` | `127.0.0.1` | BFF bind address; do not expose publicly without authentication |
 | `BFF_ADMIN_TOKEN` | (empty) | Required for non-loopback BFF access; keep empty for localhost-only mode |
+| `BFF_JSON_LIMIT` | `2mb` | Maximum JSON request body size |
+| `BFF_LLM_RATE_LIMIT` | `30` | Maximum LLM HTTP requests per rate window |
+| `BFF_LLM_RATE_WINDOW_MS` | `60000` | LLM rate-limit window in milliseconds |
 | `AI_WORKFLOW_ADMIN_TOKEN` | (空) | 管理端 token;未配置时写入端点仅接受本地回环 |
 | `TARGET_PROJECT_ROOT` | `../../ai-generated-modules` | 生成产物写入根 + 现有项目索引根(默认隔离区,不再指 blade_hgsjy 定制版) |

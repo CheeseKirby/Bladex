@@ -145,6 +145,9 @@ FRONTEND_ORIGIN=http://localhost:3005
 # BFF 转发到 Part B(ai-workflow)的地址(默认 8111)
 PART_B_URL=http://localhost:8111
 PART_A_CALLBACK_URL=http://localhost:3004/api/transmission/status-update
+BFF_JSON_LIMIT=2mb
+BFF_LLM_RATE_LIMIT=30
+BFF_LLM_RATE_WINDOW_MS=60000
 BFF_ADMIN_TOKEN=
 AI_WORKFLOW_ADMIN_TOKEN=
 "@ | Out-File -FilePath $envPath -Encoding utf8 -NoNewline
