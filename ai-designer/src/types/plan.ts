@@ -158,6 +158,14 @@ export interface ReviewIssue {
 export interface ReviewResult {
   passes: boolean;
   issues: ReviewIssue[];
+  reviewLog?: ReviewLogEntry[];
+}
+
+export interface ReviewLogEntry {
+  round: number;
+  action: string;
+  errorCount: number;
+  message: string;
 }
 
 // === 项目 ===

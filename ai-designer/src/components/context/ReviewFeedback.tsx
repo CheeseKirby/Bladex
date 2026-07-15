@@ -7,7 +7,7 @@ import {
   LoadingOutlined,
 } from '@ant-design/icons';
 import { usePlanStore } from '../../store/planStore';
-import { reviewPlan, splitPlan } from '../../services/api';
+import { splitPlan } from '../../services/api';
 
 const { Text, Paragraph } = Typography;
 
@@ -33,31 +33,60 @@ const ReviewFeedback: React.FC<ReviewFeedbackProps> = ({ onSwitchTab }) => {
   const setSubPlans = usePlanStore((s) => s.setSubPlans);
   const setIsStreaming = usePlanStore((s) => s.setIsStreaming);
   const [activeOp, setActiveOp] = useState<ActiveOp>(null);
+  const [reviewProgress, setReviewProgress] = useState('');
 
   const handleReviewMasterPlan = async () => {
     if (!project?.masterPlan || activeOp) return;
     setActiveOp('reviewing');
     setIsStreaming(true);
     setProjectStatus('REVIEWING');
+    setReviewProgress('开始审查...');
+    setReviewResult(null);
     try {
-      const result = await reviewPlan(project.masterPlan.planContent, 'master');
-      if (result.success) {
-        setReviewResult({
-          passes: result.data.passes,
-          issues: result.data.issues || [],
-        });
-        setMasterPlan({
-          ...project.masterPlan,
-          reviewedContent: result.data.fixedContent,
-          reviewChangeLog: result.data.changeLog,
-          status: 'REVIEWED',
-        });
-        setProjectStatus('REVIEWED');
-        message.success(`审查完成,发现 ${result.data.issues?.length || 0} 项问题`);
-      } else {
-        message.error(result.error || '审查失败');
-        setProjectStatus('PLAN_GENERATED');
+      const resp = await fetch('/api/llm/review-plan', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ planContent: project.masterPlan.planContent, stage: 'master' }),
+      });
+      if (!resp.ok || !resp.body) throw new Error(`HTTP ${resp.status}`);
+
+      const reader = resp.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const events = buffer.split('\n\n');
+        buffer = events.pop() || '';
+        for (const evt of events) {
+          if (!evt.startsWith('data: ')) continue;
+          try {
+            const msg = JSON.parse(evt.slice(6));
+            if (msg.type === 'progress') {
+              setReviewProgress(msg.message);
+            } else if (msg.type === 'done') {
+              setReviewResult({
+                passes: msg.data.passes,
+                issues: msg.data.issues || [],
+                reviewLog: msg.data.reviewLog || [],
+              });
+              setMasterPlan({
+                ...project.masterPlan,
+                reviewedContent: msg.data.fixedContent,
+                reviewChangeLog: msg.data.changeLog,
+                status: 'REVIEWED',
+              });
+              setReviewProgress('');
+            } else if (msg.type === 'error') {
+              throw new Error(msg.message);
+            }
+          } catch (e) { /* skip parse error */ }
+        }
       }
+      setProjectStatus('REVIEWED');
+      message.success('审查完成');
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       console.error('审查失败:', err);
@@ -174,6 +203,14 @@ const ReviewFeedback: React.FC<ReviewFeedbackProps> = ({ onSwitchTab }) => {
         )}
       </Space>
 
+      {/* 审查中实时进度 */}
+      {activeOp === 'reviewing' && reviewProgress && (
+        <div style={{ marginBottom: 8, padding: '8px 12px', background: '#e6f7ff', borderRadius: 4, display: 'flex', alignItems: 'center', gap: 8 }}>
+          <LoadingOutlined spin style={{ fontSize: 14, color: '#1890ff' }} />
+          <Text style={{ fontSize: 12, color: '#1890ff' }}>{reviewProgress}</Text>
+        </div>
+      )}
+
       {/* 审查结果 */}
       {reviewResult && (
         <div>
@@ -181,6 +218,19 @@ const ReviewFeedback: React.FC<ReviewFeedbackProps> = ({ onSwitchTab }) => {
             审查结果 ({reviewResult.issues.length} 项
             {reviewResult.passes ? ',全部为建议' : ',含阻断性问题'})
           </Text>
+          {reviewResult.reviewLog && reviewResult.reviewLog.length > 0 && (
+            <div style={{ marginBottom: 8, marginTop: 4, padding: '6px 8px', background: '#f5f5f5', borderRadius: 4 }}>
+              <Text style={{ fontSize: 11, color: '#999' }}>审查-修复过程:</Text>
+              {reviewResult.reviewLog.map((log, i) => (
+                <div key={i} style={{ fontSize: 11, color: '#666', marginTop: 2 }}>
+                  <Tag color={log.action === 'review' ? (log.errorCount === 0 ? 'green' : 'red') : 'blue'} style={{ fontSize: 10, lineHeight: '16px' }}>
+                    第{log.round}轮
+                  </Tag>
+                  {log.message}
+                </div>
+              ))}
+            </div>
+          )}
           <List
             size="small"
             dataSource={reviewResult.issues}

@@ -100,11 +100,22 @@ function buildReviewPlanSystemPrompt(stage: string): string {
   "issues": [
     { "severity": "ERROR"|"WARN", "rule": "...", "message": "..." }
   ],
-  "fixedContent": "(可选)修复后的完整方案",
+  "fixes": [
+    { "section": "原方案的 ## 章节标题(必须与原方案完全一致)", "newContent": "修复后的完整章节(含 ## 标题行)" }
+  ],
+  "fixedContent": "(仅当问题太复杂无法片段修复时提供完整方案)",
   "changeLog": [
     { "what": "...", "why": "...", "before": "...", "after": "..." }
   ]
-}`;
+}
+
+要求:
+- 发现 ERROR 级问题时 passes=false
+- **优先用 fixes(章节替换)修复**: 只返回需要改的章节, section 必须是原方案 ## 标题的精确文本
+- 如果问题跨多个章节关联(如 DDL 改字段 -> Entity/VO/Mapper 都要改), 把所有相关章节都放入 fixes, 保持章节间一致
+- 只有当问题太复杂无法用片段修复(需整体重组)时, 才提供完整 fixedContent
+- fixes 的 newContent 必须是完整章节(含 ## 标题行), 不要省略章节内未改动部分
+- 只有 WARN(无 ERROR)时 passes=true, fixes 为空`;
 }
 
 // ==================== /generate-plan (流式) ====================
@@ -122,41 +133,99 @@ llmRouter.post('/generate-plan', async (req: Request, res: Response) => {
 llmRouter.post('/review-plan', async (req: Request, res: Response) => {
   const { planContent, stage } = req.body as { planContent: string; stage: 'master' | 'subplan' };
 
+  // SSE: 审查-修复循环每轮发进度, 前端实时显示(不等最终结果, 无超时)
+  res.writeHead(200, {
+    'Content-Type': 'text/event-stream',
+    'Cache-Control': 'no-cache',
+    'Connection': 'keep-alive',
+  });
+  const sendSSE = (obj: object) => { res.write(`data: ${JSON.stringify(obj)}\n\n`); };
+
   if (!isLlmConfigured()) {
-    res.json({
-      success: true,
-      data: {
-        passes: true,
-        issues: [
-          {
-            severity: 'WARN',
-            rule: 'Controller规范',
-            message: '建议为所有Controller添加@ApiOperationSupport(order=N)控制Swagger排序',
-          },
-        ],
-        fixedContent: planContent,
-        changeLog: [],
-      },
-    });
+    sendSSE({ type: 'done', data: { passes: true, issues: [{ severity: 'WARN', rule: 'Controller规范', message: '建议为所有Controller添加@ApiOperationSupport(order=N)' }], fixedContent: planContent, reviewLog: [], changeLog: [] } });
+    res.end();
     return;
   }
 
   try {
-    const text = await callAnthropicJson(
-      buildReviewPlanSystemPrompt(stage || 'master'),
-      `请审查如下方案:\n\n${planContent}`
-    );
-    const data = safeJsonParse(text) ?? {
-      passes: true,
-      issues: [],
-      fixedContent: planContent,
-      changeLog: [],
-    };
-    res.json({ success: true, data });
+    // 审查-修复闭环: 审查 -> 有 ERROR -> 片段修复(前 2 轮) -> 全局重写(第 3 轮) -> 重审查 -> 直到无 ERROR
+    type Fix = { section: string; newContent: string };
+    type ReviewIssue = { severity?: string; rule?: string; message?: string };
+    type ReviewData = { passes?: boolean; issues?: ReviewIssue[]; fixes?: Fix[]; fixedContent?: string; changeLog?: unknown[] };
+    type ReviewLogEntry = { round: number; action: string; errorCount: number; message: string };
+
+    const MAX_ROUNDS = 3; // 最多 4 轮(初始审查 + 3 修复)
+    const FIX_ONLY_ROUNDS = 2; // 前 2 轮优先片段修复, 第 3 轮可全局重写
+    let currentContent = planContent;
+    let lastData: ReviewData = { passes: true, issues: [], fixes: [], fixedContent: planContent, changeLog: [] };
+    const reviewLog: ReviewLogEntry[] = [];
+
+    for (let attempt = 0; attempt <= MAX_ROUNDS; attempt++) {
+      sendSSE({ type: 'progress', message: `第 ${attempt + 1} 轮审查中...` });
+      const refSummary = await getReferenceAdaptationSummary();
+      const text = await callAnthropicJson(
+        withReferenceSummary(buildReviewPlanSystemPrompt(stage || 'master'), refSummary),
+        `请审查如下方案:\n\n${currentContent}`
+      );
+      const data: ReviewData = safeJsonParse(text) ?? lastData;
+      lastData = {
+        passes: data.passes ?? true,
+        issues: data.issues ?? [],
+        fixes: data.fixes ?? [],
+        fixedContent: data.fixedContent ?? currentContent,
+        changeLog: data.changeLog ?? [],
+      };
+
+      const errorCount = Array.isArray(lastData.issues)
+        ? lastData.issues.filter((i) => i.severity === 'ERROR').length : 0;
+
+      // 无 ERROR -> 通过
+      if (lastData.passes || errorCount === 0) {
+        reviewLog.push({ round: attempt + 1, action: 'review', errorCount: 0, message: `审查通过(第 ${attempt + 1} 轮)` });
+        break;
+      }
+      // 达上限 -> 停
+      if (attempt === MAX_ROUNDS) {
+        reviewLog.push({ round: attempt + 1, action: 'review', errorCount, message: `达最大轮次, 剩余 ${errorCount} 个 ERROR` });
+        break;
+      }
+
+      // 修复: 前 FIX_ONLY_ROUNDS 轮优先片段, 之后可全局
+      const fixes = Array.isArray(lastData.fixes) ? lastData.fixes : [];
+      const hasFixedContent = lastData.fixedContent && lastData.fixedContent !== currentContent;
+
+      if (fixes.length > 0 && attempt < FIX_ONLY_ROUNDS) {
+        // 片段修复(优先)
+        const { result, applied, skipped } = applyFixes(currentContent, fixes);
+        currentContent = result;
+        reviewLog.push({ round: attempt + 1, action: 'fix-sections', errorCount, message: `片段修复 ${applied} 章节(跳过 ${skipped}), 原 ${errorCount} ERROR` });
+      } else if (hasFixedContent) {
+        // 全局重写(片段修不好 或 超过 FIX_ONLY_ROUNDS)
+        currentContent = lastData.fixedContent!;
+        reviewLog.push({ round: attempt + 1, action: 'fix-full-rewrite', errorCount, message: `全局重写, 原 ${errorCount} ERROR` });
+      } else if (fixes.length > 0) {
+        // 超过 FIX_ONLY_ROUNDS 但只有 fixes, 继续片段
+        const { result, applied } = applyFixes(currentContent, fixes);
+        currentContent = result;
+        reviewLog.push({ round: attempt + 1, action: 'fix-sections', errorCount, message: `片段修复 ${applied} 章节, 原 ${errorCount} ERROR` });
+      } else {
+        // 有 ERROR 但无修复方案 -> 停
+        reviewLog.push({ round: attempt + 1, action: 'review', errorCount, message: `${errorCount} ERROR 但无修复方案` });
+        break;
+      }
+      // 修复后发进度(最后一条 reviewLog)
+      if (reviewLog.length > 0) {
+        sendSSE({ type: 'progress', message: reviewLog[reviewLog.length - 1].message });
+      }
+    }
+
+    sendSSE({ type: 'done', data: { passes: lastData.passes ?? true, issues: lastData.issues ?? [], fixedContent: currentContent, reviewLog, changeLog: lastData.changeLog ?? [] } });
+    res.end();
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     console.error('[/review-plan] LLM 调用失败:', msg);
-    res.status(502).json({ success: false, error: msg });
+    sendSSE({ type: 'error', message: msg });
+    res.end();
   }
 });
 
@@ -376,7 +445,8 @@ llmRouter.post('/split-plan', async (req: Request, res: Response) => {
   }
 
   try {
-    const text = await callAnthropicJson(buildSplitPlanSystemPrompt(), `总方案:\n\n${planContent}`);
+    const refSummary = await getReferenceAdaptationSummary();
+    const text = await callAnthropicJson(withReferenceSummary(buildSplitPlanSystemPrompt(), refSummary), `总方案:\n\n${planContent}`);
     const parsed = safeJsonParse(text);
     const subPlans = Array.isArray(parsed?.subPlans) ? (parsed.subPlans as unknown[]) : [];
     if (subPlans.length === 0) {
@@ -435,6 +505,47 @@ llmRouter.post('/split-plan', async (req: Request, res: Response) => {
 });
 
 // ==================== Live LLM 实现 ====================
+
+/** 获取 Part B 参考项目适配摘要(版本+项目结构+衔接点)。参考项目未就绪/Part B 不可达返回 null */
+async function getReferenceAdaptationSummary(): Promise<string | null> {
+  const partBUrl = process.env.PART_B_URL || 'http://localhost:8111';
+  try {
+    const resp = await fetch(`${partBUrl}/api/project/adaptation-summary`, { signal: AbortSignal.timeout(5000) });
+    if (!resp.ok) return null;
+    const data = await resp.json();
+    return data?.data ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/** 拼接参考项目摘要到 systemPrompt(无摘要则原样返回) */
+function withReferenceSummary(basePrompt: string, refSummary: string | null): string {
+  if (!refSummary) return basePrompt;
+  return basePrompt + '\n\n== 参考项目适配(新模块必须遵循, 以接入参考项目编译) ==\n' + refSummary;
+}
+
+/** 按 ## 章节标题替换方案内容。标题没匹配上的 fix 跳过(不破坏原方案)。 */
+function applyFixes(plan: string, fixes: { section: string; newContent: string }[]): { result: string; applied: number; skipped: number } {
+  let result = plan;
+  let applied = 0;
+  let skipped = 0;
+  for (const fix of fixes) {
+    const section = fix.section.trim();
+    const start = result.indexOf(section);
+    if (start < 0) {
+      console.warn(`[/review-plan] 章节未匹配, 跳过: ${section.substring(0, 40)}`);
+      skipped++;
+      continue;
+    }
+    // 找下一个 ## 标题(章节结束位置)
+    const nextSection = result.indexOf('\n## ', start + section.length);
+    const end = nextSection >= 0 ? nextSection : result.length;
+    result = result.substring(0, start) + fix.newContent + result.substring(end);
+    applied++;
+  }
+  return { result, applied, skipped };
+}
 
 /** 调用 Anthropic Messages API(非流式),返回首个 text block */
 async function callAnthropicJson(systemPrompt: string, userPrompt: string): Promise<string> {
@@ -543,6 +654,7 @@ async function handleLiveGeneratePlan(req: Request, res: Response): Promise<void
     clearTimeout(timer);
   });
 
+  const refSummary = await getReferenceAdaptationSummary();
   let upstream: globalThis.Response;
   try {
     upstream = await fetch(`${base}/v1/messages`, {
@@ -552,7 +664,7 @@ async function handleLiveGeneratePlan(req: Request, res: Response): Promise<void
         model: cfg.model,
         max_tokens: cfg.maxTokens,
         stream: true,
-        system: buildGeneratePlanSystemPrompt(),
+        system: withReferenceSummary(buildGeneratePlanSystemPrompt(), refSummary),
         messages: [{ role: 'user', content: userPrompt }],
       }),
       signal: controller.signal,

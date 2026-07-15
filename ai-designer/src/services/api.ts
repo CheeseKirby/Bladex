@@ -117,9 +117,9 @@ export async function generatePlanStream(
   return { abort: () => { cleanup(); controller.abort(); } };
 }
 
-/** 审查方案（非流式） - 审查大方案 LLM 可能较慢,单独设 5 分钟超时 */
+/** 审查方案（非流式） - 审查-修复闭环(最多2轮)LLM 较慢,设 10 分钟超时 */
 export async function reviewPlan(planContent: string, stage: 'master' | 'subplan') {
-  const res = await api.post('/llm/review-plan', { planContent, stage }, { timeout: 300000 });
+  const res = await api.post('/llm/review-plan', { planContent, stage }, { timeout: 600000 });
   return res.data;
 }
 

@@ -919,6 +919,49 @@ class CrossFileValidatorTest {
                         + issues.stream().map(Object::toString).reduce((a, b) -> a + " | " + b).orElse(""));
     }
 
+    @Test
+    void shouldDetectVoImportNotInGenerationSet() {
+        // 复现 specialperiod 真实问题: Controller import SpecialPeriodIVO(pojo.vo 包) 但 IVO 未生成
+        GeneratedFile entity = file(
+                "blade-service-api/blade-specialperiod-api/src/main/java/org/springblade/specialperiod/pojo/entity/SpecialPeriod.java",
+                """
+                package org.springblade.specialperiod.pojo.entity;
+                public class SpecialPeriod extends BaseEntity {
+                    private String periodName;
+                }
+                """
+        );
+        GeneratedFile vo = file(
+                "blade-service-api/blade-specialperiod-api/src/main/java/org/springblade/specialperiod/pojo/vo/SpecialPeriodVO.java",
+                "package org.springblade.specialperiod.pojo.vo; public class SpecialPeriodVO {}"
+        );
+        GeneratedFile controller = file(
+                "blade-service/blade-specialperiod/src/main/java/org/springblade/specialperiod/controller/SpecialPeriodController.java",
+                """
+                package org.springblade.specialperiod.controller;
+                import org.springblade.specialperiod.pojo.vo.SpecialPeriodIVO;
+                import org.springblade.specialperiod.pojo.vo.SpecialPeriodVO;
+                public class SpecialPeriodController {
+                    public void save(SpecialPeriodIVO ivo) {}
+                }
+                """
+        );
+
+        List<CrossFileValidator.ContractIssue> issues = validator.validate(List.of(entity, vo, controller), true);
+
+        // checkVoImportClosure 应检出 Controller import 未生成的 SpecialPeriodIVO
+        assertTrue(issues.stream().anyMatch(i -> "CROSS-IMPORT-CLOSURE-MISSING".equals(i.rule)
+                        && i.message.contains("SpecialPeriodIVO")),
+                "应检出 Controller import 未生成的 SpecialPeriodIVO(VO 类缺失); 实际: "
+                        + issues.stream().map(Object::toString).reduce((a, b) -> a + " | " + b).orElse(""));
+        // SpecialPeriodVO 在集合内, 不应误报
+        long voMisses = issues.stream()
+                .filter(i -> "CROSS-IMPORT-CLOSURE-MISSING".equals(i.rule) && i.message.contains("SpecialPeriodVO")
+                        && !i.message.contains("IVO"))
+                .count();
+        assertEquals(0, voMisses, "SpecialPeriodVO 已在集合, 不应误报");
+    }
+
     private GeneratedFile file(String path, String content) {
         return new GeneratedFile(TaskType.OTHER, path, content, "CREATED");
     }

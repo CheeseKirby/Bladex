@@ -42,6 +42,7 @@ public class ProjectScanController {
 
     private final IProjectScanService projectScanService;
     private final AdminTokenGuard guard;
+    private final org.springblade.aiworkflow.agent.ReferenceProjectIndex referenceProjectIndex;
 
     @GetMapping("/scan")
     @Operation(summary = "扫描已有项目结构(只读)", description = "递归扫 .java 建立索引并缓存。force=false 有缓存则返回缓存。需 X-Admin-Token")
@@ -79,6 +80,16 @@ public class ProjectScanController {
     @Operation(summary = "查询参考项目状态", description = "返回当前参考项目路径/是否就绪/文件数。path=null 表示未设置")
     public ApiResponse<ReferenceProjectVO> getReference() {
         return ApiResponse.ok(projectScanService.getReferenceStatus());
+    }
+
+    @GetMapping("/adaptation-summary")
+    @Operation(summary = "获取参考项目适配摘要", description = "返回版本约束+项目结构分析,供 Part A 生成方案时参考。无鉴权(只读摘要)")
+    public ApiResponse<String> getAdaptationSummary() {
+        String summary = referenceProjectIndex.buildAdaptationSummary();
+        if (summary == null) {
+            return ApiResponse.fail(404, "参考项目未就绪,请先 POST /api/project/reference 设置路径");
+        }
+        return ApiResponse.ok(summary);
     }
 
     @GetMapping("/browse")

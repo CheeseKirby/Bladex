@@ -187,6 +187,9 @@ public class ReferenceProjectIndex {
             // 4. Application 启动类风格(取一个示例)
             extractApplicationConvention(sb);
 
+            // 5. 项目结构分析(模块树/现有模块/包结构/衔接点) - 让 Part A 总方案理清新模块与参考项目的衔接
+            extractProjectStructure(sb);
+
             return sb.toString();
         } catch (Exception e) {
             log.warn("构建项目适配摘要失败: {}", e.getMessage());
@@ -352,6 +355,25 @@ public class ReferenceProjectIndex {
             }
         }
         sb.append("- bootstrap.yml + application-dev.yml 双配置文件\n");
+
+        // 多租户配置(影响新表是否需 tenant_id + Entity 基类选择)
+        Path appDev = findFirstFile(projectRoot, "application-dev.yml");
+        if (appDev != null) {
+            String appContent = readSourceContent(projectRoot.relativize(appDev).toString().replace('\\', '/'));
+            if (appContent != null) {
+                java.util.regex.Matcher tm = java.util.regex.Pattern
+                        .compile("tenant.*enable:\\s*(\\w+)").matcher(appContent);
+                if (tm.find()) {
+                    String tenantEnabled = tm.group(1);
+                    sb.append("- 多租户: tenant.enable=").append(tenantEnabled).append("\n");
+                    if ("true".equalsIgnoreCase(tenantEnabled)) {
+                        sb.append("  (新表必须含 tenant_id 列, Entity extends TenantEntity)\n");
+                    } else {
+                        sb.append("  (新表无需 tenant_id, Entity extends BaseEntity)\n");
+                    }
+                }
+            }
+        }
         sb.append("\n");
     }
 
@@ -372,6 +394,85 @@ public class ReferenceProjectIndex {
         }
         sb.append("- @SpringBootApplication + @EnableFeignClients 等标准注解\n");
         sb.append("\n");
+    }
+
+    /**
+     * 提取项目结构分析 - 模块树/现有模块/包结构示例/衔接点。
+     * 让 Part A 总方案理清新模块与参考项目的衔接(不扫具体代码,只了解结构)。
+     */
+    private void extractProjectStructure(StringBuilder sb) {
+        sb.append("[项目结构分析]\n");
+
+        // 1. 父 pom modules(模块树)
+        String parentPom = readSourceContent("pom.xml");
+        if (parentPom != null) {
+            java.util.regex.Matcher mm = java.util.regex.Pattern
+                    .compile("<module>([^<]+)</module>").matcher(parentPom);
+            List<String> modules = new ArrayList<>();
+            while (mm.find()) modules.add(mm.group(1));
+            sb.append("- 父 pom modules: ").append(modules.isEmpty() ? "(无)" : String.join(", ", modules)).append("\n");
+        }
+
+        // 2. 现有模块清单(blade-service-api/blade-*-api + blade-service/blade-*)
+        List<String> apiModules = listChildModules("blade-service-api", "-api");
+        List<String> serviceModules = listChildModules("blade-service", "");
+        if (!apiModules.isEmpty()) {
+            sb.append("- 现有 API 模块: ").append(String.join(", ", apiModules)).append("\n");
+        }
+        if (!serviceModules.isEmpty()) {
+            sb.append("- 现有 Service 模块: ").append(String.join(", ", serviceModules)).append("\n");
+        }
+
+        // 3. 包结构示例(取第一个 service 模块的 org.springblade.{module} 包层次)
+        if (!serviceModules.isEmpty()) {
+            String firstModule = serviceModules.get(0);
+            List<String> packages = listPackages(firstModule);
+            if (!packages.isEmpty()) {
+                sb.append("- 包结构示例(").append(firstModule).append("): ").append(String.join("/", packages)).append("\n");
+            }
+        }
+
+        // 4. 衔接点(新模块如何接入参考项目)
+        sb.append("- 新模块接入:\n");
+        sb.append("  * 父 pom <modules> 注册 blade-service-api/blade-{module}-api + blade-service/blade-{module}\n");
+        sb.append("  * Nacos 服务名: blade-{module}\n");
+        sb.append("  * Feign client value: blade-{module}(与 Nacos 服务名一致, 不带 -service)\n");
+        sb.append("  * 新模块包路径: org.springblade.{module}.pojo.entity / .pojo.vo / .controller / .service / .mapper / .wrapper\n");
+        sb.append("  * Mapper XML 放 src/main/java 同包(需 pom 配置 resources 过滤 *.xml)\n");
+        sb.append("\n");
+    }
+
+    /** 列出 blade-{parentDir} 下的子模块目录名(排除父目录自身) */
+    private List<String> listChildModules(String parentDir, String suffix) {
+        List<String> modules = new ArrayList<>();
+        Path dir = projectRoot.resolve(parentDir);
+        if (!Files.isDirectory(dir)) return modules;
+        try (Stream<Path> s = Files.list(dir)) {
+            s.filter(Files::isDirectory)
+                    .map(p -> p.getFileName().toString())
+                    .filter(name -> name.startsWith("blade-") && name.endsWith(suffix) && !name.equals(parentDir))
+                    .forEach(modules::add);
+        } catch (IOException e) {
+            log.warn("列出模块目录失败: {}", e.getMessage());
+        }
+        return modules;
+    }
+
+    /** 列出某 service 模块的包层次(如 controller/service/mapper/wrapper) */
+    private List<String> listPackages(String module) {
+        List<String> packages = new ArrayList<>();
+        String moduleName = module.startsWith("blade-") ? module.substring(6) : module;
+        Path pkgPath = projectRoot.resolve("blade-service").resolve(module)
+                .resolve("src/main/java/org/springblade/" + moduleName);
+        if (!Files.isDirectory(pkgPath)) return packages;
+        try (Stream<Path> s = Files.list(pkgPath)) {
+            s.filter(Files::isDirectory)
+                    .map(p -> p.getFileName().toString())
+                    .forEach(packages::add);
+        } catch (IOException e) {
+            log.warn("列出包目录失败: {}", e.getMessage());
+        }
+        return packages;
     }
 
     /** 在目录下找第一个 pom.xml */

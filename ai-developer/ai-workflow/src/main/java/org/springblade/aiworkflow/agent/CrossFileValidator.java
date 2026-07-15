@@ -54,6 +54,15 @@ public class CrossFileValidator {
      * @return 校验结果, issues 列表为空表示通过
      */
     public List<ContractIssue> validate(List<GeneratedFile> files) {
+        return validate(files, false);
+    }
+
+    /**
+     * 跨文件契约校验。
+     * @param planWide true=plan 级(所有文件齐, 检 vo import 闭合); false=子方案级(跨子方案 VO 不全,
+     *                 跳过 vo import 避免误报 -- 实测子方案 #4 Controller 引用 #2 的 EVO/QVO, 子方案级误报)
+     */
+    public List<ContractIssue> validate(List<GeneratedFile> files, boolean planWide) {
         List<ContractIssue> issues = new ArrayList<>();
         if (files == null || files.isEmpty()) return issues;
 
@@ -288,6 +297,13 @@ public class CrossFileValidator {
         //    必须在生成集合内, 否则编译失败(类找不到)。
         //    典型: CourseServiceImpl import RecordMapper 但本次未生成 Record 实体配套文件。
         checkImportClosure(units, cuToFilePath, index, issues);
+
+        // 9b. VO 类 import 闭合: 任何文件 import pojo.vo.{XxxVO/IVO/UVO/QVO/EVO} 必须在生成集合内。
+        //     checkImportClosure 只检 mapper/service 包且跳过 Mapper 接口, 漏检 Controller/Wrapper/Mapper
+        //     引用未生成的 IVO/UVO/QVO/EVO(实测 specialperiod 只生成 VO, 引用 IVO/UVO/QVO/EVO 漏检)。
+        if (planWide) {
+            checkVoImportClosure(units, cuToFilePath, index, issues);
+        }
 
         // 10. VO/IVO/UVO 业务字段 ↔ Entity 字段一致性(B1/B2/B3, ERROR 可修复)
         checkVoEntityFieldConsistency(units, cuToFilePath, index, issues);
@@ -679,6 +695,42 @@ public class CrossFileValidator {
      * 本规则只检"指向 org.springblade.{本模块}.mapper / .service 的 import",
      * 避免误报平台类(BladeMapper/BaseService 等不在生成集合是正常的)。
      */
+    /**
+     * 9b. VO 类 import 闭合: 任何文件 import org.springblade.{module}.pojo.vo.{XxxVO/IVO/UVO/QVO/EVO},
+     * 该 VO 类必须在生成集合内, 否则编译失败。
+     *
+     * <p>checkImportClosure 只检 mapper/service 包且跳过 Mapper 接口, 漏检 Controller/Wrapper/Mapper
+     * 引用未生成的 IVO/UVO/QVO/EVO。本规则补这个漏洞(实测: specialperiod 只生成 VO,
+     * Controller/Wrapper/Mapper 引用 IVO/UVO/QVO/EVO 漏检 -> 编译失败但 plan COMPLETED)。
+     *
+     * <p>不误报: VO 类自身不 import vo 包(VO extends Entity), 故只在 Controller/Wrapper/Mapper 等
+     * 引用 vo 类时触发; 平台类(org.springblade.core.*)不在检范围。
+     */
+    private void checkVoImportClosure(List<CompilationUnit> units,
+                                       Map<CompilationUnit, String> cuToFilePath,
+                                       Map<String, ClassInfo> index,
+                                       List<ContractIssue> issues) {
+        Set<String> generatedClassNames = index.keySet();
+        for (CompilationUnit cu : units) {
+            String pkg = cu.getPackageDeclaration().map(p -> p.getNameAsString()).orElse("");
+            String module = extractModuleFromPkg(pkg);
+            if (module == null) continue;
+            String voPrefix = "org.springblade." + module + ".pojo.vo.";
+            String file = cu.getStorage().map(s -> s.getFileName().toString()).orElse("?");
+            for (com.github.javaparser.ast.ImportDeclaration imp : cu.getImports()) {
+                String imped = imp.getNameAsString();
+                if (!imped.startsWith(voPrefix)) continue;
+                String simpleName = simpleName(imped);
+                if (!generatedClassNames.contains(simpleName)) {
+                    issues.add(new ContractIssue("ERROR",
+                            file + " import " + imped + " (pojo.vo 包) 但该 VO 类未在生成集合 -> 编译失败",
+                            "CROSS-IMPORT-CLOSURE-MISSING",
+                            cuToFilePath.get(cu), null));
+                }
+            }
+        }
+    }
+
     private void checkImportClosure(List<CompilationUnit> units,
                                      Map<CompilationUnit, String> cuToFilePath,
                                      Map<String, ClassInfo> index,
@@ -792,8 +844,9 @@ public class CrossFileValidator {
 
     /** 展示衍生字段判定: 字典翻译/显示名称类字段(xxxName), 允许 VO 额外持有 */
     private boolean isDisplayDerivedField(String fname) {
-        // 以 Name 结尾且长度 > 4(排除单词 name), 视为展示衍生(如 customerTypeName, statusName)
-        return fname.endsWith("Name") && fname.length() > 4;
+        // 展示衍生字段: 字典翻译/显示名称/描述类(xxxName/xxxDesc/xxxText), 允许 VO 额外持有
+        // 排除单词 name/desc/text(长度 > 4)
+        return (fname.endsWith("Name") || fname.endsWith("Desc") || fname.endsWith("Text")) && fname.length() > 4;
     }
 
     // ─── B8: Mapper XML resultMap type ↔ 方法返回类型 ───

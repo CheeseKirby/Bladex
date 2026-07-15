@@ -39,7 +39,7 @@ public class AiWorkflowConfiguration {
     public OkHttpClient llmHttpClient() {
         return new OkHttpClient.Builder()
                 .connectTimeout(30, TimeUnit.SECONDS)
-                .readTimeout(240, TimeUnit.SECONDS)
+                .readTimeout(600, TimeUnit.SECONDS)
                 .writeTimeout(60, TimeUnit.SECONDS)
                 .retryOnConnectionFailure(true)
                 .followRedirects(false)         // 防止重定向到内网导致 SSRF 放大

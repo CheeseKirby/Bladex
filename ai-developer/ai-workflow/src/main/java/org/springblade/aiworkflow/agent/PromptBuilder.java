@@ -458,7 +458,7 @@ public class PromptBuilder {
 
                 == BladeX规范 (来自 bladex-feign.md) ==
                 - 本次只生成 Feign 接口 I{Name}Client, 不要生成 Fallback 类和实现类
-                - @FeignClient(value = "blade-{module}-service") — **不要写 fallback 属性**
+                - @FeignClient(value = "blade-{module}") — **不要写 fallback 属性**
                   (fallback 类本次不生成, 引用会导致编译失败; 后续单独生成时再补 fallback)
                 - 接口方法返回 R<{Entity}> 或 R<List<{Entity}>>, 与 Controller 端点对应
                 - @RequestParam 必须指定 value
@@ -466,7 +466,7 @@ public class PromptBuilder {
                 - import Entity: org.springblade.{module}.pojo.entity.{Entity}
 
                 == 完整代码模板 ==
-                @FeignClient(value = "blade-{module}-service")
+                @FeignClient(value = "blade-{module}")
                 public interface I{Name}Client {
                     String API_PREFIX = "/feign/client/{module}";
                     @GetMapping(API_PREFIX + "/get-by-id")

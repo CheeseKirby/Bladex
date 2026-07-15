@@ -185,6 +185,7 @@ public class LlmClient {
                 "model", config.getModel(),
                 "max_tokens", maxTokens,
                 "temperature", config.getTemperature(),
+                "thinking", Map.of("type", "disabled"),
                 "system", systemPrompt,
                 "messages", List.of(
                         Map.of("role", "user", "content", userPrompt)

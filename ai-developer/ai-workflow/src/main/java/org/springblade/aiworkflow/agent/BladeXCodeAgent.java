@@ -774,15 +774,10 @@ public class BladeXCodeAgent {
         // 3. VO 类 — 标题含 "VO/视图",生成所有在内容里被提及的 VO 类（落 API 模块 pojo.vo）
         if (title.contains("VO") || title.contains("视图")) {
             for (String suffix : new String[]{"QVO", "IVO", "UVO", "VO", "EVO"}) {
-                // 触发条件: 内容里出现 EntityName+suffix (如 OrderQVO),或子方案标题就是 "Entity 与 VO"
-                boolean mentioned = content.contains(entityName + suffix)
-                        || content.matches("(?s).*\\b" + suffix + "\\b.*");
-                if (mentioned) {
                     tasks.add(buildTask(TaskType.OTHER,
-                            title + " — 生成 " + entityName + suffix + " 类\n\n" + voInstructions(suffix, entityName) + "\n\n" + fullContext,
-                            BladeXModuleLayout.voPath(moduleName, entityName, suffix),
-                            entityName, moduleName));
-                }
+                    title + " — 生成 " + entityName + suffix + " 类\n\n" + voInstructions(suffix, entityName) + "\n\n" + fullContext,
+                    BladeXModuleLayout.voPath(moduleName, entityName, suffix),
+                    entityName, moduleName));
             }
         }
 
@@ -1098,7 +1093,7 @@ public class BladeXCodeAgent {
                 log.info("plan 级跨文件校验跳过: 无生成文件");
                 return;
             }
-            List<CrossFileValidator.ContractIssue> issues = crossFileValidator.validate(files);
+            List<CrossFileValidator.ContractIssue> issues = crossFileValidator.validate(files, true);
             long errorCount = issues.stream().filter(CrossFileValidator.ContractIssue::isError).count();
             String summary = "plan 级跨文件契约校验: " + files.size() + " 个 Java 文件, "
                     + issues.size() + " 项问题 (" + errorCount + " ERROR, "
