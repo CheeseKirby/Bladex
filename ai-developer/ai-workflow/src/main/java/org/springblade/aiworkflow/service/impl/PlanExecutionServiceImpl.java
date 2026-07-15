@@ -26,6 +26,7 @@ import org.springblade.aiworkflow.vo.GeneratedFileSummaryVO;
 import org.springblade.aiworkflow.vo.PlanReceiveRequest;
 import org.springblade.aiworkflow.vo.PlanReceiveResponse;
 import org.springblade.aiworkflow.vo.SubPlanDetailVO;
+import org.springblade.aiworkflow.validation.PlanRequestValidator;
 import org.springframework.scheduling.annotation.Async;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -61,6 +62,7 @@ public class PlanExecutionServiceImpl implements IPlanExecutionService {
     private final ObjectMapper objectMapper;
     private final ProjectWriteLockManager projectWriteLockManager;
     private final AiWorkflowProperties properties;
+    private final PlanRequestValidator planRequestValidator;
 
     /** 进行中的 receptionId,用于幂等保护,防止控制器/重试导致同一方案并发执行。 */
     private final Set<String> inFlight = ConcurrentHashMap.newKeySet();
@@ -70,7 +72,8 @@ public class PlanExecutionServiceImpl implements IPlanExecutionService {
                                     AiExecutionLogMapper executionLogMapper,
                                     BladeXCodeAgent bladeXCodeAgent, ObjectMapper objectMapper,
                                     ProjectWriteLockManager projectWriteLockManager,
-                                    AiWorkflowProperties properties) {
+                                    AiWorkflowProperties properties,
+                                    PlanRequestValidator planRequestValidator) {
         this.planMapper = planMapper;
         this.subPlanMapper = subPlanMapper;
         this.generatedFileMapper = generatedFileMapper;
@@ -79,11 +82,13 @@ public class PlanExecutionServiceImpl implements IPlanExecutionService {
         this.objectMapper = objectMapper;
         this.projectWriteLockManager = projectWriteLockManager;
         this.properties = properties;
+        this.planRequestValidator = planRequestValidator;
     }
 
     @Override
     @Transactional(rollbackFor = Exception.class)
     public PlanReceiveResponse receivePlan(PlanReceiveRequest request) {
+        planRequestValidator.validate(request);
         // M6: 幂等 - 同 projectId + 同 masterPlanContent 已存在且未 FAILED, 返回旧 receptionId
         // (避免 Part A 超时重试产生重复 plan 并重复执行; 旧 FAILED 则允许新 plan 重来)
         if (request.getProjectId() != null && request.getMasterPlan() != null

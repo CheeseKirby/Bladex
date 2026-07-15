@@ -2,76 +2,94 @@ package org.springblade.aiworkflow.vo;
 
 import io.swagger.v3.oas.annotations.media.Schema;
 import jakarta.validation.Valid;
+import jakarta.validation.constraints.Min;
 import jakarta.validation.constraints.NotBlank;
+import jakarta.validation.constraints.NotEmpty;
+import jakarta.validation.constraints.NotNull;
+import jakarta.validation.constraints.Size;
 import lombok.Data;
 
 import java.util.List;
 
 @Data
-@Schema(description = "方案接收请求")
+@Schema(description = "Plan receive request")
 public class PlanReceiveRequest {
 
-    @NotBlank(message = "项目ID不能为空")
-    @Schema(description = "Part A项目ID")
+    @NotBlank(message = "projectId is required")
+    @Size(max = 100, message = "projectId must not exceed 100 characters")
+    @Schema(description = "Part A project ID")
     private String projectId;
 
-    @NotBlank(message = "项目名称不能为空")
-    @Schema(description = "项目名称")
+    @NotBlank(message = "projectName is required")
+    @Size(max = 200, message = "projectName must not exceed 200 characters")
+    @Schema(description = "Project name")
     private String projectName;
 
+    @NotNull(message = "masterPlan is required")
     @Valid
-    @Schema(description = "总方案")
+    @Schema(description = "Master plan")
     private MasterPlanVO masterPlan;
 
+    @NotEmpty(message = "subPlans must not be empty")
+    @Size(max = 50, message = "subPlans must not contain more than 50 entries")
     @Valid
-    @Schema(description = "子方案列表")
-    private List<SubPlanVO> subPlans;
+    @Schema(description = "Sub-plan list")
+    private List<@NotNull @Valid SubPlanVO> subPlans;
 
-    @Schema(description = "元数据")
+    @Valid
+    @Schema(description = "Request metadata")
     private MetadataVO metadata;
 
-    /**
-     * 写入目标 — 阶段2 控制:ISOLATED(默认,落隔离区) / REAL(落目标项目根,需鉴权+查重)。
-     * 空/非法值按 ISOLATED 处理(安全默认)。
-     */
-    @Schema(description = "写入目标: ISOLATED(隔离区,默认) / REAL(真实项目,需鉴权)",
-            defaultValue = "ISOLATED")
+    /** Empty values default to ISOLATED. REAL writes require administrator authorization. */
+    @Schema(description = "Write target: ISOLATED or REAL", defaultValue = "ISOLATED")
     private String writeTarget;
 
     @Data
-    @Schema(description = "总方案")
+    @Schema(description = "Master plan")
     public static class MasterPlanVO {
-        @Schema(description = "方案ID")
+        @NotBlank(message = "masterPlan.id is required")
+        @Size(max = 100)
         private String id;
-        @Schema(description = "版本号")
+
+        @Min(value = 1, message = "masterPlan.version must be positive")
         private Integer version;
-        @Schema(description = "方案内容(Markdown)")
+
+        @NotBlank(message = "masterPlan.content is required")
+        @Size(max = 1_000_000, message = "masterPlan.content is too large")
         private String content;
     }
 
     @Data
-    @Schema(description = "子方案")
+    @Schema(description = "Sub-plan")
     public static class SubPlanVO {
-        @Schema(description = "子方案ID")
+        @NotBlank(message = "subPlan.id is required")
+        @Size(max = 100)
         private String id;
-        @Schema(description = "序号")
+
+        @NotNull(message = "subPlan.index is required")
+        @Min(value = 1, message = "subPlan.index must be positive")
         private Integer index;
-        @Schema(description = "标题")
+
+        @NotBlank(message = "subPlan.title is required")
+        @Size(max = 200)
         private String title;
-        @Schema(description = "子方案内容(Markdown)")
+
+        @NotBlank(message = "subPlan.content is required")
+        @Size(max = 1_000_000, message = "subPlan.content is too large")
         private String content;
-        @Schema(description = "前置依赖子方案ID列表")
-        private List<String> prerequisites;
+
+        @Size(max = 50, message = "A sub-plan must not have more than 50 prerequisites")
+        private List<@NotBlank @Size(max = 100) String> prerequisites;
     }
 
     @Data
-    @Schema(description = "元数据")
+    @Schema(description = "Request metadata")
     public static class MetadataVO {
-        @Schema(description = "来源服务")
+        @Size(max = 100)
         private String sourceService;
-        @Schema(description = "生成模型")
+        @Size(max = 100)
         private String generatedBy;
-        @Schema(description = "传输时间")
+        @Size(max = 100)
         private String transmittedAt;
     }
 }
