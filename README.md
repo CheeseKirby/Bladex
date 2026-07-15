@@ -160,6 +160,7 @@ powershell -ExecutionPolicy Bypass -File deploy.ps1
 | `CONVENTION_DOCS_PATH` | `classpath:bladex-docs/` | BladeX 规范文档路径 |
 | `PART_A_CALLBACK_URL` | `http://localhost:3004/api/transmission/status-update` | Part A 回调地址 |
 | `HOST` | `127.0.0.1` | BFF bind address; do not expose publicly without authentication |
+| `AI_WORKFLOW_HOST` | `127.0.0.1` | Part B bind address; keep local unless protected by a trusted network boundary |
 | `BFF_ADMIN_TOKEN` | (empty) | Required for non-loopback BFF access; keep empty for localhost-only mode |
 | `BFF_JSON_LIMIT` | `2mb` | Maximum JSON request body size |
 | `BFF_LLM_RATE_LIMIT` | `30` | Maximum LLM HTTP requests per rate window |

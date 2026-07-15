@@ -1,4 +1,5 @@
 server:
+  address: ${AI_WORKFLOW_HOST:127.0.0.1}
   port: 8111
   # 优雅停机,给进行中的工作流一些时间收尾
   shutdown: graceful
@@ -65,3 +66,14 @@ ai-workflow:
     # 管理端 token: /api/config 等写入端点要求 X-Admin-Token 头与之匹配。
     # 未配置时,写入端点只接受 127.0.0.1 / ::1 的请求。
     token: ${AI_WORKFLOW_ADMIN_TOKEN:}
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info
+  endpoint:
+    health:
+      show-details: never
+      probes:
+        enabled: true

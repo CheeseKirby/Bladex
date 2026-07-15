@@ -143,6 +143,7 @@ VITE_BFF_PORT=3004
 # BFF 放行前端 CORS 来源(默认前端跑在 3005)
 FRONTEND_ORIGIN=http://localhost:3005
 # BFF 转发到 Part B(ai-workflow)的地址(默认 8111)
+AI_WORKFLOW_HOST=127.0.0.1
 PART_B_URL=http://localhost:8111
 PART_A_CALLBACK_URL=http://localhost:3004/api/transmission/status-update
 BFF_JSON_LIMIT=2mb
