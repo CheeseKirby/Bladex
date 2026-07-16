@@ -317,7 +317,8 @@ const SubPlanNavigator: React.FC<SubPlanNavigatorProps> = ({ onSwitchTab }) => {
       {(project?.status === 'SUBPLANS_GENERATED' ||
         project?.status === 'SUBPLAN_REVIEWING' ||
         project?.status === 'SUBPLANS_REVIEWED' ||
-        project?.status === 'SUBPLANS_CONFIRMED') && (
+        project?.status === 'SUBPLANS_CONFIRMED' ||
+        project?.status === 'TRANSMITTED') && (
         <div style={{ marginTop: 12 }}>
           {!receptionId && (
             <Alert
@@ -336,7 +337,7 @@ const SubPlanNavigator: React.FC<SubPlanNavigatorProps> = ({ onSwitchTab }) => {
             size="small"
             block
             onClick={handleTransmit}
-            disabled={Boolean(activeReviewId) || (Boolean(receptionId) && partBOverallStatus !== 'FAILED')}
+            disabled={Boolean(activeReviewId) || (Boolean(receptionId) && !['FAILED', 'COMPLETED_WITH_ERRORS'].includes(partBOverallStatus || ''))}
           >
             🚀 传输到 Part B
           </Button>
