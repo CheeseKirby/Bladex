@@ -206,6 +206,7 @@ llmRouter.post('/review-plan', async (req: Request, res: Response) => {
 
       // 无 ERROR -> 通过
       if (lastData.passes || errorCount === 0) {
+        lastData.passes = true;
         reviewLog.push({ round: attempt + 1, action: 'review', errorCount: 0, message: `审查通过(第 ${attempt + 1} 轮)` });
         break;
       }

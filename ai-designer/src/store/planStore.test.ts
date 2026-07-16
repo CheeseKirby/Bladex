@@ -329,3 +329,31 @@ describe('project 为 null 时的安全降级', () => {
     assert.doesNotThrow(() => usePlanStore.getState().removeSubPlan('x'));
   });
 });
+
+describe('子方案审查结果', () => {
+  beforeEach(() => resetStore());
+
+  test('写入 reviewedContent 和 changeLog，并把单个子方案标记 REVIEWED', () => {
+    seedProjectWithSubPlans([makeSubPlan({ id: 'sp-1', status: 'GENERATED' })]);
+
+    usePlanStore.getState().setSubPlanReview('sp-1', 'fixed', [
+      { what: '字段', why: '规范', before: 'a', after: 'b' },
+    ]);
+
+    const sp = usePlanStore.getState().project!.subPlans[0];
+    assert.equal(sp.reviewedContent, 'fixed');
+    assert.equal(sp.status, 'REVIEWED');
+    assert.equal(sp.reviewChangeLog?.length, 1);
+  });
+
+  test('全部子方案审查完成后项目进入 SUBPLANS_REVIEWED', () => {
+    seedProjectWithSubPlans([
+      makeSubPlan({ id: 'sp-1', status: 'GENERATED' }),
+      makeSubPlan({ id: 'sp-2', status: 'REVIEWED' }),
+    ]);
+
+    usePlanStore.getState().setSubPlanReview('sp-1', 'fixed');
+
+    assert.equal(usePlanStore.getState().project!.status, 'SUBPLANS_REVIEWED');
+  });
+});

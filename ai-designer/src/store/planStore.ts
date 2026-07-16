@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import type { Project, MasterPlan, SubPlan, DraggedModule, WorkflowState, ReviewResult, SubPlanStatus, PartBSubPlanStatus } from '../types/plan';
+import type { Project, MasterPlan, SubPlan, DraggedModule, WorkflowState, ReviewResult, SubPlanStatus, PartBSubPlanStatus, ChangeLogEntry } from '../types/plan';
 import type { GeneratedFileSummary, ExecutionTimeline } from '../types/api';
 import type { DemoSeed } from '../demo/orderManagement';
 
@@ -38,6 +38,7 @@ interface PlanStore {
   /** 删除子方案之间的依赖边 (source → target),也支持 ReactFlow 的 edge id 形式 "src->tgt" */
   removeSubPlanDependency: (sourceId: string, targetId: string) => void;
   updateSubPlanStatus: (id: string, status: SubPlanStatus) => void;
+  setSubPlanReview: (id: string, reviewedContent: string, changeLog?: ChangeLogEntry[]) => void;
   setStreamingContent: (content: string) => void;
   appendStreamingChunk: (chunk: string) => void;
   setIsStreaming: (streaming: boolean) => void;
@@ -175,6 +176,26 @@ export const usePlanStore = create<PlanStore>((set) => ({
           }
         : null,
     })),
+
+  setSubPlanReview: (id: string, reviewedContent: string, changeLog: ChangeLogEntry[] = []) =>
+    set((state) => {
+      if (!state.project) return state;
+      const subPlans = state.project.subPlans.map((sp) =>
+        sp.id === id
+          ? { ...sp, reviewedContent, reviewChangeLog: changeLog, status: 'REVIEWED' as const }
+          : sp
+      );
+      const allReviewed = subPlans.length > 0 && subPlans.every((sp) =>
+        sp.status === 'REVIEWED' || sp.status === 'CONFIRMED' || sp.status === 'TRANSMITTED'
+      );
+      return {
+        project: {
+          ...state.project,
+          subPlans,
+          status: allReviewed ? 'SUBPLANS_REVIEWED' : 'SUBPLANS_GENERATED',
+        },
+      };
+    }),
 
   setStreamingContent: (content: string) => set({ streamingContent: content }),
   appendStreamingChunk: (chunk: string) =>

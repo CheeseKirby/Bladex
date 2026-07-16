@@ -83,15 +83,17 @@ const ReviewFeedback: React.FC<ReviewFeedbackProps> = ({ onSwitchTab }) => {
         issues: result.issues,
         reviewLog: result.reviewLog,
       });
+      const reviewPassed = result.passes && !result.issues.some((issue) => issue.severity === 'ERROR');
       setMasterPlan({
         ...project.masterPlan,
         reviewedContent: result.fixedContent,
         reviewChangeLog: result.changeLog,
-        status: 'REVIEWED',
+        status: reviewPassed ? 'REVIEWED' : 'PLAN_GENERATED',
       });
       setReviewProgress('');
-      setProjectStatus('REVIEWED');
-      message.success('\u5ba1\u67e5\u5b8c\u6210');
+      setProjectStatus(reviewPassed ? 'REVIEWED' : 'PLAN_GENERATED');
+      if (reviewPassed) message.success('\u5ba1\u67e5\u5b8c\u6210');
+      else message.warning('Review finished with unresolved ERROR issues; fix or retry before splitting.');
     } catch (err) {
       if (isCancellationError(err)) return;
       if (usePlanStore.getState().project?.id !== projectId) return;

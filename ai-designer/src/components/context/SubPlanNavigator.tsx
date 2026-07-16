@@ -1,13 +1,15 @@
-import React, { useEffect, useRef } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { Tree, Tag, Empty, Typography, Button, Space, Popconfirm, Alert, message, Switch, Tooltip } from 'antd';
 import { DeleteOutlined } from '@ant-design/icons';
 import type { DataNode } from 'antd/es/tree';
 import { usePlanStore } from '../../store/planStore';
 import { transmitPlan } from '../../services/api';
 import { usePartBStatusPoll } from '../../hooks/usePartBStatusPoll';
-import type { SubPlanStatus, PartBSubPlanStatus } from '../../types/plan';
+import type { SubPlan, SubPlanStatus, PartBSubPlanStatus } from '../../types/plan';
+import { consumeReviewStream } from '../../services/reviewStream';
 
 const { Text } = Typography;
+const EMPTY_SUBPLANS: SubPlan[] = [];
 
 const STATUS_TAG: Record<SubPlanStatus, { color: string; text: string }> = {
   PENDING: { color: 'default', text: '待生成' },
@@ -32,9 +34,11 @@ interface SubPlanNavigatorProps {
 
 const SubPlanNavigator: React.FC<SubPlanNavigatorProps> = ({ onSwitchTab }) => {
   const project = usePlanStore((s) => s.project);
-  const subPlans = usePlanStore((s) => s.project?.subPlans || []);
+  const subPlans = usePlanStore((s) => s.project?.subPlans ?? EMPTY_SUBPLANS);
   const setProjectStatus = usePlanStore((s) => s.setProjectStatus);
+  const setIsStreaming = usePlanStore((s) => s.setIsStreaming);
   const updateSubPlanStatus = usePlanStore((s) => s.updateSubPlanStatus);
+  const setSubPlanReview = usePlanStore((s) => s.setSubPlanReview);
   const removeSubPlan = usePlanStore((s) => s.removeSubPlan);
   const setPartBStatus = usePlanStore((s) => s.setPartBStatus);
   const setReceptionId = usePlanStore((s) => s.setReceptionId);
@@ -45,6 +49,26 @@ const SubPlanNavigator: React.FC<SubPlanNavigatorProps> = ({ onSwitchTab }) => {
   const writeTarget = usePlanStore((s) => s.writeTarget);
   const setWriteTarget = usePlanStore((s) => s.setWriteTarget);
   const { startPolling, stopPolling } = usePartBStatusPoll();
+  const [activeReviewId, setActiveReviewId] = useState<string | null>(null);
+  const [reviewProgress, setReviewProgress] = useState('');
+  const reviewAbortRef = useRef<AbortController | null>(null);
+
+  useEffect(() => {
+    const projectId = project?.id;
+    return () => {
+      reviewAbortRef.current?.abort();
+      reviewAbortRef.current = null;
+      const state = usePlanStore.getState();
+      const currentProject = state.project;
+      state.setIsStreaming(false);
+      if (currentProject && currentProject.id === projectId && currentProject.status === 'SUBPLAN_REVIEWING') {
+        const allReviewed = currentProject.subPlans.length > 0 && currentProject.subPlans.every((item) =>
+          item.status === 'REVIEWED' || item.status === 'CONFIRMED' || item.status === 'TRANSMITTED'
+        );
+        state.setProjectStatus(allReviewed ? 'SUBPLANS_REVIEWED' : 'SUBPLANS_GENERATED');
+      }
+    };
+  }, [project?.id]);
 
   // 进入终态时给用户一次性提示
   const lastNotifiedStatus = useRef<string | null>(null);
@@ -76,6 +100,58 @@ const SubPlanNavigator: React.FC<SubPlanNavigatorProps> = ({ onSwitchTab }) => {
       </div>
     );
   }
+
+  const restoreSubPlanStatus = () => {
+    const current = usePlanStore.getState().project;
+    if (!current) return;
+    const allReviewed = current.subPlans.length > 0 && current.subPlans.every((item) =>
+      item.status === 'REVIEWED' || item.status === 'CONFIRMED' || item.status === 'TRANSMITTED'
+    );
+    usePlanStore.getState().setProjectStatus(allReviewed ? 'SUBPLANS_REVIEWED' : 'SUBPLANS_GENERATED');
+  };
+
+  const handleReviewSubPlan = async (subPlan: SubPlan) => {
+    if (activeReviewId) return;
+    reviewAbortRef.current?.abort();
+    const controller = new AbortController();
+    reviewAbortRef.current = controller;
+    setActiveReviewId(subPlan.id);
+    setIsStreaming(true);
+    setReviewProgress('Starting sub-plan review...');
+    setProjectStatus('SUBPLAN_REVIEWING');
+    try {
+      const response = await fetch('/api/llm/review-plan', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ planContent: subPlan.reviewedContent || subPlan.planContent, stage: 'subplan' }),
+        signal: controller.signal,
+      });
+      if (!response.ok || !response.body) throw new Error(`HTTP ${response.status}`);
+      const reader = response.body.getReader();
+      const result = await consumeReviewStream(reader, setReviewProgress).finally(() => {
+        void reader.cancel().catch(() => undefined);
+      });
+      const passed = result.passes && !result.issues.some((issue) => issue.severity === 'ERROR');
+      if (!passed) {
+        message.warning(`Sub-plan #${subPlan.index} still has unresolved ERROR issues.`);
+        restoreSubPlanStatus();
+        return;
+      }
+      setSubPlanReview(subPlan.id, result.fixedContent, result.changeLog);
+      message.success(`Sub-plan #${subPlan.index} reviewed.`);
+    } catch (error) {
+      const candidate = error as { name?: string };
+      if (candidate?.name !== 'AbortError') {
+        message.error(`Sub-plan review failed: ${error instanceof Error ? error.message : String(error)}`);
+        restoreSubPlanStatus();
+      }
+    } finally {
+      if (reviewAbortRef.current === controller) reviewAbortRef.current = null;
+      setActiveReviewId(null);
+      setReviewProgress('');
+      setIsStreaming(false);
+    }
+  };
 
   const treeData: DataNode[] = subPlans.map((sp) => {
     const tag = STATUS_TAG[sp.status] || STATUS_TAG.PENDING;
@@ -110,6 +186,19 @@ const SubPlanNavigator: React.FC<SubPlanNavigatorProps> = ({ onSwitchTab }) => {
           <Tag color={tag.color} style={{ fontSize: 10, lineHeight: '16px', margin: 0 }}>
             {tag.text}
           </Tag>
+          <Button
+            type="link"
+            size="small"
+            loading={activeReviewId === sp.id}
+            disabled={Boolean(receptionId) || (Boolean(activeReviewId) && activeReviewId !== sp.id)}
+            onClick={(event) => {
+              event.stopPropagation();
+              void handleReviewSubPlan(sp);
+            }}
+            style={{ padding: '0 2px', height: 18, fontSize: 10 }}
+          >
+            {sp.status === 'REVIEWED' ? 'Re-review' : 'Review'}
+          </Button>
           {pbTag && (
             <Tag color={pbTag.color} style={{ fontSize: 10, lineHeight: '16px', margin: 0 }}>
               B: {pbTag.text}
@@ -196,6 +285,9 @@ const SubPlanNavigator: React.FC<SubPlanNavigatorProps> = ({ onSwitchTab }) => {
         showLine
         style={{ fontSize: 12 }}
       />
+      {activeReviewId && reviewProgress && (
+        <Alert type="info" showIcon message={reviewProgress} style={{ marginTop: 8, fontSize: 11 }} />
+      )}
       {(project?.status === 'SUBPLANS_GENERATED' ||
         project?.status === 'SUBPLAN_REVIEWING' ||
         project?.status === 'SUBPLANS_REVIEWED' ||

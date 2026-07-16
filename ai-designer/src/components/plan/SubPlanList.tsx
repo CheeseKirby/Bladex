@@ -2,9 +2,10 @@ import React from 'react';
 import { Tag, Empty, Typography, Collapse } from 'antd';
 import { usePlanStore } from '../../store/planStore';
 import PlanPreview from './PlanPreview';
-import type { SubPlanStatus } from '../../types/plan';
+import type { SubPlan, SubPlanStatus } from '../../types/plan';
 
 const { Text } = Typography;
+const EMPTY_SUBPLANS: SubPlan[] = [];
 
 const STATUS_TAG: Record<SubPlanStatus, { color: string; text: string }> = {
   PENDING: { color: 'default', text: '待生成' },
@@ -16,7 +17,7 @@ const STATUS_TAG: Record<SubPlanStatus, { color: string; text: string }> = {
 
 /** 子方案列表与管理 */
 const SubPlanList: React.FC = () => {
-  const subPlans = usePlanStore((s) => s.project?.subPlans || []);
+  const subPlans = usePlanStore((s) => s.project?.subPlans ?? EMPTY_SUBPLANS);
 
   if (subPlans.length === 0) {
     return <Empty description="暂无子方案" image={Empty.PRESENTED_IMAGE_SIMPLE} />;

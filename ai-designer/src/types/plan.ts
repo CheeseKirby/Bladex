@@ -116,6 +116,7 @@ export interface SubPlan {
   title: string;
   planContent: string;
   reviewedContent?: string;
+  reviewChangeLog?: ChangeLogEntry[];
   prerequisites: string[];  // IDs of prerequisite sub-plans
   status: SubPlanStatus;
   transmissionRef?: string;
