@@ -1,13 +1,13 @@
 import axios from 'axios';
-import type { GeneratePlanRequest, PlanTransmitRequest, PlanTransmitResponse, GeneratedFileSummary, GeneratedFileDetail, ExecutionTimeline } from '../types/api';
+import type { GeneratePlanRequest, PlanTransmitRequest, PlanTransmitResponse, GeneratedFileSummary, GeneratedFileDetail, ExecutionTimeline, TimelineStep, SubPlanTimeline } from '../types/api';
 import type { SSEMessage, Project } from '../types/plan';
 
 const api = axios.create({
   baseURL: '/api',
-  timeout: 240000, // 全局 4 分钟(大项目生成/拆分等较慢)
+  timeout: 300_000, // Client default: 5 minutes; BFF default: 4 minutes.
 });
 
-const SSE_TIMEOUT_MS = 360_000; // 6 分钟无任何 chunk 视为挂死(大方案流式生成较慢)
+const SSE_TIMEOUT_MS = 660_000; // Client idle budget: 11 minutes; BFF total budget: 10 minutes.
 
 // === LLM 相关 API ===
 
@@ -17,30 +17,49 @@ const SSE_TIMEOUT_MS = 360_000; // 6 分钟无任何 chunk 视为挂死(大方�
  * 错误处理:
  * - HTTP 非 2xx → 触发 onError(Error("HTTP <code>: <body>"))
  * - 收到 type:'error' SSE 帧 → 触发 onError(Error(msg))
- * - 3 分钟未收到任何 chunk → 触发 onError 并 abort fetch
+ * - 11 minutes without a chunk -> call onError and abort fetch
  * - 调用方可通过返回的 abort() 主动取消(组件卸载场景)
  */
-export async function generatePlanStream(
+export function generatePlanStream(
   request: GeneratePlanRequest,
   onMessage: (msg: SSEMessage) => void,
   onError: (err: Error) => void,
   onComplete: () => void
-): Promise<{ abort: () => void }> {
+): { abort: () => void } {
   const controller = new AbortController();
   let watchdog: ReturnType<typeof setTimeout> | null = null;
-  const resetWatchdog = () => {
-    if (watchdog) clearTimeout(watchdog);
-    watchdog = setTimeout(() => {
-      controller.abort();
-      onError(new Error('LLM 流式响应超时 (180s 无任何 chunk)'));
-    }, SSE_TIMEOUT_MS);
-  };
+  let settled = false;
 
   const cleanup = () => {
     if (watchdog) {
       clearTimeout(watchdog);
       watchdog = null;
     }
+  };
+
+  const fail = (error: Error) => {
+    if (settled) return;
+    settled = true;
+    cleanup();
+    onError(error);
+  };
+
+  const complete = () => {
+    if (settled) return;
+    settled = true;
+    cleanup();
+    onComplete();
+  };
+
+  const resetWatchdog = () => {
+    if (watchdog) clearTimeout(watchdog);
+    watchdog = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      controller.abort();
+      onError(new Error('LLM stream timed out (660s without any chunk)'));
+    }, SSE_TIMEOUT_MS);
   };
 
   resetWatchdog();
@@ -55,17 +74,14 @@ export async function generatePlanStream(
       });
 
       if (!response.ok) {
-        // BFF 在尚未开始 SSE 时返回 502 JSON,直接读出错误
         const errText = await response.text().catch(() => '');
-        cleanup();
-        onError(new Error(`HTTP ${response.status}: ${errText.slice(0, 300)}`));
+        fail(new Error(`HTTP ${response.status}: ${errText.slice(0, 300)}`));
         return;
       }
 
       const reader = response.body?.getReader();
       if (!reader) {
-        cleanup();
-        onError(new Error('No response body'));
+        fail(new Error('No response body'));
         return;
       }
 
@@ -84,16 +100,22 @@ export async function generatePlanStream(
           if (!line.startsWith('data: ')) continue;
           try {
             const msg: SSEMessage = JSON.parse(line.slice(6));
-            onMessage(msg);
+            // error 帧不进 onMessage,只走 onError,避免调用方在 onMessage 与 onError 重复处理 error 帧导致双重提示
             if (msg.type === 'error') {
-              cleanup();
-              onError(new Error(msg.error || 'LLM 流式生成失败'));
-              try { await reader.cancel(); } catch { /* noop */ }
+              try {
+                fail(new Error(msg.error || 'LLM stream generation failed'));
+              } finally {
+                void reader.cancel().catch(() => undefined);
+              }
               return;
             }
+            onMessage(msg);
             if (msg.type === 'complete') {
-              cleanup();
-              onComplete();
+              try {
+                complete();
+              } finally {
+                void reader.cancel().catch(() => undefined);
+              }
               return;
             }
           } catch {
@@ -101,8 +123,7 @@ export async function generatePlanStream(
           }
         }
       }
-      cleanup();
-      onComplete();
+      fail(new Error('LLM stream ended before receiving a complete event'));
     } catch (err) {
       cleanup();
       // 主动取消(组件卸载/超时)不算错误
@@ -110,22 +131,29 @@ export async function generatePlanStream(
         // 已通过 watchdog 或调用方触发的 onError 处理过,避免重复
         return;
       }
-      onError(err instanceof Error ? err : new Error(String(err)));
+      fail(err instanceof Error ? err : new Error(String(err)));
     }
   })();
 
-  return { abort: () => { cleanup(); controller.abort(); } };
+  return {
+    abort: () => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      controller.abort();
+    },
+  };
 }
 
-/** 审查方案（非流式） - 审查-修复闭环(最多2轮)LLM 较慢,设 10 分钟超时 */
+/** Review request: client budget is slightly longer than the BFF 10-minute total budget. */
 export async function reviewPlan(planContent: string, stage: 'master' | 'subplan') {
-  const res = await api.post('/llm/review-plan', { planContent, stage }, { timeout: 600000 });
+  const res = await api.post('/llm/review-plan', { planContent, stage }, { timeout: 660_000 });
   return res.data;
 }
 
 /** 拆分子方案 */
-export async function splitPlan(planContent: string) {
-  const res = await api.post('/llm/split-plan', { planContent });
+export async function splitPlan(planContent: string, signal?: AbortSignal) {
+  const res = await api.post('/llm/split-plan', { planContent }, { timeout: 660_000, signal });
   return res.data;
 }
 
@@ -154,7 +182,7 @@ export async function suggestModules(userInput: string) {
  * @returns suggestions 是新推荐的模块清单, enriched 是合并后展开的需求文本
  */
 export async function completeOneShot(userInput: string, existingModules: unknown[]) {
-  const res = await api.post('/llm/complete-one-shot', { userInput, existingModules });
+  const res = await api.post('/llm/complete-one-shot', { userInput, existingModules }, { timeout: 540_000 });
   return res.data;
 }
 
@@ -193,33 +221,150 @@ export async function queryPartBStatus(receptionId: string) {
   return res.data;
 }
 
-/** 列出 Part B 生成的文件(摘要) */
-export async function listPartBFiles(receptionId: string): Promise<{ success: boolean; data: GeneratedFileSummary[] }> {
-  const res = await api.get(`/transmission/files/${receptionId}`);
-  // Part B 包装格式: { code, success, data, msg } — 转成 { success, data }
-  const raw = res.data;
-  if (raw?.data && Array.isArray(raw.data)) {
-    return { success: true, data: raw.data };
+/**
+ * Part B 响应归一化。
+ *
+ * Part B 统一返回 { code, success, data, msg }(`success` 是布尔真相);
+ * BFF 透传成功时原样转交该对象,通信失败时返回 { success: false, msg }(无 data)。
+ *
+ * 这里以 `success` 布尔字段为准(而非用 data 的存在性反推成功),并把 msg 带出,
+ * 避免把“业务成功但 data 为空”误判成失败、也避免丢掉失败原因。
+ * data 缺省时回退到调用方提供的 fallback。
+ */
+export interface PartBUnwrapped<T> {
+  success: boolean;
+  data: T;
+  msg?: string;
+}
+
+export function unwrapPartBResponse<T>(
+  raw: unknown,
+  fallback: T,
+  isValidData?: (data: unknown) => data is T,
+): PartBUnwrapped<T> {
+  if (!raw || typeof (raw as { success?: unknown }).success !== 'boolean') {
+    return { success: false, data: fallback, msg: (raw as { msg?: string } | null)?.msg };
   }
-  return { success: false, data: [] };
+
+  const response = raw as { success: boolean; data?: unknown; msg?: string | null };
+  const msg = response.msg ?? undefined;
+  if (!response.success) return { success: false, data: fallback, msg };
+  if (response.data == null) return { success: true, data: fallback, msg };
+  if (isValidData && !isValidData(response.data)) {
+    return { success: false, data: fallback, msg: msg ?? 'Part B response data has an invalid shape' };
+  }
+  return { success: true, data: response.data as T, msg };
+}
+
+export async function unwrapPartBRequest<T>(
+  request: PromiseLike<{ data: unknown }>,
+  fallback: T,
+  isValidData?: (data: unknown) => data is T,
+): Promise<PartBUnwrapped<T>> {
+  try {
+    const response = await request;
+    return unwrapPartBResponse(response.data, fallback, isValidData);
+  } catch (error) {
+    if (!axios.isAxiosError(error)) throw error;
+    const normalized = unwrapPartBResponse<T>(error.response?.data, fallback, isValidData);
+    return normalized.msg ? normalized : { ...normalized, msg: error.message };
+  }
+}
+
+type UnknownRecord = Record<string, unknown>;
+
+const isRecord = (data: unknown): data is UnknownRecord =>
+  typeof data === 'object' && data !== null && !Array.isArray(data);
+const isFiniteNumber = (data: unknown): data is number =>
+  typeof data === 'number' && Number.isFinite(data);
+const optionalString = (data: unknown): boolean => data === undefined || typeof data === 'string';
+const optionalNumber = (data: unknown): boolean => data === undefined || isFiniteNumber(data);
+
+export function isGeneratedFileSummary(data: unknown): data is GeneratedFileSummary {
+  if (!isRecord(data)) return false;
+  return isFiniteNumber(data.id)
+    && isFiniteNumber(data.subPlanId)
+    && typeof data.filePath === 'string'
+    && typeof data.fileName === 'string'
+    && optionalString(data.partASubPlanId)
+    && optionalString(data.subPlanTitle)
+    && optionalString(data.fileType)
+    && optionalString(data.fileExtension)
+    && optionalString(data.action)
+    && optionalNumber(data.sizeBytes)
+    && optionalNumber(data.lineCount)
+    && optionalString(data.createTime);
+}
+
+export function isGeneratedFileSummaryArray(data: unknown): data is GeneratedFileSummary[] {
+  return Array.isArray(data) && data.every(isGeneratedFileSummary);
+}
+
+export function isGeneratedFileDetail(data: unknown): data is GeneratedFileDetail {
+  if (!isRecord(data)) return false;
+  return isGeneratedFileSummary(data) && typeof data.content === 'string';
+}
+
+function isTimelineStep(data: unknown): data is TimelineStep {
+  if (!isRecord(data)) return false;
+  return isFiniteNumber(data.id)
+    && typeof data.stage === 'string'
+    && typeof data.status === 'string'
+    && optionalString(data.action)
+    && optionalString(data.filePath)
+    && optionalString(data.reason)
+    && optionalString(data.createTime);
+}
+
+function isSubPlanTimeline(data: unknown): data is SubPlanTimeline {
+  if (!isRecord(data)) return false;
+  return isFiniteNumber(data.subPlanId)
+    && isFiniteNumber(data.fileCount)
+    && Array.isArray(data.steps)
+    && data.steps.every(isTimelineStep)
+    && optionalString(data.partASubPlanId)
+    && optionalNumber(data.index)
+    && optionalString(data.title)
+    && optionalString(data.status)
+    && optionalString(data.errorMessage)
+    && optionalString(data.startedAt)
+    && optionalString(data.completedAt);
+}
+
+export function isExecutionTimeline(data: unknown): data is ExecutionTimeline {
+  if (!isRecord(data)) return false;
+  return typeof data.receptionId === 'string'
+    && isFiniteNumber(data.totalSubPlans)
+    && isFiniteNumber(data.completedSubPlans)
+    && isFiniteNumber(data.failedSubPlans)
+    && Array.isArray(data.subPlanTimelines)
+    && data.subPlanTimelines.every(isSubPlanTimeline)
+    && optionalString(data.overallStatus);
+}
+
+/** 列出 Part B 生成的文件(摘要) */
+export async function listPartBFiles(receptionId: string): Promise<PartBUnwrapped<GeneratedFileSummary[]>> {
+  return unwrapPartBRequest(
+    api.get(`/transmission/files/${receptionId}`),
+    [] as GeneratedFileSummary[],
+    isGeneratedFileSummaryArray,
+  );
 }
 
 /** 查询单文件完整内容 */
-export async function getPartBFileDetail(fileId: number): Promise<{ success: boolean; data: GeneratedFileDetail | null }> {
-  const res = await api.get(`/transmission/file/${fileId}`);
-  const raw = res.data;
-  if (raw?.data) {
-    return { success: true, data: raw.data };
-  }
-  return { success: false, data: null };
+export async function getPartBFileDetail(fileId: number): Promise<PartBUnwrapped<GeneratedFileDetail | null>> {
+  return unwrapPartBRequest(
+    api.get(`/transmission/file/${fileId}`),
+    null as GeneratedFileDetail | null,
+    isGeneratedFileDetail,
+  );
 }
 
 /** 拉取执行进度时间线 */
-export async function getPartBTimeline(receptionId: string): Promise<{ success: boolean; data: ExecutionTimeline | null }> {
-  const res = await api.get(`/transmission/timeline/${receptionId}`);
-  const raw = res.data;
-  if (raw?.data) {
-    return { success: true, data: raw.data };
-  }
-  return { success: false, data: null };
+export async function getPartBTimeline(receptionId: string): Promise<PartBUnwrapped<ExecutionTimeline | null>> {
+  return unwrapPartBRequest(
+    api.get(`/transmission/timeline/${receptionId}`),
+    null as ExecutionTimeline | null,
+    isExecutionTimeline,
+  );
 }

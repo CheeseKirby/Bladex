@@ -18,7 +18,11 @@ import { usePlanStore } from '../../store/planStore';
 import PlanNodeComponent from './PlanNode';
 import SubPlanNodeComponent from './SubPlanNode';
 import PlanEdge from './PlanEdge';
-import type { ModuleType } from '../../types/plan';
+import type { ModuleType, SubPlan } from '../../types/plan';
+
+// 稳定空数组:避免 selector 在 project 无 subPlans 时每次返回新 [] 破坏引用稳定性,
+// 进而触发 useMemo -> useEffect -> setNodes 的无限渲染循环。
+const EMPTY_SUBPLANS: SubPlan[] = [];
 
 const nodeTypes = {
   planNode: PlanNodeComponent,
@@ -44,7 +48,7 @@ const NODE_COLORS: Record<ModuleType, string> = {
 const PlanCanvas: React.FC = () => {
   const canvasModules = usePlanStore((s) => s.canvasModules);
   const project = usePlanStore((s) => s.project);
-  const subPlans = usePlanStore((s) => s.project?.subPlans || []);
+  const subPlans = usePlanStore((s) => s.project?.subPlans ?? EMPTY_SUBPLANS);
 
   // @dnd-kit droppable 区域
   const { setNodeRef, isOver } = useDroppable({ id: 'plan-canvas-drop' });

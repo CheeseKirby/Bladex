@@ -15,6 +15,8 @@ import { buildAuthHeaders, getLlmConfig, isLlmConfigured } from '../config/llmCo
 import { requireBffAdmin } from '../security/adminGuard';
 import { createPayloadGuard } from '../http/payloadGuard';
 import { createRateLimitMiddleware } from '../http/rateLimit';
+import { bindUpstreamAbort } from '../http/upstreamAbort';
+import { consumeAnthropicStream } from '../llm/anthropicStream';
 
 export const llmRouter = Router();
 
@@ -26,7 +28,8 @@ llmRouter.use(createRateLimitMiddleware({
 }));
 llmRouter.use(createPayloadGuard());
 
-const LLM_REQUEST_TIMEOUT_MS = 300_000; // 5 分钟(大项目方案审查/拆分较慢)
+const LLM_DEFAULT_REQUEST_TIMEOUT_MS = 240_000;
+const LLM_LONG_REQUEST_TIMEOUT_MS = 600_000; // 10 分钟(大方案审查/拆分非流式 LLM 生成完整 JSON 较慢,5min 曾导致 abort)
 
 interface ModuleSummary { type: string; name: string; icon: string; config?: unknown }
 
@@ -150,13 +153,23 @@ llmRouter.post('/review-plan', async (req: Request, res: Response) => {
     'Cache-Control': 'no-cache',
     'Connection': 'keep-alive',
   });
-  const sendSSE = (obj: object) => { res.write(`data: ${JSON.stringify(obj)}\n\n`); };
+  const sendSSE = (obj: object) => {
+    if (!res.destroyed && !res.writableEnded) res.write(`data: ${JSON.stringify(obj)}\n\n`);
+  };
 
   if (!isLlmConfigured()) {
     sendSSE({ type: 'done', data: { passes: true, issues: [{ severity: 'WARN', rule: 'Controller规范', message: '建议为所有Controller添加@ApiOperationSupport(order=N)' }], fixedContent: planContent, reviewLog: [], changeLog: [] } });
     res.end();
     return;
   }
+
+  const reviewController = new AbortController();
+  const finishReviewLifetime = bindUpstreamAbort(
+    res,
+    reviewController,
+    LLM_LONG_REQUEST_TIMEOUT_MS,
+    (reason) => console.warn(`[/review-plan] cancelled: ${reason}`),
+  );
 
   try {
     // 审查-修复闭环: 审查 -> 有 ERROR -> 片段修复(前 2 轮) -> 全局重写(第 3 轮) -> 重审查 -> 直到无 ERROR
@@ -176,7 +189,8 @@ llmRouter.post('/review-plan', async (req: Request, res: Response) => {
       const refSummary = await getReferenceAdaptationSummary();
       const text = await callAnthropicJson(
         withReferenceSummary(buildReviewPlanSystemPrompt(stage || 'master'), refSummary),
-        `请审查如下方案:\n\n${currentContent}`
+        `请审查如下方案:\n\n${currentContent}`,
+        { timeoutMs: LLM_LONG_REQUEST_TIMEOUT_MS, signal: reviewController.signal },
       );
       const data: ReviewData = safeJsonParse(text) ?? lastData;
       lastData = {
@@ -231,12 +245,14 @@ llmRouter.post('/review-plan', async (req: Request, res: Response) => {
     }
 
     sendSSE({ type: 'done', data: { passes: lastData.passes ?? true, issues: lastData.issues ?? [], fixedContent: currentContent, reviewLog, changeLog: lastData.changeLog ?? [] } });
+    finishReviewLifetime();
     res.end();
   } catch (err) {
+    finishReviewLifetime();
     const msg = err instanceof Error ? err.message : String(err);
     console.error('[/review-plan] LLM 调用失败:', msg);
     sendSSE({ type: 'error', message: msg });
-    res.end();
+    if (!res.destroyed && !res.writableEnded) res.end();
   }
 });
 
@@ -457,7 +473,7 @@ llmRouter.post('/split-plan', async (req: Request, res: Response) => {
 
   try {
     const refSummary = await getReferenceAdaptationSummary();
-    const text = await callAnthropicJson(withReferenceSummary(buildSplitPlanSystemPrompt(), refSummary), `总方案:\n\n${planContent}`);
+    const text = await callAnthropicJson(withReferenceSummary(buildSplitPlanSystemPrompt(), refSummary), `总方案:\n\n${planContent}`, { timeoutMs: LLM_LONG_REQUEST_TIMEOUT_MS });
     const parsed = safeJsonParse(text);
     const subPlans = Array.isArray(parsed?.subPlans) ? (parsed.subPlans as unknown[]) : [];
     if (subPlans.length === 0) {
@@ -559,11 +575,26 @@ function applyFixes(plan: string, fixes: { section: string; newContent: string }
 }
 
 /** 调用 Anthropic Messages API(非流式),返回首个 text block */
-async function callAnthropicJson(systemPrompt: string, userPrompt: string): Promise<string> {
+interface AnthropicCallOptions {
+  timeoutMs?: number;
+  signal?: AbortSignal;
+}
+
+async function callAnthropicJson(
+  systemPrompt: string,
+  userPrompt: string,
+  options: AnthropicCallOptions = {},
+): Promise<string> {
   const cfg = getLlmConfig();
   const base = cfg.baseUrl.replace(/\/+$/, '');
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), LLM_REQUEST_TIMEOUT_MS);
+  const timeoutMs = options.timeoutMs ?? LLM_DEFAULT_REQUEST_TIMEOUT_MS;
+  const abortFromParent = () => controller.abort(options.signal?.reason);
+
+  if (options.signal?.aborted) abortFromParent();
+  else options.signal?.addEventListener('abort', abortFromParent, { once: true });
+
+  const timer = setTimeout(() => controller.abort(new Error('LLM request timed out')), timeoutMs);
   try {
     const resp = await fetch(`${base}/v1/messages`, {
       method: 'POST',
@@ -586,6 +617,7 @@ async function callAnthropicJson(systemPrompt: string, userPrompt: string): Prom
     return block?.text || '';
   } finally {
     clearTimeout(timer);
+    options.signal?.removeEventListener('abort', abortFromParent);
   }
 }
 
@@ -650,24 +682,17 @@ async function handleLiveGeneratePlan(req: Request, res: Response): Promise<void
 
   // 用于取消上游请求
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), LLM_REQUEST_TIMEOUT_MS);
+  const finishUpstreamLifetime = bindUpstreamAbort(
+    res,
+    controller,
+    LLM_LONG_REQUEST_TIMEOUT_MS,
+    (reason) => console.warn(`[/generate-plan] cancelled: ${reason}`),
+  );
 
   let headersSent = false;
-  let finished = false;
-  // 客户端断开时取消上游 — 但只在已经开始流式输出 之后才响应,
-  // 避免在 fetch 上游 headers 阶段因请求体读完 / keep-alive 误触发 close 而取消。
-  req.on('close', () => {
-    if (finished) return;
-    if (headersSent && !controller.signal.aborted) {
-      controller.abort();
-      console.log('[/generate-plan] 客户端断开(流式阶段),取消上游 LLM 请求');
-    }
-    clearTimeout(timer);
-  });
-
-  const refSummary = await getReferenceAdaptationSummary();
   let upstream: globalThis.Response;
   try {
+    const refSummary = await getReferenceAdaptationSummary();
     upstream = await fetch(`${base}/v1/messages`, {
       method: 'POST',
       headers: { ...buildAuthHeaders(), accept: 'text/event-stream' },
@@ -681,20 +706,24 @@ async function handleLiveGeneratePlan(req: Request, res: Response): Promise<void
       signal: controller.signal,
     });
   } catch (err) {
-    clearTimeout(timer);
+    finishUpstreamLifetime();
     const msg = err instanceof Error ? err.message : String(err);
-    res.status(502).json({ success: false, error: `Anthropic 网络异常: ${msg}` });
+    if (!res.destroyed && !res.writableEnded) {
+      res.status(502).json({ success: false, error: `Anthropic network error: ${msg}` });
+    }
     return;
   }
 
   if (!upstream.ok || !upstream.body) {
-    clearTimeout(timer);
+    finishUpstreamLifetime();
     const errText = await upstream.text().catch(() => '');
     // 此时尚未写 SSE 头,直接 502 让前端能感知到错误
-    res.status(502).json({
-      success: false,
-      error: `Anthropic ${upstream.status}: ${errText.slice(0, 300)}`,
-    });
+    if (!res.destroyed && !res.writableEnded) {
+      res.status(502).json({
+        success: false,
+        error: `Anthropic ${upstream.status}: ${errText.slice(0, 300)}`,
+      });
+    }
     return;
   }
 
@@ -708,7 +737,7 @@ async function handleLiveGeneratePlan(req: Request, res: Response): Promise<void
   res.flushHeaders?.();
 
   const send = (data: object) => {
-    if (res.writableEnded) return;
+    if (res.destroyed || res.writableEnded) return;
     res.write(`data: ${JSON.stringify(data)}\n\n`);
   };
 
@@ -716,54 +745,20 @@ async function handleLiveGeneratePlan(req: Request, res: Response): Promise<void
   send({ type: 'progress', stage: 'planning', message: '正在生成开发方案...' });
 
   const reader = upstream.body.getReader();
-  const decoder = new TextDecoder();
-  let buffer = '';
-  let totalChars = 0;
 
   try {
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      buffer += decoder.decode(value, { stream: true });
-      let sep = buffer.indexOf('\n\n');
-      while (sep !== -1) {
-        const frame = buffer.slice(0, sep);
-        buffer = buffer.slice(sep + 2);
-        for (const line of frame.split('\n')) {
-          if (!line.startsWith('data:')) continue;
-          const payload = line.slice(5).trim();
-          if (!payload || payload === '[DONE]') continue;
-          try {
-            const evt = JSON.parse(payload);
-            if (evt.type === 'content_block_delta' && evt.delta?.type === 'text_delta') {
-              const chunk = evt.delta.text || '';
-              if (chunk) {
-                totalChars += chunk.length;
-                send({ type: 'content', chunk });
-              }
-            }
-            if (evt.type === 'message_stop') {
-              send({ type: 'complete', tokensUsed: totalChars });
-            }
-          } catch {
-            // keepalive / 非 JSON 帧
-          }
-        }
-        sep = buffer.indexOf('\n\n');
-      }
-    }
+    const totalChars = await consumeAnthropicStream(reader, (chunk) => {
+      send({ type: 'content', chunk });
+    });
     send({ type: 'complete', tokensUsed: totalChars });
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
-    console.error('[/generate-plan] 流读取异常:', msg);
-    if (headersSent) {
-      send({ type: 'error', error: msg });
-    }
+    console.error('[/generate-plan] stream read failed:', msg);
+    if (headersSent) send({ type: 'error', error: msg });
   } finally {
-    finished = true;
-    clearTimeout(timer);
-    try { reader.cancel(); } catch { /* noop */ }
-    if (!res.writableEnded) res.end();
+    finishUpstreamLifetime();
+    try { await reader.cancel(); } catch { /* noop */ }
+    if (!res.destroyed && !res.writableEnded) res.end();
   }
 }
 
@@ -846,7 +841,7 @@ CREATE TABLE blade_order (
   const lines = mockPlan.split('\n');
 
   const send = (data: object) => {
-    if (res.writableEnded) return;
+    if (res.destroyed || res.writableEnded) return;
     res.write(`data: ${JSON.stringify(data)}\n\n`);
   };
 

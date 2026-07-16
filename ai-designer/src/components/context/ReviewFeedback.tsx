@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { List, Tag, Empty, Typography, Button, Space, Alert, message } from 'antd';
 import {
   CheckCircleOutlined,
@@ -8,6 +8,7 @@ import {
 } from '@ant-design/icons';
 import { usePlanStore } from '../../store/planStore';
 import { splitPlan } from '../../services/api';
+import { consumeReviewStream } from '../../services/reviewStream';
 
 const { Text, Paragraph } = Typography;
 
@@ -18,6 +19,14 @@ const { Text, Paragraph } = Typography;
  * - null 空闲
  */
 type ActiveOp = 'reviewing' | 'splitting' | null;
+
+function isCancellationError(error: unknown): boolean {
+  if (!error || typeof error !== 'object') return false;
+  const candidate = error as { name?: unknown; code?: unknown };
+  return candidate.name === 'AbortError'
+    || candidate.name === 'CanceledError'
+    || candidate.code === 'ERR_CANCELED';
+}
 
 interface ReviewFeedbackProps {
   /** 跳转到指定 Tab(由 ContextPanel 注入,用于拆分完成后自动切到子方案 Tab) */
@@ -34,6 +43,13 @@ const ReviewFeedback: React.FC<ReviewFeedbackProps> = ({ onSwitchTab }) => {
   const setIsStreaming = usePlanStore((s) => s.setIsStreaming);
   const [activeOp, setActiveOp] = useState<ActiveOp>(null);
   const [reviewProgress, setReviewProgress] = useState('');
+  const operationAbortRef = useRef<AbortController | null>(null);
+
+  useEffect(() => () => {
+    operationAbortRef.current?.abort();
+    operationAbortRef.current = null;
+    usePlanStore.getState().setIsStreaming(false);
+  }, [project?.id]);
 
   const handleReviewMasterPlan = async () => {
     if (!project?.masterPlan || activeOp) return;
@@ -42,57 +58,49 @@ const ReviewFeedback: React.FC<ReviewFeedbackProps> = ({ onSwitchTab }) => {
     setProjectStatus('REVIEWING');
     setReviewProgress('开始审查...');
     setReviewResult(null);
+    operationAbortRef.current?.abort();
+    const controller = new AbortController();
+    operationAbortRef.current = controller;
+    const projectId = project.id;
     try {
       const resp = await fetch('/api/llm/review-plan', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ planContent: project.masterPlan.planContent, stage: 'master' }),
+        signal: controller.signal,
       });
       if (!resp.ok || !resp.body) throw new Error(`HTTP ${resp.status}`);
 
       const reader = resp.body.getReader();
-      const decoder = new TextDecoder();
-      let buffer = '';
+      const result = await consumeReviewStream(reader, setReviewProgress).finally(() => {
+        void reader.cancel().catch(() => undefined);
+      });
 
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        buffer += decoder.decode(value, { stream: true });
-        const events = buffer.split('\n\n');
-        buffer = events.pop() || '';
-        for (const evt of events) {
-          if (!evt.startsWith('data: ')) continue;
-          try {
-            const msg = JSON.parse(evt.slice(6));
-            if (msg.type === 'progress') {
-              setReviewProgress(msg.message);
-            } else if (msg.type === 'done') {
-              setReviewResult({
-                passes: msg.data.passes,
-                issues: msg.data.issues || [],
-                reviewLog: msg.data.reviewLog || [],
-              });
-              setMasterPlan({
-                ...project.masterPlan,
-                reviewedContent: msg.data.fixedContent,
-                reviewChangeLog: msg.data.changeLog,
-                status: 'REVIEWED',
-              });
-              setReviewProgress('');
-            } else if (msg.type === 'error') {
-              throw new Error(msg.message);
-            }
-          } catch (e) { /* skip parse error */ }
-        }
-      }
+      if (usePlanStore.getState().project?.id !== projectId) return;
+
+      setReviewResult({
+        passes: result.passes,
+        issues: result.issues,
+        reviewLog: result.reviewLog,
+      });
+      setMasterPlan({
+        ...project.masterPlan,
+        reviewedContent: result.fixedContent,
+        reviewChangeLog: result.changeLog,
+        status: 'REVIEWED',
+      });
+      setReviewProgress('');
       setProjectStatus('REVIEWED');
-      message.success('审查完成');
+      message.success('\u5ba1\u67e5\u5b8c\u6210');
     } catch (err) {
+      if (isCancellationError(err)) return;
+      if (usePlanStore.getState().project?.id !== projectId) return;
       const msg = err instanceof Error ? err.message : String(err);
       console.error('审查失败:', err);
       message.error(`审查失败: ${msg}`);
       setProjectStatus('PLAN_GENERATED');
     } finally {
+      if (operationAbortRef.current === controller) operationAbortRef.current = null;
       setActiveOp(null);
       setIsStreaming(false);
     }
@@ -103,8 +111,16 @@ const ReviewFeedback: React.FC<ReviewFeedbackProps> = ({ onSwitchTab }) => {
     setActiveOp('splitting');
     setIsStreaming(true);
     setProjectStatus('SPLITTING');
+    operationAbortRef.current?.abort();
+    const controller = new AbortController();
+    operationAbortRef.current = controller;
+    const projectId = project.id;
     try {
-      const result = await splitPlan(project.masterPlan.reviewedContent || project.masterPlan.planContent);
+      const result = await splitPlan(
+        project.masterPlan.reviewedContent || project.masterPlan.planContent,
+        controller.signal,
+      );
+      if (usePlanStore.getState().project?.id !== projectId) return;
       if (result.success && result.data?.subPlans?.length) {
         setSubPlans(result.data.subPlans);
         setProjectStatus('SUBPLANS_GENERATED');
@@ -116,11 +132,14 @@ const ReviewFeedback: React.FC<ReviewFeedbackProps> = ({ onSwitchTab }) => {
         setProjectStatus('REVIEWED');
       }
     } catch (err) {
+      if (isCancellationError(err)) return;
+      if (usePlanStore.getState().project?.id !== projectId) return;
       const msg = err instanceof Error ? err.message : String(err);
       console.error('拆分失败:', err);
       message.error(`拆分失败: ${msg}`);
       setProjectStatus('REVIEWED');
     } finally {
+      if (operationAbortRef.current === controller) operationAbortRef.current = null;
       setActiveOp(null);
       setIsStreaming(false);
     }

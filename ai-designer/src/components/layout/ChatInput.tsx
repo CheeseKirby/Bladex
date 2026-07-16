@@ -1,4 +1,4 @@
-import React, { useState, useRef, useCallback } from 'react';
+import React, { useState, useRef, useCallback, useEffect } from 'react';
 import { Input, Button, Space, Tag, message } from 'antd';
 import { SendOutlined } from '@ant-design/icons';
 import { usePlanStore } from '../../store/planStore';
@@ -32,6 +32,27 @@ const ChatInput: React.FC<ChatInputProps> = ({ disabled }) => {
   const addModuleToCanvas = usePlanStore((s) => s.addModuleToCanvas);
   const project = usePlanStore((s) => s.project);
   const textAreaRef = useRef<HTMLTextAreaElement>(null);
+  const streamAbortRef = useRef<(() => void) | null>(null);
+  const streamRequestIdRef = useRef(0);
+
+  useEffect(() => {
+    const activeProjectId = project?.id;
+    return () => {
+      streamRequestIdRef.current += 1;
+      streamAbortRef.current?.();
+      streamAbortRef.current = null;
+      const state = usePlanStore.getState();
+      const currentProject = state.project;
+      state.setIsStreaming(false);
+      if (
+        currentProject !== null
+        && currentProject.id === activeProjectId
+        && (currentProject.status === 'ANALYZING' || currentProject.status === 'PLANNING')
+      ) {
+        state.setProjectStatus('DRAFT');
+      }
+    };
+  }, [project?.id]);
 
   /** 推荐模块时批量添加到画布 */
   const handleAddModules = useCallback(
@@ -46,6 +67,10 @@ const ChatInput: React.FC<ChatInputProps> = ({ disabled }) => {
   const handleSend = async () => {
     if (!input.trim() || !project) return;
 
+    streamRequestIdRef.current += 1;
+    const requestId = streamRequestIdRef.current;
+    streamAbortRef.current?.();
+    streamAbortRef.current = null;
     setStreamingContent('');
     setIsGenerating(true);
     setIsStreaming(true);
@@ -54,6 +79,7 @@ const ChatInput: React.FC<ChatInputProps> = ({ disabled }) => {
     const planContentBuffer: string[] = [];
 
     const handleMessage = (msg: SSEMessage) => {
+      if (streamRequestIdRef.current !== requestId) return;
       switch (msg.type) {
         case 'progress': {
           if (msg.stage) {
@@ -100,7 +126,7 @@ const ChatInput: React.FC<ChatInputProps> = ({ disabled }) => {
     };
 
     try {
-      await generatePlanStream(
+      const stream = generatePlanStream(
         {
           userInput: input,
           modules: canvasModules,
@@ -108,23 +134,29 @@ const ChatInput: React.FC<ChatInputProps> = ({ disabled }) => {
         },
         handleMessage,
         (err) => {
+          if (streamRequestIdRef.current !== requestId) return;
           console.error('流式错误:', err);
           message.error(`生成失败: ${err.message}`);
           setProjectStatus('DRAFT');
           setIsGenerating(false);
           setIsStreaming(false);
+          streamAbortRef.current = null;
         },
         () => {
+          if (streamRequestIdRef.current !== requestId) return;
           setIsGenerating(false);
           setIsStreaming(false);
+          streamAbortRef.current = null;
         }
       );
+      streamAbortRef.current = stream.abort;
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       console.error('请求失败:', err);
       message.error(`请求失败: ${msg}`);
       setIsGenerating(false);
       setIsStreaming(false);
+      streamAbortRef.current = null;
     }
 
     setInput('');
