@@ -23,6 +23,7 @@ const PARTB_TAG: Record<PartBSubPlanStatus, { color: string; text: string }> = {
   QUEUED: { color: 'default', text: '排队中' },
   EXECUTING: { color: 'gold', text: '执行中' },
   COMPLETED: { color: 'green', text: '已完成' },
+  COMPLETED_WITH_ERRORS: { color: 'orange', text: 'Completed with errors' },
   FAILED: { color: 'red', text: '失败' },
   SKIPPED: { color: 'orange', text: '已跳过' },
 };
@@ -41,6 +42,9 @@ const SubPlanNavigator: React.FC<SubPlanNavigatorProps> = ({ onSwitchTab }) => {
   const setSubPlanReview = usePlanStore((s) => s.setSubPlanReview);
   const removeSubPlan = usePlanStore((s) => s.removeSubPlan);
   const setPartBStatus = usePlanStore((s) => s.setPartBStatus);
+  const setPartBOverallStatus = usePlanStore((s) => s.setPartBOverallStatus);
+  const setGeneratedFiles = usePlanStore((s) => s.setGeneratedFiles);
+  const setExecutionTimeline = usePlanStore((s) => s.setExecutionTimeline);
   const setReceptionId = usePlanStore((s) => s.setReceptionId);
   const receptionId = usePlanStore((s) => s.receptionId);
   const partBStatuses = usePlanStore((s) => s.partBStatuses);
@@ -81,7 +85,7 @@ const SubPlanNavigator: React.FC<SubPlanNavigatorProps> = ({ onSwitchTab }) => {
         duration: 6,
       });
       lastNotifiedStatus.current = partBOverallStatus;
-    } else if (partBOverallStatus === 'FAILED') {
+    } else if (partBOverallStatus === 'COMPLETED_WITH_ERRORS' || partBOverallStatus === 'FAILED') {
       message.warning({
         content: `Part B 执行结束但部分子方案失败,已生成 ${generatedFilesCount} 个文件供查看`,
         duration: 6,
@@ -115,6 +119,7 @@ const SubPlanNavigator: React.FC<SubPlanNavigatorProps> = ({ onSwitchTab }) => {
     reviewAbortRef.current?.abort();
     const controller = new AbortController();
     reviewAbortRef.current = controller;
+    const projectId = project?.id;
     setActiveReviewId(subPlan.id);
     setIsStreaming(true);
     setReviewProgress('Starting sub-plan review...');
@@ -131,6 +136,7 @@ const SubPlanNavigator: React.FC<SubPlanNavigatorProps> = ({ onSwitchTab }) => {
       const result = await consumeReviewStream(reader, setReviewProgress).finally(() => {
         void reader.cancel().catch(() => undefined);
       });
+      if (!projectId || usePlanStore.getState().project?.id !== projectId) return;
       const passed = result.passes && !result.issues.some((issue) => issue.severity === 'ERROR');
       if (!passed) {
         message.warning(`Sub-plan #${subPlan.index} still has unresolved ERROR issues.`);
@@ -141,7 +147,7 @@ const SubPlanNavigator: React.FC<SubPlanNavigatorProps> = ({ onSwitchTab }) => {
       message.success(`Sub-plan #${subPlan.index} reviewed.`);
     } catch (error) {
       const candidate = error as { name?: string };
-      if (candidate?.name !== 'AbortError') {
+      if (candidate?.name !== 'AbortError' && projectId && usePlanStore.getState().project?.id === projectId) {
         message.error(`Sub-plan review failed: ${error instanceof Error ? error.message : String(error)}`);
         restoreSubPlanStatus();
       }
@@ -225,7 +231,26 @@ const SubPlanNavigator: React.FC<SubPlanNavigatorProps> = ({ onSwitchTab }) => {
   });
 
   const handleTransmit = async () => {
-    if (!project) return;
+    if (!project?.masterPlan || subPlans.length === 0) {
+      message.error('Master plan or sub-plans are missing.');
+      return;
+    }
+    const emptyPlan = subPlans.find((item) => !(item.reviewedContent || item.planContent).trim());
+    if (emptyPlan) {
+      message.error(`Sub-plan #${emptyPlan.index} has no content.`);
+      return;
+    }
+    const ids = new Set(subPlans.map((item) => item.id));
+    const orphan = subPlans.find((item) => item.prerequisites.some((id) => !ids.has(id)));
+    if (orphan) {
+      message.error(`Sub-plan #${orphan.index} contains an invalid prerequisite.`);
+      return;
+    }
+
+    stopPolling();
+    setPartBOverallStatus(null);
+    setGeneratedFiles([]);
+    setExecutionTimeline(null);
     setProjectStatus('TRANSMITTING');
 
     try {
@@ -233,9 +258,9 @@ const SubPlanNavigator: React.FC<SubPlanNavigatorProps> = ({ onSwitchTab }) => {
         projectId: project.id,
         projectName: project.projectName,
         masterPlan: {
-          id: project.masterPlan!.id,
-          version: project.masterPlan!.version,
-          content: project.masterPlan!.reviewedContent || project.masterPlan!.planContent,
+          id: project.masterPlan.id,
+          version: project.masterPlan.version,
+          content: project.masterPlan.reviewedContent || project.masterPlan.planContent,
         },
         subPlans: subPlans.map((sp) => ({
           id: sp.id,
@@ -252,16 +277,17 @@ const SubPlanNavigator: React.FC<SubPlanNavigatorProps> = ({ onSwitchTab }) => {
         writeTarget,
       });
 
-      if (result.success && result.data?.receptionId) {
+      const transmissionData = result.data;
+      if (result.success && transmissionData?.receptionId) {
         subPlans.forEach((sp) => {
           updateSubPlanStatus(sp.id, 'TRANSMITTED');
           // 优先采用 Part B 上报的初始状态,缺失则按 QUEUED 兜底
-          const initial = (result.data.subPlanStatuses?.[sp.id] as PartBSubPlanStatus) || 'QUEUED';
+          const initial = (transmissionData.subPlanStatuses?.[sp.id] as PartBSubPlanStatus) || 'QUEUED';
           setPartBStatus(sp.id, initial);
         });
-        setReceptionId(result.data.receptionId);
+        setReceptionId(transmissionData.receptionId);
         setProjectStatus('TRANSMITTED');
-        message.success(`方案已传输 (receptionId=${result.data.receptionId}),Part B 开始执行`);
+        message.success(`方案已传输 (receptionId=${transmissionData.receptionId}),Part B 开始执行`);
         // 不再需要手动 startPolling — usePartBStatusPoll 的 useEffect 会在
         // receptionId 变化时自动启动轮询,杜绝闭包/竞态。
         // 传输成功后自动跳转到「执行进度」Tab,让用户看到 Part B 的实时执行
@@ -310,7 +336,7 @@ const SubPlanNavigator: React.FC<SubPlanNavigatorProps> = ({ onSwitchTab }) => {
             size="small"
             block
             onClick={handleTransmit}
-            disabled={Boolean(receptionId) && partBOverallStatus !== 'FAILED'}
+            disabled={Boolean(activeReviewId) || (Boolean(receptionId) && partBOverallStatus !== 'FAILED')}
           >
             🚀 传输到 Part B
           </Button>
@@ -336,6 +362,7 @@ const SubPlanNavigator: React.FC<SubPlanNavigatorProps> = ({ onSwitchTab }) => {
               <Text strong>整体状态:</Text>{' '}
               <Tag color={
                 partBOverallStatus === 'COMPLETED' ? 'green'
+                  : partBOverallStatus === 'COMPLETED_WITH_ERRORS' ? 'orange'
                   : partBOverallStatus === 'FAILED' ? 'red'
                   : partBOverallStatus === 'EXECUTING' ? 'gold' : 'blue'
               }>

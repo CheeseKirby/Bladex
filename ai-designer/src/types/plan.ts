@@ -138,6 +138,7 @@ export type PartBSubPlanStatus =
   | 'QUEUED'
   | 'EXECUTING'
   | 'COMPLETED'
+  | 'COMPLETED_WITH_ERRORS'
   | 'FAILED'
   | 'SKIPPED';
 

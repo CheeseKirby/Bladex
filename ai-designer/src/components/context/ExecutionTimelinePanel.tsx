@@ -7,6 +7,7 @@ import {
   ClockCircleOutlined,
   MinusCircleOutlined,
   ReloadOutlined,
+  WarningOutlined,
   FileTextOutlined,
   ExperimentOutlined,
   CheckOutlined,

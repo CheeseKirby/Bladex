@@ -15,7 +15,7 @@ import type { PartBSubPlanStatus } from '../types/plan';
  */
 
 const POLL_INTERVAL_MS = 3000;
-const TERMINAL_STATES = new Set(['COMPLETED', 'FAILED']);
+const TERMINAL_STATES = new Set(['COMPLETED', 'COMPLETED_WITH_ERRORS', 'FAILED']);
 
 // 单例状态 — 由第一个挂载的实例驱动,后续实例只是订阅 store
 let activeReceptionId: string | null = null;
@@ -97,7 +97,7 @@ export function usePartBStatusPoll(): PollControls {
           for (const item of updates) {
             if (!item.subPlanId || !item.status) continue;
             // 校验 status 在已知集合内,避免脏数据污染 Map
-            if (['QUEUED', 'EXECUTING', 'COMPLETED', 'FAILED', 'SKIPPED'].includes(item.status)) {
+            if (['QUEUED', 'EXECUTING', 'COMPLETED', 'COMPLETED_WITH_ERRORS', 'FAILED', 'SKIPPED'].includes(item.status)) {
               refs.setPartBStatus(item.subPlanId, item.status as PartBSubPlanStatus);
             }
           }

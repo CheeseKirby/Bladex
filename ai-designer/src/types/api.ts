@@ -31,12 +31,12 @@ export interface PlanTransmitRequest {
 export interface PlanTransmitResponse {
   code: number;
   success: boolean;
-  data: {
+  data?: {
     receptionId: string;
     status: string;
     subPlanStatuses: Record<string, string>;
   };
-  msg: string;
+  msg?: string;
 }
 
 /** 状态回调 */

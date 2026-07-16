@@ -179,7 +179,7 @@ export const usePlanStore = create<PlanStore>((set) => ({
 
   setSubPlanReview: (id: string, reviewedContent: string, changeLog: ChangeLogEntry[] = []) =>
     set((state) => {
-      if (!state.project) return state;
+      if (!state.project || !state.project.subPlans.some((sp) => sp.id === id)) return state;
       const subPlans = state.project.subPlans.map((sp) =>
         sp.id === id
           ? { ...sp, reviewedContent, reviewChangeLog: changeLog, status: 'REVIEWED' as const }
