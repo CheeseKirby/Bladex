@@ -19,7 +19,7 @@ test('LLM connection probe uses a short Anthropic-compatible request', async () 
       assert.equal((init?.headers as Record<string, string>).authorization, 'Bearer test-token');
       const body = JSON.parse(String(init?.body)) as { model: string; max_tokens: number; messages: unknown[] };
       assert.equal(body.model, 'test-model');
-      assert.equal(body.max_tokens, 128);
+      assert.equal(body.max_tokens, 512);
       assert.equal(body.messages.length, 1);
       return new Response(JSON.stringify({ content: [{ type: 'text', text: 'OK' }] }), { status: 200 });
     };

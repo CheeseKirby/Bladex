@@ -1,7 +1,8 @@
 import { buildAuthHeaders, getLlmConfig } from '../config/llmConfig';
+import { fetchWithTransientRetry } from '../http/fetchRetry';
 
 const DEFAULT_PROBE_TIMEOUT_MS = 20_000;
-const PROBE_MAX_TOKENS = 128;
+const PROBE_MAX_TOKENS = 512;
 
 export async function probeLlmConnection(
   fetchImpl: typeof fetch = fetch,
@@ -12,7 +13,7 @@ export async function probeLlmConnection(
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(new Error('LLM connection test timed out')), timeoutMs);
   try {
-    const response = await fetchImpl(`${base}/v1/messages`, {
+    const response = await fetchWithTransientRetry(`${base}/v1/messages`, {
       method: 'POST',
       headers: buildAuthHeaders(),
       body: JSON.stringify({
@@ -21,7 +22,7 @@ export async function probeLlmConnection(
         messages: [{ role: 'user', content: 'Reply with OK only.' }],
       }),
       signal: controller.signal,
-    });
+    }, fetchImpl);
     if (!response.ok) {
       const body = await response.text().catch(() => '');
       throw new Error(`LLM ${response.status}: ${body.slice(0, 300)}`);

@@ -16,6 +16,7 @@ import { requireBffAdmin } from '../security/adminGuard';
 import { createPayloadGuard } from '../http/payloadGuard';
 import { createRateLimitMiddleware } from '../http/rateLimit';
 import { bindUpstreamAbort } from '../http/upstreamAbort';
+import { fetchWithTransientRetry } from '../http/fetchRetry';
 import { consumeAnthropicStream } from '../llm/anthropicStream';
 import { getReferenceAdaptationSummary } from '../services/referenceSummary';
 
@@ -624,7 +625,7 @@ async function callAnthropicJson(
 
   const timer = setTimeout(() => controller.abort(new Error('LLM request timed out')), timeoutMs);
   try {
-    const resp = await fetch(`${base}/v1/messages`, {
+    const resp = await fetchWithTransientRetry(`${base}/v1/messages`, {
       method: 'POST',
       headers: buildAuthHeaders(),
       body: JSON.stringify({
@@ -721,7 +722,7 @@ async function handleLiveGeneratePlan(req: Request, res: Response): Promise<void
   let upstream: globalThis.Response;
   try {
     const refSummary = await getReferenceAdaptationSummary();
-    upstream = await fetch(`${base}/v1/messages`, {
+    upstream = await fetchWithTransientRetry(`${base}/v1/messages`, {
       method: 'POST',
       headers: { ...buildAuthHeaders(), accept: 'text/event-stream' },
       body: JSON.stringify({
