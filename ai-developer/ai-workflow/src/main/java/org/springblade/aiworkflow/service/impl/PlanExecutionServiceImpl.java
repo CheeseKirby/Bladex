@@ -5,6 +5,8 @@ import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.extern.slf4j.Slf4j;
 import org.springblade.aiworkflow.agent.BladeXCodeAgent;
+import org.springblade.aiworkflow.agent.GenerationIdentity;
+import org.springblade.aiworkflow.agent.GenerationIdentityResolver;
 import org.springblade.aiworkflow.agent.ProjectWriteLockManager;
 import org.springblade.aiworkflow.config.AiWorkflowProperties;
 import org.springblade.aiworkflow.entity.AiExecutionLog;
@@ -121,6 +123,13 @@ public class PlanExecutionServiceImpl implements IPlanExecutionService {
         plan.setReceptionId(receptionId);
         plan.setStatus(PlanStatus.RECEIVED);
         plan.setSourceService(request.getMetadata() != null ? request.getMetadata().getSourceService() : null);
+        GenerationIdentity generationIdentity = GenerationIdentityResolver.resolve(request);
+        try {
+            plan.setGenerationIdentityJson(objectMapper.writeValueAsString(generationIdentity));
+        } catch (JsonProcessingException e) {
+            throw new IllegalArgumentException("Unable to serialize generation identity", e);
+        }
+        plan.setCompileVerificationStatus("NOT_RUN");
         if (request.getMasterPlan() != null) {
             plan.setMasterPlanContent(request.getMasterPlan().getContent());
         }

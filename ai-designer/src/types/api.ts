@@ -3,6 +3,16 @@
 import type { DraggedModule } from './plan';
 
 /** 发送到 Part B 的方案传输请求 */
+export interface GenerationIdentityPayload {
+  moduleName: string;
+  entityName: string;
+  tableName: string;
+  basePackage: string;
+  apiModuleName: string;
+  serviceModuleName: string;
+  serviceName: string;
+}
+
 export interface PlanTransmitRequest {
   projectId: string;
   projectName: string;
@@ -23,6 +33,7 @@ export interface PlanTransmitRequest {
     generatedBy: string;
     transmittedAt: string;
   };
+  generationIdentity: GenerationIdentityPayload;
   /** 写入目标: 'ISOLATED'(默认,隔离区) | 'REAL'(真实 blade_hgsjy,需鉴权+查重)。可选,不传按 ISOLATED */
   writeTarget?: 'ISOLATED' | 'REAL';
 }

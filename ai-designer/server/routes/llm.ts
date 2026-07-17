@@ -35,8 +35,8 @@ const LLM_LONG_REQUEST_TIMEOUT_MS = 600_000; // 10 分钟(大方案审查/拆分
 interface ModuleSummary { type: string; name: string; icon: string; config?: unknown }
 
 function buildGeneratePlanSystemPrompt(): string {
-  return `你是一位资深 BladeX 4.1.0 后端架构师。
-任务: 把用户的自然语言需求 + 拖入的模块清单, 转化为一份**完整、可执行**的 BladeX 4.1.0 后端开发方案(Markdown)。
+  return `你是一位资深 BladeX 后端架构师。
+任务: 把用户的自然语言需求 + 拖入的模块清单, 转化为一份**完整、可执行**的 BladeX 后端开发方案(Markdown)。
 
 == 处理简短需求的策略 ==
 用户的需求可能非常简短(如"做一个员工管理模块"、"我要一个订单系统")。
@@ -70,15 +70,21 @@ function buildGeneratePlanSystemPrompt(): string {
 
 要求:
 - 输出 Markdown, 中文表述, 代码片段用 \`\`\`sql / \`\`\`java
-- 严格遵循 BladeX 4.1.0 规范, 不要写 @Autowired, 用 @AllArgsConstructor 构造器注入
+- 严格遵循 BladeX 规范, 不要写 @Autowired, 用 @AllArgsConstructor 构造器注入
 - VO 全部平铺在 org.springblade.{module}.vo 包 (不要 ivo/qvo/uvo 子包)
 - 方案开头**必须**明确写出: 实体名(PascalCase) / 模块名(lowercase) / 表名(blade_xxx) / 包路径
   示例: "**实体名**: Employee  **模块名**: employee  **表名**: blade_employee  **包路径**: org.springblade.employee"
-- 不要解释你在做什么, 直接给方案`;
+- 不要解释你在做什么, 直接给方案
+
+== Canonical generation identity ==
+The plan must start with a dedicated identity section containing exactly one moduleName, entityName, tableName and basePackage.
+These values are immutable for the whole plan and all sub-plans. Never use pom/entity/vo/controller/service as moduleName.
+When a reference-project profile is supplied, its framework version, Java version, package layout, application style and configuration conventions override all generic defaults.
+`;
 }
 
 function buildSplitPlanSystemPrompt(): string {
-  return `你是一位 BladeX 4.1.0 开发任务拆分专家。
+  return `你是一位 BladeX 开发任务拆分专家。
 任务: 把总方案拆分成 5-7 个相互独立、可顺序执行的子方案。
 
 每个子方案必须包含:
@@ -103,11 +109,17 @@ function buildSplitPlanSystemPrompt(): string {
   "subPlans": [
     { "id": "sub_1", "index": 1, "title": "数据库 DDL", "planContent": "实体名: Order, 模块名: order, 表名: blade_order ...", "prerequisites": [] }
   ]
-}`;
+}
+
+Canonical identity rules:
+- Read moduleName/entityName/tableName/basePackage from the master plan once.
+- Repeat the same values in every sub-plan; never infer a new module from sub-plan titles such as POM, Feign or Entity.
+- Every deliverable must declare its class name, target layer and owning module.
+`;
 }
 
 function buildReviewPlanSystemPrompt(stage: string): string {
-  return `你是一位 BladeX 4.1.0 代码审查专家。请审查以下 ${stage === 'master' ? '总方案' : '子方案'} 是否符合 BladeX 规范并指出问题。
+  return `你是一位 BladeX 代码审查专家。请审查以下 ${stage === 'master' ? '总方案' : '子方案'} 是否符合 BladeX 规范并指出问题。
 
 只输出 JSON, 不要 markdown 包裹, 结构:
 {
@@ -356,7 +368,7 @@ llmRouter.post('/suggest-modules', async (req: Request, res: Response) => {
     return;
   }
 
-  const sysPrompt = `你是一位资深 BladeX 4.1.0 架构师。
+  const sysPrompt = `你是一位资深 BladeX 架构师。
 任务: 根据用户输入的业务需求,识别业务领域,推断该用户需要拖入哪些 BladeX 模块,以及推荐的命名。
 
 可用模块类型: ENTITY (数据模型) / API (API接口) / EXCEL (Excel导入导出) / FEIGN (远程调用) / PAGE (前端页面) / FLOW (工作流) / JOB (定时任务) / CONFIG (Nacos配置)
@@ -433,7 +445,7 @@ llmRouter.post('/complete-one-shot', async (req: Request, res: Response) => {
 
   try {
     // ── 第一步: 推荐模块 ─────────────────────────────
-    const suggestPrompt = `你是 BladeX 4.1.0 架构师。根据用户需求识别业务领域,推荐应当拖入的模块。
+    const suggestPrompt = `你是 BladeX 架构师。根据用户需求识别业务领域,推荐应当拖入的模块。
 可用模块类型: ENTITY/API/EXCEL/FEIGN/PAGE/FLOW/JOB/CONFIG
 只输出 JSON, 不要 markdown 包裹, 不要解释:
 {"suggestions":[{"type":"ENTITY","name":"数据模型","icon":"📦","config":{"tableName":"blade_xxx","moduleName":"xxx","entityName":"Xxx","needVO":true,"needExcel":true}}],"reasoning":"简短理由"}
@@ -691,7 +703,7 @@ async function handleLiveGeneratePlan(req: Request, res: Response): Promise<void
     `\n\n## 已拖入的模块\n${moduleSummary}` +
     constraintsBlock +
     guidance +
-    `\n\n请生成完整的 BladeX 4.1.0 后端开发方案。`;
+    `\n\n请生成完整的 BladeX 后端开发方案。`;
 
   const cfg = getLlmConfig();
   const base = cfg.baseUrl.replace(/\/+$/, '');

@@ -20,12 +20,14 @@ import java.time.LocalDateTime;
 import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
 /**
@@ -58,12 +60,14 @@ public class ReferenceProjectIndex {
     private Path projectRoot;
     private ProjectScanVO cachedVo;
     private List<IndexedClassInfo> cachedFlat;
+    private ReferenceFrameworkProfile cachedProfile;
 
     /** 设置参考项目路径。先清缓存再改 root,避免并发读到"新 root + 旧 cache"组合。null/空表示取消参考 */
     public synchronized void setPath(String path) {
         // 先清缓存,再改 root — 确保读方法不会拿到"新 root + 旧 cache"的错配
         this.cachedVo = null;
         this.cachedFlat = null;
+        this.cachedProfile = null;
         this.rootPath = (path == null || path.isBlank()) ? null : path.trim();
         this.projectRoot = (this.rootPath != null)
                 ? Paths.get(this.rootPath).toAbsolutePath().normalize() : null;
@@ -100,6 +104,7 @@ public class ReferenceProjectIndex {
         ProjectScanVO vo = doScan();
         cachedVo = vo;
         cachedFlat = vo.getClasses();
+        cachedProfile = null;
         return vo;
     }
 
@@ -109,6 +114,150 @@ public class ReferenceProjectIndex {
 
     public synchronized List<IndexedClassInfo> getCachedClasses() {
         return cachedFlat != null ? cachedFlat : List.of();
+    }
+
+
+    /** Returns a structured profile derived from reference source, poms and configuration. */
+    public synchronized ReferenceFrameworkProfile getFrameworkProfile() {
+        if (cachedProfile != null) return cachedProfile;
+        cachedProfile = detectFrameworkProfile();
+        return cachedProfile;
+    }
+
+    private ReferenceFrameworkProfile detectFrameworkProfile() {
+        if (projectRoot == null || !Files.isDirectory(projectRoot)) return ReferenceFrameworkProfile.defaults();
+        String rootPom = readSourceContent("pom.xml");
+        String version = firstNonBlank(tagValue(rootPom, "revision"), directProjectTag(rootPom, "version"), "UNKNOWN");
+        String javaVersion = firstNonBlank(tagValue(rootPom, "java.version"), "UNKNOWN");
+        String groupId = firstNonBlank(directProjectTag(rootPom, "groupId"), parentTag(rootPom, "groupId"), "org.springblade");
+        String apiParentArtifact = "blade-service-api";
+        String serviceParentArtifact = "blade-service";
+        String apiParentVersion = version;
+        String serviceParentVersion = version;
+        String apiPom = readSourceContent("blade-service-api/pom.xml");
+        if (apiPom != null) {
+            apiParentArtifact = firstNonBlank(directProjectTag(apiPom, "artifactId"), apiParentArtifact);
+            apiParentVersion = firstNonBlank(directProjectTag(apiPom, "version"), version);
+        }
+        String servicePom = readSourceContent("blade-service/pom.xml");
+        if (servicePom != null) {
+            serviceParentArtifact = firstNonBlank(directProjectTag(servicePom, "artifactId"), serviceParentArtifact);
+            serviceParentVersion = firstNonBlank(directProjectTag(servicePom, "version"), version);
+        }
+        Map<String, String> voPackages = new LinkedHashMap<>();
+        for (String suffix : new String[]{"VO", "QVO", "IVO", "UVO", "EVO"}) {
+            voPackages.put(suffix, detectPackageSuffix(ClassType.VO, suffix, "pojo.vo"));
+        }
+        return new ReferenceFrameworkProfile(version, javaVersion, groupId,
+                apiParentArtifact, serviceParentArtifact, apiParentVersion, serviceParentVersion,
+                detectInternalDependencyVersion(version), firstNonBlank(detectJakartaOrJavax(), "javax"),
+                firstNonBlank(detectSwaggerVersion(), "v2"),
+                detectPackageSuffix(ClassType.ENTITY, null, "pojo.entity"), voPackages,
+                detectPackageSuffix(ClassType.CONTROLLER, null, "controller"),
+                detectPackageSuffix(ClassType.SERVICE, null, "service"),
+                detectPackageSuffix(ClassType.SERVICE_IMPL, null, "service.impl"),
+                detectPackageSuffix(ClassType.MAPPER, null, "mapper"),
+                detectPackageSuffix(ClassType.WRAPPER, null, "wrapper"),
+                detectPackageSuffix(ClassType.FEIGN, null, "feign"),
+                detectPackageSuffix(ClassType.EXCEL, null, "excel"),
+                detectMapperXmlInJava(), detectApplicationStyle(), detectNacosNamespace(), detectProfileStyle(), rootPath);
+    }
+
+    private String detectPackageSuffix(ClassType type, String classSuffix, String fallback) {
+        if (cachedFlat == null) return fallback;
+        Map<String, Long> counts = cachedFlat.stream()
+                .filter(c -> c.type() == type)
+                .filter(c -> classSuffix == null || c.simpleName().endsWith(classSuffix))
+                .map(this::packageSuffix)
+                .filter(v -> v != null && !v.isBlank())
+                .collect(Collectors.groupingBy(v -> v, LinkedHashMap::new, Collectors.counting()));
+        return counts.entrySet().stream()
+                .max(Comparator.<Map.Entry<String, Long>>comparingLong(Map.Entry::getValue)
+                        .thenComparing(Map.Entry::getKey))
+                .map(Map.Entry::getKey).orElse(fallback);
+    }
+
+    private String packageSuffix(IndexedClassInfo info) {
+        String pkg = info.packageName();
+        String module = info.module();
+        if (pkg == null || module == null) return null;
+        String prefix = "org.springblade." + module;
+        if (!pkg.equals(prefix) && !pkg.startsWith(prefix + ".")) return null;
+        return pkg.equals(prefix) ? "" : pkg.substring(prefix.length() + 1);
+    }
+
+    private String detectInternalDependencyVersion(String fallback) {
+        Path pom = findFirstPom(projectRoot.resolve("blade-service"));
+        if (pom == null) return fallback;
+        String content = readSourceContent(projectRoot.relativize(pom).toString().replace('\\', '/'));
+        if (content == null) return fallback;
+        java.util.regex.Matcher matcher = java.util.regex.Pattern.compile(
+                "<dependency>[\\s\\S]*?<artifactId>blade-[^<]+-api</artifactId>[\\s\\S]*?<version>([^<]+)</version>[\\s\\S]*?</dependency>")
+                .matcher(content);
+        return matcher.find() ? matcher.group(1).trim() : fallback;
+    }
+
+    private String detectApplicationStyle() {
+        Path app = findFirstFileEnding(projectRoot, "Application.java");
+        if (app == null) return "BLADE_CLOUD_APPLICATION";
+        String content = readSourceContent(projectRoot.relativize(app).toString().replace('\\', '/'));
+        if (content == null) return "BLADE_CLOUD_APPLICATION";
+        if (content.contains("@SpringCloudApplication")) return "SPRING_CLOUD_APPLICATION";
+        if (content.contains("@BladeCloudApplication")) return "BLADE_CLOUD_APPLICATION";
+        if (content.contains("@SpringBootApplication")) return "SPRING_BOOT_APPLICATION";
+        return "UNKNOWN";
+    }
+
+    private String detectNacosNamespace() {
+        Path bootstrap = findFirstFile(projectRoot, "bootstrap.yml");
+        if (bootstrap == null) return "blade";
+        String content = readSourceContent(projectRoot.relativize(bootstrap).toString().replace('\\', '/'));
+        if (content == null) return "blade";
+        java.util.regex.Matcher matcher = java.util.regex.Pattern.compile("namespace:\\s*([^\\s#]+)").matcher(content);
+        return matcher.find() ? matcher.group(1).trim() : "blade";
+    }
+
+    private String detectProfileStyle() {
+        Path bootstrap = findFirstFile(projectRoot, "bootstrap.yml");
+        if (bootstrap == null) return "SPRING_CONFIG_ACTIVATE";
+        String content = readSourceContent(projectRoot.relativize(bootstrap).toString().replace('\\', '/'));
+        if (content == null) return "SPRING_CONFIG_ACTIVATE";
+        return content.contains("profiles:") && !content.contains("activate:")
+                ? "SPRING_PROFILES" : "SPRING_CONFIG_ACTIVATE";
+    }
+
+    private boolean detectMapperXmlInJava() {
+        try (Stream<Path> walk = Files.walk(projectRoot, 10)) {
+            return walk.filter(Files::isRegularFile)
+                    .anyMatch(path -> path.toString().replace('\\', '/').contains("/src/main/java/")
+                            && path.getFileName().toString().endsWith("Mapper.xml"));
+        } catch (IOException ignored) {
+            return true;
+        }
+    }
+
+    private String directProjectTag(String xml, String tag) {
+        if (xml == null) return null;
+        return tagValue(xml.replaceFirst("(?s)<parent>.*?</parent>", ""), tag);
+    }
+
+    private String parentTag(String xml, String tag) {
+        if (xml == null) return null;
+        java.util.regex.Matcher parent = java.util.regex.Pattern.compile("(?s)<parent>(.*?)</parent>").matcher(xml);
+        return parent.find() ? tagValue(parent.group(1), tag) : null;
+    }
+
+    private String tagValue(String xml, String tag) {
+        if (xml == null) return null;
+        java.util.regex.Matcher matcher = java.util.regex.Pattern.compile(
+                "<" + java.util.regex.Pattern.quote(tag) + ">\\s*([^<]+?)\\s*</" + java.util.regex.Pattern.quote(tag) + ">")
+                .matcher(xml);
+        return matcher.find() ? matcher.group(1).trim() : null;
+    }
+
+    private String firstNonBlank(String... values) {
+        for (String value : values) if (value != null && !value.isBlank()) return value.trim();
+        return null;
     }
 
     /**
@@ -130,6 +279,10 @@ public class ReferenceProjectIndex {
                 .filter(c -> c.type() == type)
                 .filter(c -> c.side() == null || !"PLATFORM".equals(c.side()))
                 .max(java.util.Comparator.comparingInt(c -> referenceScore(c, preferredModule, preferredName)));
+    }
+
+    public synchronized int scoreReferenceCandidate(IndexedClassInfo candidate, String preferredModule, String preferredName) {
+        return referenceScore(candidate, preferredModule, preferredName);
     }
 
     private int referenceScore(IndexedClassInfo candidate, String preferredModule, String preferredName) {
@@ -192,6 +345,8 @@ public class ReferenceProjectIndex {
         if (projectRoot == null || !Files.isDirectory(projectRoot)) return null;
         try {
             StringBuilder sb = new StringBuilder();
+            ReferenceFrameworkProfile profile = getFrameworkProfile();
+            sb.append("[structured profile] ").append(profile.describeForPrompt()).append("\n");
             sb.append("== 参考项目结构适配(新模块的 pom/配置/包结构/启动类须与之一致,以接入参考项目编译)==\n");
 
             // 1. 父 pom: groupId / revision / modules
@@ -210,7 +365,7 @@ public class ReferenceProjectIndex {
             extractApplicationConvention(sb);
 
             // 5. 项目结构分析(模块树/现有模块/包结构/衔接点) - 让 Part A 总方案理清新模块与参考项目的衔接
-            extractProjectStructure(sb);
+            extractProjectStructure(sb, profile);
 
             return sb.toString();
         } catch (Exception e) {
@@ -402,7 +557,7 @@ public class ReferenceProjectIndex {
     /** 提取 Application 启动类风格 */
     private void extractApplicationConvention(StringBuilder sb) {
         sb.append("[启动类风格]\n");
-        Path app = findFirstFile(projectRoot, "Application.java");
+        Path app = findFirstFileEnding(projectRoot, "Application.java");
         if (app != null) {
             String content = readSourceContent(projectRoot.relativize(app).toString().replace('\\', '/'));
             if (content != null) {
@@ -422,7 +577,7 @@ public class ReferenceProjectIndex {
      * 提取项目结构分析 - 模块树/现有模块/包结构示例/衔接点。
      * 让 Part A 总方案理清新模块与参考项目的衔接(不扫具体代码,只了解结构)。
      */
-    private void extractProjectStructure(StringBuilder sb) {
+    private void extractProjectStructure(StringBuilder sb, ReferenceFrameworkProfile profile) {
         sb.append("[项目结构分析]\n");
 
         // 1. 父 pom modules(模块树)
@@ -459,8 +614,9 @@ public class ReferenceProjectIndex {
         sb.append("  * 父 pom <modules> 注册 blade-service-api/blade-{module}-api + blade-service/blade-{module}\n");
         sb.append("  * Nacos 服务名: blade-{module}\n");
         sb.append("  * Feign client value: blade-{module}(与 Nacos 服务名一致, 不带 -service)\n");
-        sb.append("  * 新模块包路径: org.springblade.{module}.pojo.entity / .pojo.vo / .controller / .service / .mapper / .wrapper\n");
-        sb.append("  * Mapper XML 放 src/main/java 同包(需 pom 配置 resources 过滤 *.xml)\n");
+        sb.append("  * Entity package: org.springblade.{module}.").append(profile.entityPackageSuffix()).append("\n");
+        sb.append("  * VO packages: ").append(profile.voPackageSuffixes()).append("\n");
+        sb.append("  * Mapper XML location: ").append(profile.mapperXmlInJava() ? "src/main/java" : "src/main/resources").append("\n");
         sb.append("\n");
     }
 
@@ -510,9 +666,21 @@ public class ReferenceProjectIndex {
     }
 
     /** 在目录树下找第一个指定文件名的文件 */
+    private Path findFirstFileEnding(Path dir, String suffix) {
+        if (!Files.isDirectory(dir)) return null;
+        try (Stream<Path> stream = Files.walk(dir, 10)) {
+            return stream.filter(Files::isRegularFile)
+                    .filter(path -> path.getFileName().toString().endsWith(suffix))
+                    .filter(path -> !path.toString().contains("target"))
+                    .findFirst().orElse(null);
+        } catch (IOException e) {
+            return null;
+        }
+    }
+
     private Path findFirstFile(Path dir, String fileName) {
         if (!Files.isDirectory(dir)) return null;
-        try (Stream<Path> s = Files.walk(dir, 4)) {
+        try (Stream<Path> s = Files.walk(dir, 12)) {
             return s.filter(p -> p.getFileName().toString().equals(fileName))
                     .filter(Files::isRegularFile)
                     .filter(p -> !p.toString().contains("target"))

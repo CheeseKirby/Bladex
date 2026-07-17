@@ -40,6 +40,10 @@ public class PlanReceiveRequest {
     @Schema(description = "Request metadata")
     private MetadataVO metadata;
 
+    @Valid
+    @Schema(description = "Canonical generation identity shared by every sub-plan")
+    private GenerationIdentityVO generationIdentity;
+
     /** Empty values default to ISOLATED. REAL writes require administrator authorization. */
     @Schema(description = "Write target: ISOLATED or REAL", defaultValue = "ISOLATED")
     private String writeTarget;
@@ -92,4 +96,23 @@ public class PlanReceiveRequest {
         @Size(max = 100)
         private String transmittedAt;
     }
+    @Data
+    @Schema(description = "Canonical generation identity")
+    public static class GenerationIdentityVO {
+        @Size(max = 50)
+        private String moduleName;
+        @Size(max = 100)
+        private String entityName;
+        @Size(max = 100)
+        private String tableName;
+        @Size(max = 200)
+        private String basePackage;
+        @Size(max = 100)
+        private String apiModuleName;
+        @Size(max = 100)
+        private String serviceModuleName;
+        @Size(max = 100)
+        private String serviceName;
+    }
+
 }

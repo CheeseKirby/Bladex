@@ -27,6 +27,9 @@ public class AtomicTask {
     /** 期望的代码内容（LLM生成前为空，生成后填充） */
     private String expectedContent;
 
+    /** Exact top-level class/interface name expected at targetPath. */
+    private String expectedClassName;
+
     /**
      * 实体名(类名,如 "Order")。由 parseAtomicTasks 推导后填入,
      * 供 PromptBuilder 把 {@code {Entity}} / {@code {Name}} 占位符替换为真实实体名,
@@ -36,4 +39,17 @@ public class AtomicTask {
 
     /** 模块名(如 "order")。供 PromptBuilder 在路径示例中使用。 */
     private String moduleName;
+
+    /** Immutable plan-wide identity and reference conventions. */
+    private GenerationContext generationContext;
+
+    private Long sourceSubPlanId;
+
+    /** Selected reference metadata for timeline/reporting. */
+    private String selectedReferenceClass;
+    private String selectedReferenceModule;
+    private String selectedReferencePath;
+    private Integer referenceScore;
+    private String referenceReason;
+
 }

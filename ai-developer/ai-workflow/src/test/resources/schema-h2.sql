@@ -8,6 +8,10 @@ CREATE TABLE IF NOT EXISTS ai_workflow_plan (
     status VARCHAR(30) DEFAULT 'RECEIVED',
     source_service VARCHAR(100),
     write_target VARCHAR(10) DEFAULT 'ISOLATED',
+    generation_identity_json CLOB,
+    reference_profile_json CLOB,
+    output_directory VARCHAR(500),
+    compile_verification_status VARCHAR(50) DEFAULT 'NOT_RUN',
     create_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     update_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     is_deleted INT DEFAULT 0

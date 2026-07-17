@@ -62,10 +62,13 @@ public class GeneratedFileStore {
         String content = file.getContent();
         try {
             WriteTarget writeTarget = WriteTarget.parse(plan.getWriteTarget());
-            String writeRoot = writeTarget.isReal() ? properties.getTargetProjectRoot() : properties.getOutputRoot();
+            String isolatedRoot = plan.getOutputDirectory() == null || plan.getOutputDirectory().isBlank()
+                    ? properties.getOutputRoot() : plan.getOutputDirectory();
+            String writeRoot = writeTarget.isReal() ? properties.getTargetProjectRoot() : isolatedRoot;
             boolean rootAvailable = writeTarget.isReal()
                     ? fileWriteExecutor.isRootAvailable(writeRoot)
-                    : fileWriteExecutor.isTargetRootAvailable();
+                    : (plan.getOutputDirectory() != null && !plan.getOutputDirectory().isBlank())
+                        || fileWriteExecutor.isTargetRootAvailable();
             if (!rootAvailable) {
                 log.warn("Repair write skipped because root is unavailable: path={}, target={}",
                         filePath, plan.getWriteTarget());

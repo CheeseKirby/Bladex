@@ -1,101 +1,133 @@
 package org.springblade.aiworkflow.agent;
 
 /**
- * BladeX 多模块路径布局工具。
- *
- * <p>把 TaskType + module + entity (+ voSuffix) 映射为相对输出根（outputRoot）的 BladeX 多模块路径，
- * 统一收口 parseAtomicTasks 的路径生成，避免硬编码 {@code src/main/java/...} 落到游离根 src。
- *
- * <p>产物布局（对齐参考 BladeX：blade-user / blade-desk）：
- * <ul>
- *   <li><b>API 模块</b> {@code blade-service-api/blade-{module}-api/src/main/java/org/springblade/{module}/}：
- *       {@code pojo/entity/{Entity}.java}、{@code pojo/vo/{Entity}{Suffix}.java}、{@code feign/I{Entity}Client.java}</li>
- *   <li><b>IMPL 模块</b> {@code blade-service/blade-{module}/src/main/java/org/springblade/{module}/}：
- *       controller / mapper(.java+.xml) / service(+impl) / wrapper / excel + {Module}Application.java</li>
- *   <li><b>DDL</b> {@code doc/sql/{module}/migration.sql}</li>
- * </ul>
- *
- * @author AI Developer
+ * Version-aware BladeX multi-module layout. Legacy overloads are retained for
+ * old callers, while new workflow code must use GenerationContext.
  */
 public final class BladeXModuleLayout {
 
-    private static final String API_BASE =
-            "blade-service-api/blade-%s-api/src/main/java/org/springblade/%s";
-    private static final String IMPL_BASE =
-            "blade-service/blade-%s/src/main/java/org/springblade/%s";
-    private static final String IMPL_RESOURCES = "blade-service/blade-%s/src/main/resources";
-
-    private BladeXModuleLayout() {}
-
-    // ─── DDL ───
-    public static String ddlPath(String module) {
-        return "doc/sql/" + module + "/migration.sql";
+    private BladeXModuleLayout() {
     }
 
-    // ─── API 模块业务文件 ───
-    public static String entityPath(String module, String entity) {
-        return apiBase(module) + "/pojo/entity/" + entity + ".java";
+    public static String ddlPath(GenerationContext context) {
+        return "doc/sql/" + context.identity().moduleName() + "/migration.sql";
     }
 
-    public static String voPath(String module, String entity, String suffix) {
-        return apiBase(module) + "/pojo/vo/" + entity + suffix + ".java";
+    public static String entityPath(GenerationContext context, String entity) {
+        return apiJavaBase(context) + packagePath(context.referenceProfile().entityPackageSuffix()) + "/" + entity + ".java";
     }
 
-    public static String feignPath(String module, String entity) {
-        return apiBase(module) + "/feign/I" + entity + "Client.java";
+    public static String voPath(GenerationContext context, String entity, String suffix) {
+        String className = entity + suffix;
+        return apiJavaBase(context) + packagePath(context.referenceProfile().voPackageSuffix(className))
+                + "/" + className + ".java";
     }
 
-    public static String apiPomPath(String module) {
-        return "blade-service-api/blade-" + module + "-api/pom.xml";
+    public static String feignPath(GenerationContext context, String className) {
+        return apiJavaBase(context) + packagePath(context.referenceProfile().feignPackageSuffix())
+                + "/I" + className + "Client.java";
     }
 
-    // ─── IMPL 模块业务文件 ───
-    public static String controllerPath(String module, String entity) {
-        return implBase(module) + "/controller/" + entity + "Controller.java";
+    public static String apiPomPath(GenerationContext context) {
+        return "blade-service-api/" + context.identity().apiModuleName() + "/pom.xml";
     }
 
-    public static String serviceInterfacePath(String module, String entity) {
-        return implBase(module) + "/service/I" + entity + "Service.java";
+    public static String controllerPath(GenerationContext context, String entity) {
+        return implJavaBase(context) + packagePath(context.referenceProfile().controllerPackageSuffix())
+                + "/" + entity + "Controller.java";
     }
 
-    public static String serviceImplPath(String module, String entity) {
-        return implBase(module) + "/service/impl/" + entity + "ServiceImpl.java";
+    public static String serviceInterfacePath(GenerationContext context, String entity) {
+        return implJavaBase(context) + packagePath(context.referenceProfile().servicePackageSuffix())
+                + "/I" + entity + "Service.java";
     }
 
-    public static String mapperJavaPath(String module, String entity) {
-        return implBase(module) + "/mapper/" + entity + "Mapper.java";
+    public static String serviceImplPath(GenerationContext context, String entity) {
+        return implJavaBase(context) + packagePath(context.referenceProfile().serviceImplPackageSuffix())
+                + "/" + entity + "ServiceImpl.java";
     }
 
-    public static String mapperXmlPath(String module, String entity) {
-        return implBase(module) + "/mapper/" + entity + "Mapper.xml";
+    public static String mapperJavaPath(GenerationContext context, String entity) {
+        return implJavaBase(context) + packagePath(context.referenceProfile().mapperPackageSuffix())
+                + "/" + entity + "Mapper.java";
     }
 
-    public static String wrapperPath(String module, String entity) {
-        return implBase(module) + "/wrapper/" + entity + "Wrapper.java";
+    public static String mapperXmlPath(GenerationContext context, String entity) {
+        if (context.referenceProfile().mapperXmlInJava()) {
+            return implJavaBase(context) + packagePath(context.referenceProfile().mapperPackageSuffix())
+                    + "/" + entity + "Mapper.xml";
+        }
+        return "blade-service/" + context.identity().serviceModuleName()
+                + "/src/main/resources/mapper/" + entity + "Mapper.xml";
     }
 
-    public static String excelPath(String module, String entity) {
-        return implBase(module) + "/excel/" + entity + "Excel.java";
+    public static String wrapperPath(GenerationContext context, String entity) {
+        return implJavaBase(context) + packagePath(context.referenceProfile().wrapperPackageSuffix())
+                + "/" + entity + "Wrapper.java";
     }
 
-    public static String applicationPath(String module) {
-        return implBase(module) + "/" + capitalize(module) + "Application.java";
+    public static String excelPath(GenerationContext context, String entity) {
+        return implJavaBase(context) + packagePath(context.referenceProfile().excelPackageSuffix())
+                + "/" + entity + "Excel.java";
     }
 
-    public static String implPomPath(String module) {
-        return "blade-service/blade-" + module + "/pom.xml";
+    public static String applicationPath(GenerationContext context) {
+        return implJavaBase(context) + "/" + capitalize(context.identity().moduleName()) + "Application.java";
     }
 
-    public static String bootstrapPath(String module) {
-        return String.format(IMPL_RESOURCES, module) + "/bootstrap.yml";
+    public static String implPomPath(GenerationContext context) {
+        return "blade-service/" + context.identity().serviceModuleName() + "/pom.xml";
     }
 
-    public static String appDevPath(String module) {
-        return String.format(IMPL_RESOURCES, module) + "/application-dev.yml";
+    public static String bootstrapPath(GenerationContext context) {
+        return implResourcesBase(context) + "/bootstrap.yml";
     }
 
-    // ─── 辅助：路径反推（骨架去重/对齐用） ───
-    /** 从生成文件相对路径反推 module 名；无法识别返回 null。 */
+    public static String appDevPath(GenerationContext context) {
+        return implResourcesBase(context) + "/application-dev.yml";
+    }
+
+    public static String apiClassPath(GenerationContext context, String packageSuffix, String className) {
+        return apiJavaBase(context) + packagePath(packageSuffix) + "/" + className + ".java";
+    }
+
+    public static String implClassPath(GenerationContext context, String packageSuffix, String className) {
+        return implJavaBase(context) + packagePath(packageSuffix) + "/" + className + ".java";
+    }
+
+    public static String namedFeignPath(GenerationContext context, String className) {
+        return apiClassPath(context, context.referenceProfile().feignPackageSuffix(), className);
+    }
+
+    public static String namedControllerPath(GenerationContext context, String className) {
+        return implClassPath(context, context.referenceProfile().controllerPackageSuffix(), className);
+    }
+
+    public static String dtoPath(GenerationContext context, String className) {
+        String voBase = context.referenceProfile().voPackageSuffix("VO");
+        String dtoSuffix = voBase.endsWith(".vo") ? voBase.substring(0, voBase.length() - 3) + ".dto" : "dto";
+        return apiJavaBase(context) + packagePath(dtoSuffix) + "/" + className + ".java";
+    }
+
+    private static String apiJavaBase(GenerationContext context) {
+        return "blade-service-api/" + context.identity().apiModuleName() + "/src/main/java/"
+                + context.identity().basePackage().replace('.', '/');
+    }
+
+    private static String implJavaBase(GenerationContext context) {
+        return "blade-service/" + context.identity().serviceModuleName() + "/src/main/java/"
+                + context.identity().basePackage().replace('.', '/');
+    }
+
+    private static String implResourcesBase(GenerationContext context) {
+        return "blade-service/" + context.identity().serviceModuleName() + "/src/main/resources";
+    }
+
+    private static String packagePath(String suffix) {
+        return suffix == null || suffix.isBlank() ? "" : "/" + suffix.replace('.', '/');
+    }
+
+    /** Reverse a generated path to its canonical module name. */
     public static String moduleOfPath(String relPath) {
         if (relPath == null) return null;
         if (relPath.startsWith("blade-service-api/blade-")) {
@@ -104,13 +136,10 @@ public final class BladeXModuleLayout {
         if (relPath.startsWith("blade-service/blade-")) {
             return extractBetween(relPath, "blade-service/blade-", "/");
         }
-        if (relPath.startsWith("doc/sql/")) {
-            return extractBetween(relPath, "doc/sql/", "/");
-        }
+        if (relPath.startsWith("doc/sql/")) return extractBetween(relPath, "doc/sql/", "/");
         return null;
     }
 
-    /** 路径属于哪一侧："API" / "IMPL" / "DOC" / "OTHER"。 */
     public static String sideOfPath(String relPath) {
         if (relPath == null) return "OTHER";
         if (relPath.startsWith("blade-service-api/")) return "API";
@@ -119,23 +148,41 @@ public final class BladeXModuleLayout {
         return "OTHER";
     }
 
-    public static String capitalize(String s) {
-        if (s == null || s.isEmpty()) return s;
-        return Character.toUpperCase(s.charAt(0)) + s.substring(1);
-    }
-
-    // ─── 内部 ───
-    private static String apiBase(String module) {
-        return String.format(API_BASE, module, module);
-    }
-
-    private static String implBase(String module) {
-        return String.format(IMPL_BASE, module, module);
-    }
-
-    private static String extractBetween(String src, String prefix, String suffix) {
+    private static String extractBetween(String value, String prefix, String suffix) {
         int start = prefix.length();
-        int end = src.indexOf(suffix, start);
-        return end > start ? src.substring(start, end) : null;
+        int end = value.indexOf(suffix, start);
+        return end > start ? value.substring(start, end) : null;
     }
+
+    public static String capitalize(String module) {
+        if (module == null || module.isEmpty()) return module;
+        StringBuilder result = new StringBuilder();
+        for (String part : module.split("_")) {
+            if (!part.isEmpty()) result.append(Character.toUpperCase(part.charAt(0))).append(part.substring(1));
+        }
+        return result.toString();
+    }
+
+    // Backward-compatible defaults for old tests and repair helpers.
+    private static GenerationContext legacy(String module, String entity) {
+        return new GenerationContext(GenerationIdentity.of(module, entity, "blade_" + module,
+                "org.springblade." + module), ReferenceFrameworkProfile.defaults());
+    }
+
+    public static String ddlPath(String module) { return ddlPath(legacy(module, "Business")); }
+    public static String entityPath(String module, String entity) { return entityPath(legacy(module, entity), entity); }
+    public static String voPath(String module, String entity, String suffix) { return voPath(legacy(module, entity), entity, suffix); }
+    public static String feignPath(String module, String entity) { return feignPath(legacy(module, entity), entity); }
+    public static String apiPomPath(String module) { return apiPomPath(legacy(module, "Business")); }
+    public static String controllerPath(String module, String entity) { return controllerPath(legacy(module, entity), entity); }
+    public static String serviceInterfacePath(String module, String entity) { return serviceInterfacePath(legacy(module, entity), entity); }
+    public static String serviceImplPath(String module, String entity) { return serviceImplPath(legacy(module, entity), entity); }
+    public static String mapperJavaPath(String module, String entity) { return mapperJavaPath(legacy(module, entity), entity); }
+    public static String mapperXmlPath(String module, String entity) { return mapperXmlPath(legacy(module, entity), entity); }
+    public static String wrapperPath(String module, String entity) { return wrapperPath(legacy(module, entity), entity); }
+    public static String excelPath(String module, String entity) { return excelPath(legacy(module, entity), entity); }
+    public static String applicationPath(String module) { return applicationPath(legacy(module, "Business")); }
+    public static String implPomPath(String module) { return implPomPath(legacy(module, "Business")); }
+    public static String bootstrapPath(String module) { return bootstrapPath(legacy(module, "Business")); }
+    public static String appDevPath(String module) { return appDevPath(legacy(module, "Business")); }
 }

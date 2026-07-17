@@ -4,6 +4,7 @@ import { DeleteOutlined } from '@ant-design/icons';
 import type { DataNode } from 'antd/es/tree';
 import { usePlanStore } from '../../store/planStore';
 import { transmitPlan } from '../../services/api';
+import { deriveGenerationIdentity } from '../../services/generationIdentity';
 import { usePartBStatusPoll } from '../../hooks/usePartBStatusPoll';
 import type { SubPlan, SubPlanStatus, PartBSubPlanStatus } from '../../types/plan';
 import { consumeReviewStream } from '../../services/reviewStream';
@@ -274,6 +275,7 @@ const SubPlanNavigator: React.FC<SubPlanNavigatorProps> = ({ onSwitchTab }) => {
           generatedBy: 'claude',
           transmittedAt: new Date().toISOString(),
         },
+        generationIdentity: deriveGenerationIdentity(project),
         writeTarget,
       });
 

@@ -273,6 +273,12 @@ public class PromptBuilder {
         String module = task.getModuleName() != null && !task.getModuleName().isBlank()
                 ? task.getModuleName() : entity.toLowerCase();
 
+        GenerationContext generationContext = task.getGenerationContext();
+        ReferenceFrameworkProfile profile = generationContext != null
+                ? generationContext.referenceProfile() : ReferenceFrameworkProfile.defaults();
+        String basePackage = generationContext != null
+                ? generationContext.identity().basePackage() : "org.springblade." + module;
+
         StringBuilder sb = new StringBuilder();
 
         sb.append("== 任务 ==\n");
@@ -303,13 +309,24 @@ public class PromptBuilder {
         sb.append("\n== 跨文件契约约定 (必须严格遵守,否则无法编译) ==\n");
         sb.append("- 实体名严格使用: ").append(entity).append(" (不要用 Entity/User/其他词)\n");
         sb.append("- 模块名严格使用: ").append(module).append("\n");
-        sb.append("- API 模块(blade-service-api/blade-").append(module).append("-api) 包路径:\n");
-        sb.append("  Entity → org.springblade.").append(module).append(".pojo.entity\n");
-        sb.append("  VO → org.springblade.").append(module).append(".pojo.vo (平铺, 不要 ivo/qvo/uvo/evo 子包)\n");
-        sb.append("  Feign 接口 → org.springblade.").append(module).append(".feign\n");
-        sb.append("- IMPL 模块(blade-service/blade-").append(module).append(") 包路径:\n");
-        sb.append("  controller / mapper / service / service.impl / wrapper / excel → org.springblade.").append(module).append(".{layer}\n");
-        sb.append("- IMPL 类引用 API 模块类时必须 import: org.springblade.").append(module).append(".pojo.entity.").append(entity).append(" 与 org.springblade.").append(module).append(".pojo.vo.*\n");
+        sb.append("- API module: ").append(generationContext != null ? generationContext.identity().apiModuleName() : "blade-" + module + "-api").append("\n");
+        sb.append("  Entity package: ").append(basePackage).append(".").append(profile.entityPackageSuffix()).append("\n");
+        sb.append("  VO packages: ").append(profile.voPackageSuffixes()).append("\n");
+        sb.append("  Feign package: ").append(basePackage).append(".").append(profile.feignPackageSuffix()).append("\n");
+        sb.append("- Service module: ").append(generationContext != null ? generationContext.identity().serviceModuleName() : "blade-" + module).append("\n");
+        sb.append("  controller=").append(basePackage).append(".").append(profile.controllerPackageSuffix())
+                .append(", mapper=").append(basePackage).append(".").append(profile.mapperPackageSuffix())
+                .append(", service=").append(basePackage).append(".").append(profile.servicePackageSuffix())
+                .append(", wrapper=").append(basePackage).append(".").append(profile.wrapperPackageSuffix()).append("\n");
+        sb.append("- Target path is authoritative: ").append(task.getTargetPath()).append("; package declaration must match it.\n");
+        if (task.getExpectedClassName() != null && !task.getExpectedClassName().isBlank()) {
+            sb.append("- Exact top-level class/interface name: ").append(task.getExpectedClassName())
+                    .append("; never rename it.\n");
+        }
+        sb.append("- Framework profile is authoritative: ").append(profile.describeForPrompt()).append("\n");
+        if (generationContext != null) {
+            sb.append("- Canonical table name: ").append(generationContext.identity().tableName()).append("\n");
+        }
         sb.append("- VO 类名: ").append(entity).append("VO / ").append(entity).append("QVO / ").append(entity).append("IVO / ").append(entity).append("UVO / ").append(entity).append("EVO\n");
         sb.append("- VO/IVO/UVO 业务字段必须与 Entity 逐字段同名同类型 (Entity 用 periodName 就用 periodName, 不要改成 name; Entity 是 Date 就用 Date, 不要用 LocalDate)。凭空业务字段(如 weekDays/priority)禁止; 展示衍生字段用 xxxName 后缀。违反会导致 BeanUtil.copy 丢字段、CRUD 断裂, 且会被跨文件自检拦截并强制重生成。\n");
         sb.append("- Mapper XML: resultMap 的 type 必须与对应 Mapper 方法返回元素类型一致(方法返回 List<XxxVO> 则 resultMap type 指向 XxxVO 且 property 与 VO 字段同名; 返回 List<Entity> 则指向 Entity); <select> 的 @Param 前缀必须与 Mapper 接口 @Param(\"xxx\") 一致。\n");

@@ -51,6 +51,14 @@ DELIMITER ;
 
 CALL add_column_if_missing('ai_workflow_plan', 'write_target',
     "VARCHAR(10) NOT NULL DEFAULT 'ISOLATED' COMMENT '写入目标: ISOLATED(隔离区) / REAL(真实项目)'");
+CALL add_column_if_missing('ai_workflow_plan', 'generation_identity_json',
+    "JSON NULL COMMENT 'Canonical generation identity JSON'");
+CALL add_column_if_missing('ai_workflow_plan', 'reference_profile_json',
+    "JSON NULL COMMENT 'Reference framework profile JSON'");
+CALL add_column_if_missing('ai_workflow_plan', 'output_directory',
+    "VARCHAR(500) NULL COMMENT 'Per-reception isolated output directory'");
+CALL add_column_if_missing('ai_workflow_plan', 'compile_verification_status',
+    "VARCHAR(50) NOT NULL DEFAULT 'NOT_RUN' COMMENT 'Compile verification status'");
 
 DROP PROCEDURE IF EXISTS add_column_if_missing;
 

@@ -20,8 +20,11 @@ import org.springblade.aiworkflow.mapper.AiPlanMapper;
 import org.springblade.aiworkflow.mapper.AiSubPlanMapper;
 import org.springblade.aiworkflow.notification.WorkflowStatusNotifier;
 
+import java.nio.file.Paths;
 import java.time.LocalDateTime;
 import java.util.*;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 /**
  * BladeX代码Agent — 核心编排器
@@ -56,6 +59,7 @@ public class BladeXCodeAgent {
 
     /** 跨文件契约校验器 — 无状态工具, 直接持有实例 */
     private final CrossFileValidator crossFileValidator = new CrossFileValidator();
+    private final GeneratedProjectValidator generatedProjectValidator = new GeneratedProjectValidator();
 
     /** 拓扑排序器(H8 拆出)- 子方案 DAG 排序 + 依赖解析 */
     private final TopologySorter topologySorter;
@@ -123,6 +127,23 @@ public class BladeXCodeAgent {
         List<AiSubPlan> subPlans = subPlanMapper.selectByPlanId(plan.getId());
         log.info("加载方案完成: planId={}, subPlanCount={}", plan.getId(), subPlans.size());
 
+        GenerationIdentity generationIdentity = GenerationIdentityResolver.resolve(plan, subPlans, objectMapper);
+        ReferenceFrameworkProfile frameworkProfile = referenceProjectIndex != null
+                ? referenceProjectIndex.getFrameworkProfile() : ReferenceFrameworkProfile.defaults();
+        GenerationContext generationContext = new GenerationContext(generationIdentity, frameworkProfile);
+        try {
+            plan.setGenerationIdentityJson(objectMapper.writeValueAsString(generationIdentity));
+            plan.setReferenceProfileJson(objectMapper.writeValueAsString(frameworkProfile));
+        } catch (JsonProcessingException e) {
+            throw new IllegalStateException("Unable to persist generation context", e);
+        }
+        plan.setOutputDirectory(WriteTarget.parse(plan.getWriteTarget()).isReal()
+                ? properties.getTargetProjectRoot()
+                : Paths.get(properties.getOutputRoot(), receptionId).toString());
+        plan.setCompileVerificationStatus("NOT_RUN");
+        planMapper.updateById(plan);
+        log.info("Generation context locked: identity={}, profile={}", generationIdentity, frameworkProfile.describeForPrompt());
+
         // 2. 构建DAG并验证无环
         List<AiSubPlan> executionOrder = topologySorter.buildExecutionOrder(subPlans);
         if (executionOrder == null) {
@@ -135,6 +156,17 @@ public class BladeXCodeAgent {
         // 3. 按拓扑顺序执行
         //    子方案失败不立刻中断整条流水线: 仅跳过依赖该失败子方案的下游(直接/传递)子方案,
         //    无依赖关系的并列子方案继续执行,让 Part A 拿到尽可能多的部分结果。
+        Map<Long, List<AtomicTask>> plannedTasks = new LinkedHashMap<>();
+        List<ExpectedDeliverable> expectedDeliverables = new ArrayList<>();
+        for (AiSubPlan plannedSubPlan : executionOrder) {
+            List<AtomicTask> subPlanTasks = parseAtomicTasks(plannedSubPlan, generationContext);
+            subPlanTasks.forEach(task -> task.setSourceSubPlanId(plannedSubPlan.getId()));
+            plannedTasks.put(plannedSubPlan.getId(), subPlanTasks);
+            for (AtomicTask task : subPlanTasks) {
+                expectedDeliverables.add(ExpectedDeliverable.from(plannedSubPlan.getId(), task));
+            }
+        }
+
         boolean allSuccess = true;
         Set<Long> failedIds = new HashSet<>();
         Map<Long, List<String>> reverseDeps = topologySorter.buildReverseDependencies(executionOrder);
@@ -151,7 +183,7 @@ public class BladeXCodeAgent {
                 continue;
             }
             try {
-                boolean subPlanSuccess = executeSubPlan(subPlan, plan, ensuredSkeletonKeys);
+                boolean subPlanSuccess = executeSubPlan(subPlan, plan, ensuredSkeletonKeys, generationContext, plannedTasks.getOrDefault(subPlan.getId(), List.of()));
                 if (!subPlanSuccess) {
                     allSuccess = false;
                     failedIds.add(subPlan.getId());
@@ -188,9 +220,27 @@ public class BladeXCodeAgent {
                 .map(issues -> issues.stream().filter(CrossFileValidator.ContractIssue::isError).count())
                 .orElse(0L);
 
+        List<GeneratedProjectValidator.Issue> projectIssues = generatedProjectValidator.validate(
+                generatedFileStore.loadPlanFiles(plan), expectedDeliverables, generationContext, referenceProjectIndex);
+        long projectQualityErrorCount = projectIssues.stream().filter(GeneratedProjectValidator.Issue::isError).count();
+        if (!projectIssues.isEmpty()) {
+            String report;
+            try {
+                report = objectMapper.writeValueAsString(projectIssues);
+            } catch (JsonProcessingException e) {
+                report = projectIssues.toString();
+            }
+            logExecution(null, "PROJECT_QUALITY_VALIDATION", "",
+                    projectQualityErrorCount > 0 ? "FAILED" : "SUCCESS",
+                    "Project quality validation: " + projectQualityErrorCount + " ERROR / " + projectIssues.size() + " issues", report);
+        } else {
+            logExecution(null, "PROJECT_QUALITY_VALIDATION", "", "SUCCESS",
+                    "Project quality validation passed", null);
+        }
+
         // 子方案级校验发生在 plan 级修复之前。只有最终校验确实执行成功且已无 ERROR，才把此前的
         // COMPLETED_WITH_ERRORS 恢复成 COMPLETED；校验异常时保留原状态，不能把未知结果误报成功。
-        if (finalValidationSucceeded && finalContractErrorCount == 0) {
+        if (finalValidationSucceeded && finalContractErrorCount == 0 && projectQualityErrorCount == 0) {
             reconcileRepairedSubPlanStatuses(executionOrder);
         }
 
@@ -200,12 +250,20 @@ public class BladeXCodeAgent {
         boolean compileFailed = false;
         if (WriteTarget.parse(plan.getWriteTarget()).isReal()) {
             compileFailed = !runCompileVerification(plan);
+            plan.setCompileVerificationStatus(compileFailed ? "FAILED" : "PASSED");
+        } else {
+            plan.setCompileVerificationStatus("SKIPPED_DEPENDENCIES_UNAVAILABLE");
+            logExecution(null, "COMPILE_VERIFICATION", "", "SKIPPED",
+                    "Compile verification was not run because private reference dependencies are unavailable", null);
         }
 
         boolean hasSubPlanErrors = executionOrder.stream()
                 .anyMatch(sp -> sp.getStatus() == SubPlanStatus.COMPLETED_WITH_ERRORS);
         plan.setStatus(determineFinalPlanStatus(
-                allSuccess, hasSubPlanErrors, finalContractErrorCount, compileFailed));
+                allSuccess, hasSubPlanErrors, finalContractErrorCount + projectQualityErrorCount, compileFailed));
+        List<AtomicTask> allPlannedTasks = plannedTasks.values().stream().flatMap(Collection::stream).toList();
+        GenerationReportWriter.write(plan, generatedFileStore.loadPlanFiles(plan), expectedDeliverables,
+                allPlannedTasks, projectIssues, objectMapper);
         planMapper.updateById(plan);
 
         // 5. 回调Part A
@@ -286,7 +344,7 @@ public class BladeXCodeAgent {
     /**
      * 执行单个子方案
      */
-    private boolean executeSubPlan(AiSubPlan subPlan, AiPlan plan, Set<String> ensuredSkeletonKeys) {
+    private boolean executeSubPlan(AiSubPlan subPlan, AiPlan plan, Set<String> ensuredSkeletonKeys, GenerationContext generationContext, List<AtomicTask> tasks) {
         log.info("执行子方案: id={}, title={}", subPlan.getId(), subPlan.getTitle());
 
         // 更新状态
@@ -295,8 +353,7 @@ public class BladeXCodeAgent {
         subPlanMapper.updateById(subPlan);
 
         // 3a. 解析子方案为原子任务
-        List<AtomicTask> tasks = parseAtomicTasks(subPlan);
-        log.info("解析出 {} 个原子任务", tasks.size());
+        log.info("Atomic task count: {}", tasks.size());
 
         // 3b. 对每个原子任务执行生成→校验→修复→写入循环
         List<GeneratedFile> allGeneratedFiles = new ArrayList<>();
@@ -424,7 +481,7 @@ public class BladeXCodeAgent {
 
         // 3d-0. 模块骨架补齐 — 为本子方案涉及的 BladeX 模块(api/impl)补齐 pom/Application/bootstrap，
         //       复用既有写盘/落库流程；per-plan ensuredSkeletonKeys 去重避免重复生成。
-        List<GeneratedFile> skeletons = BladeXModuleSkeleton.ensureFor(allGeneratedFiles, ensuredSkeletonKeys);
+        List<GeneratedFile> skeletons = BladeXModuleSkeleton.ensureFor(allGeneratedFiles, ensuredSkeletonKeys, generationContext);
         if (!skeletons.isEmpty()) {
             allGeneratedFiles.addAll(skeletons);
             log.info("补齐模块骨架: {} 个文件", skeletons.size());
@@ -435,7 +492,7 @@ public class BladeXCodeAgent {
         WriteTarget writeTarget = WriteTarget.parse(plan.getWriteTarget());
         String writeRoot = writeTarget.isReal()
                 ? properties.getTargetProjectRoot()
-                : properties.getOutputRoot();
+                : plan.getOutputDirectory();
         log.info("写盘目标: writeTarget={}, root={}", writeTarget.getCode(), writeRoot);
 
         // REAL 模式: 写盘前查重 — 类名/表名冲突即拒绝(不覆盖现有代码)
@@ -729,6 +786,16 @@ public class BladeXCodeAgent {
             log.debug("REAL 生成: 参考项目中无 {} 类型的参考代码", targetType);
             return null;
         }
+        IndexedClassInfo selected = ref.get();
+        int score = referenceProjectIndex.scoreReferenceCandidate(selected, task.getModuleName(), task.getEntityName());
+        task.setSelectedReferenceClass(selected.simpleName());
+        task.setSelectedReferenceModule(selected.module());
+        task.setSelectedReferencePath(selected.relativePath());
+        task.setReferenceScore(score);
+        task.setReferenceReason(score >= 100 ? "same module/type" : score >= 30 ? "same entity/type" : "project-level type fallback");
+        logExecution(task.getSourceSubPlanId(), "REFERENCE_SELECTION", task.getTargetPath(), "SUCCESS",
+                "selected=" + selected.simpleName() + ", module=" + selected.module()
+                        + ", score=" + score + ", reason=" + task.getReferenceReason(), null);
         String summary = referenceProjectIndex.buildStructuredSummary(ref.get().relativePath());
         if (summary == null) {
             log.warn("REAL 生成: 参考代码摘要失败: {}", ref.get().relativePath());
@@ -769,15 +836,17 @@ public class BladeXCodeAgent {
      * 然后从子方案内容中提取实体名/模块名/包路径,组合出文件路径。
      * 每个 AtomicTask 只对应 <b>一个</b> 目标文件,LLM 一次只生成一个文件,避免多文件拆分歧义。
      */
-    private List<AtomicTask> parseAtomicTasks(AiSubPlan subPlan) {
+    private List<AtomicTask> parseAtomicTasks(AiSubPlan subPlan, GenerationContext generationContext) {
         String content = subPlan.getPlanContent();
         if (content == null || content.isBlank()) {
             return new ArrayList<>();
         }
 
         // 提取关键信息: 实体名 (Order) 和模块名 (order)
-        String entityName = extractEntityName(content);
-        String moduleName = extractModuleName(content, entityName);
+        String extractedEntity = extractEntityName(content);
+        String entityName = "Entity".equals(extractedEntity)
+                ? generationContext.identity().entityName() : extractedEntity;
+        String moduleName = generationContext.identity().moduleName();
 
         String title = subPlan.getTitle() == null ? "" : subPlan.getTitle();
         String tLower = title.toLowerCase();
@@ -789,7 +858,7 @@ public class BladeXCodeAgent {
         if (tLower.contains("ddl") || title.contains("数据库") || title.contains("建表") || title.contains("sql")) {
             tasks.add(buildTask(TaskType.DDL_STATEMENT,
                     title + " — 生成数据库 DDL\n\n" + fullContext,
-                    BladeXModuleLayout.ddlPath(moduleName),
+                    BladeXModuleLayout.ddlPath(generationContext),
                     entityName, moduleName));
         }
 
@@ -797,7 +866,7 @@ public class BladeXCodeAgent {
         if (title.contains("Entity") || title.contains("实体")) {
             tasks.add(buildTask(TaskType.STANDARD_CRUD_ENTITY,
                     title + " — 生成 Entity 类 (" + entityName + ")\n\n" + fullContext,
-                    BladeXModuleLayout.entityPath(moduleName, entityName),
+                    BladeXModuleLayout.entityPath(generationContext, entityName),
                     entityName, moduleName));
         }
 
@@ -806,7 +875,7 @@ public class BladeXCodeAgent {
             for (String suffix : new String[]{"QVO", "IVO", "UVO", "VO", "EVO"}) {
                     tasks.add(buildTask(TaskType.OTHER,
                     title + " — 生成 " + entityName + suffix + " 类\n\n" + voInstructions(suffix, entityName) + "\n\n" + fullContext,
-                    BladeXModuleLayout.voPath(moduleName, entityName, suffix),
+                    BladeXModuleLayout.voPath(generationContext, entityName, suffix),
                     entityName, moduleName));
             }
         }
@@ -815,12 +884,12 @@ public class BladeXCodeAgent {
         if (title.contains("Mapper") || title.contains("Service") || title.contains("服务")) {
             tasks.add(buildTask(TaskType.CUSTOM_MAPPER,
                     title + " — 生成 " + entityName + "Mapper 接口\n\n" + fullContext,
-                    BladeXModuleLayout.mapperJavaPath(moduleName, entityName),
+                    BladeXModuleLayout.mapperJavaPath(generationContext, entityName),
                     entityName, moduleName));
             // Mapper.xml 同伴文件（与 .java 同包目录，BladeX 约定）
             tasks.add(buildTask(TaskType.MAPPER_XML,
                     title + " — 生成 " + entityName + "Mapper.xml\n\n" + fullContext,
-                    BladeXModuleLayout.mapperXmlPath(moduleName, entityName),
+                    BladeXModuleLayout.mapperXmlPath(generationContext, entityName),
                     entityName, moduleName));
         }
 
@@ -828,12 +897,12 @@ public class BladeXCodeAgent {
         if (title.contains("Service") || title.contains("服务")) {
             tasks.add(buildTask(TaskType.STANDARD_CRUD_SERVICE,
                     title + " — 生成 I" + entityName + "Service 接口\n\n" + serviceInterfaceInstructions(entityName) + "\n\n" + fullContext,
-                    BladeXModuleLayout.serviceInterfacePath(moduleName, entityName),
+                    BladeXModuleLayout.serviceInterfacePath(generationContext, entityName),
                     entityName, moduleName));
             // 6. Service 实现
             tasks.add(buildTask(TaskType.STANDARD_CRUD_SERVICE,
                     title + " — 生成 " + entityName + "ServiceImpl 实现类\n\n" + serviceImplInstructions(entityName) + "\n\n" + fullContext,
-                    BladeXModuleLayout.serviceImplPath(moduleName, entityName),
+                    BladeXModuleLayout.serviceImplPath(generationContext, entityName),
                     entityName, moduleName));
         }
 
@@ -841,7 +910,7 @@ public class BladeXCodeAgent {
         if (title.contains("Wrapper") || title.contains("包装") || title.contains("Controller")) {
             tasks.add(buildTask(TaskType.WRAPPER,
                     title + " — 生成 " + entityName + "Wrapper 转换类\n\n" + wrapperInstructions(entityName) + "\n\n" + fullContext,
-                    BladeXModuleLayout.wrapperPath(moduleName, entityName),
+                    BladeXModuleLayout.wrapperPath(generationContext, entityName),
                     entityName, moduleName));
         }
 
@@ -849,7 +918,7 @@ public class BladeXCodeAgent {
         if (title.contains("Controller") || title.contains("控制器") || title.contains("API")) {
             tasks.add(buildTask(TaskType.STANDARD_CRUD_CONTROLLER,
                     title + " — 生成 " + entityName + "Controller 类\n\n" + controllerInstructions(entityName, moduleName) + "\n\n" + fullContext,
-                    BladeXModuleLayout.controllerPath(moduleName, entityName),
+                    BladeXModuleLayout.controllerPath(generationContext, entityName),
                     entityName, moduleName));
         }
 
@@ -857,7 +926,7 @@ public class BladeXCodeAgent {
         if (title.contains("Excel") || title.contains("导入导出")) {
             tasks.add(buildTask(TaskType.EXCEL_IMPORT_EXPORT,
                     title + " — 生成 " + entityName + "Excel 类\n\n" + excelInstructions(entityName) + "\n\n" + fullContext,
-                    BladeXModuleLayout.excelPath(moduleName, entityName),
+                    BladeXModuleLayout.excelPath(generationContext, entityName),
                     entityName, moduleName));
         }
 
@@ -866,11 +935,37 @@ public class BladeXCodeAgent {
             tasks.add(buildTask(TaskType.FEIGN_CLIENT,
                     title + " — 生成 Feign 客户端接口 I" + entityName + "Client (实体名: " + entityName + ")\n\n"
                             + feignInstructions(entityName, moduleName) + "\n\n" + fullContext,
-                    BladeXModuleLayout.feignPath(moduleName, entityName),
+                    BladeXModuleLayout.feignPath(generationContext, entityName),
                     entityName, moduleName));
         }
 
         // 兜底
+        // Explicit named deliverables mentioned by the reviewed plan are generated in addition
+        // to the primary CRUD stack. This prevents DTO/Feign/server-entry files from silently disappearing.
+        for (String dtoClass : extractNamedDeliverables(content, "DTO")) {
+            tasks.add(buildTask(TaskType.OTHER,
+                    title + " - generate exact DTO class " + dtoClass + "\n\n" + fullContext,
+                    BladeXModuleLayout.dtoPath(generationContext, dtoClass),
+                    entityName, moduleName));
+        }
+        for (String clientClass : extractNamedDeliverables(content, "Client")) {
+            String primaryClient = "I" + entityName + "Client";
+            if (clientClass.equals(primaryClient)) continue;
+            tasks.add(buildTask(TaskType.FEIGN_CLIENT,
+                    title + " - generate exact Feign interface " + clientClass
+                            + "; do not rename it or replace its owning module\n\n" + fullContext,
+                    BladeXModuleLayout.namedFeignPath(generationContext, clientClass),
+                    stripClientName(clientClass), moduleName));
+        }
+        for (String controllerClass : extractNamedDeliverables(content, "Controller")) {
+            if (controllerClass.equals(entityName + "Controller")) continue;
+            tasks.add(buildTask(TaskType.STANDARD_CRUD_CONTROLLER,
+                    title + " - generate exact controller class " + controllerClass
+                            + "; keep all endpoints required by the reviewed plan\n\n" + fullContext,
+                    BladeXModuleLayout.namedControllerPath(generationContext, controllerClass),
+                    controllerClass.substring(0, controllerClass.length() - "Controller".length()), moduleName));
+        }
+
         if (tasks.isEmpty()) {
             tasks.add(buildTask(TaskType.OTHER,
                     title + "\n\n" + fullContext,
@@ -883,6 +978,8 @@ public class BladeXCodeAgent {
         Set<String> seen = new java.util.LinkedHashSet<>();
         List<AtomicTask> deduped = new ArrayList<>();
         for (AtomicTask t : tasks) {
+            t.setGenerationContext(generationContext);
+            t.setModuleName(generationContext.identity().moduleName());
             if (seen.add(t.getTargetPath())) {
                 deduped.add(t);
             }
@@ -897,6 +994,11 @@ public class BladeXCodeAgent {
         t.setType(type);
         t.setTaskDescription(description);
         t.setTargetPath(targetPath);
+        String normalizedPath = targetPath == null ? "" : targetPath.replace('\\', '/');
+        int slash = normalizedPath.lastIndexOf('/');
+        String fileName = slash >= 0 ? normalizedPath.substring(slash + 1) : normalizedPath;
+        int dot = fileName.lastIndexOf('.');
+        t.setExpectedClassName(dot > 0 ? fileName.substring(0, dot) : fileName);
         // 把推导出的实体名/模块名带入任务,供 PromptBuilder 替换占位符 {Entity}/{Name}/{module}
         t.setEntityName(entityName);
         t.setModuleName(moduleName);
@@ -904,6 +1006,27 @@ public class BladeXCodeAgent {
     }
 
     /** 提取实体名(类名),例如 "Order" / "Product" */
+    private Set<String> extractNamedDeliverables(String content, String suffix) {
+        Set<String> names = new LinkedHashSet<>();
+        if (content == null || suffix == null) return names;
+        Pattern explicit = Pattern.compile(
+                "(?:create|generate|add|new|\\u521b\\u5efa|\\u751f\\u6210|\\u65b0\\u589e|\\u5b9e\\u73b0|\\u4ea4\\u4ed8)[^\\n]{0,80}?`?"
+                        + "(I?[A-Z][A-Za-z0-9_]*" + Pattern.quote(suffix) + ")`?",
+                Pattern.CASE_INSENSITIVE);
+        Matcher matcher = explicit.matcher(content);
+        while (matcher.find()) names.add(matcher.group(1));
+        Pattern fileList = Pattern.compile("`(I?[A-Z][A-Za-z0-9_]*" + Pattern.quote(suffix) + ")(?:\\.java)?`");
+        matcher = fileList.matcher(content);
+        while (matcher.find()) names.add(matcher.group(1));
+        return names;
+    }
+
+    private String stripClientName(String className) {
+        String value = className.startsWith("I") && className.length() > 1 && Character.isUpperCase(className.charAt(1))
+                ? className.substring(1) : className;
+        return value.endsWith("Client") ? value.substring(0, value.length() - "Client".length()) : value;
+    }
+
     private String extractEntityName(String content) {
         // 优先匹配显式声明 + 反引号 + 路径,避免被 "Entity extends BaseEntity" 这种范例字面值误匹配
         String[] pats = new String[]{
