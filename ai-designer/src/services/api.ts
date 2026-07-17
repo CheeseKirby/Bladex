@@ -7,7 +7,7 @@ const api = axios.create({
   timeout: 300_000, // Client default: 5 minutes; BFF default: 4 minutes.
 });
 
-const SSE_TIMEOUT_MS = 660_000; // Client idle budget: 11 minutes; BFF total budget: 10 minutes.
+const SSE_TIMEOUT_MS = 960_000; // Client budget: 16 minutes; BFF long-request budget: 15 minutes.
 
 // === LLM 相关 API ===
 
@@ -147,13 +147,13 @@ export function generatePlanStream(
 
 /** Review request: client budget is slightly longer than the BFF 10-minute total budget. */
 export async function reviewPlan(planContent: string, stage: 'master' | 'subplan') {
-  const res = await api.post('/llm/review-plan', { planContent, stage }, { timeout: 660_000 });
+  const res = await api.post('/llm/review-plan', { planContent, stage }, { timeout: 960_000 });
   return res.data;
 }
 
 /** 拆分子方案 */
 export async function splitPlan(planContent: string, signal?: AbortSignal) {
-  const res = await api.post('/llm/split-plan', { planContent }, { timeout: 660_000, signal });
+  const res = await api.post('/llm/split-plan', { planContent }, { timeout: 960_000, signal });
   return res.data;
 }
 
