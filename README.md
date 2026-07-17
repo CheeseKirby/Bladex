@@ -42,15 +42,15 @@
 | JDK | 17 |
 | Maven | ≥ 3.8 |
 | Node.js | ≥ 18 |
-| MySQL | ≥ 8.0 |
+| 数据库 | MySQL ≥ 8.0，或 Docker Desktop |
 
 校验:`java -version`、`mvn -v`、`node -v` 都能输出版本。
 
-### 2. 初始化数据库(一次性)
+### 2. 首次配置
 
-```bash
-mysql -uroot -p < ai-developer/sql/init.sql
-```
+复制 `.env.example` 为 `.env`，填写 LLM 和数据库配置；推荐直接运行 `deploy.ps1`，它会交互式生成配置、准备 MySQL 并初始化 schema。
+
+如果 `.env` 使用本机 `127.0.0.1`/`localhost` 数据库但端口尚未监听，后续 `start.bat` 会自动通过 `docker-compose.mysql.yml` 启动 MySQL，并幂等执行 `ai-developer/sql/init.sql`。
 
 ### 3. 配置环境变量
 
@@ -67,11 +67,17 @@ mysql -uroot -p < ai-developer/sql/init.sql
 
 ### 4. 启动服务
 
-**双击 `start.bat`**(或命令行 `.\start.bat`)。走 cmd,不受 PowerShell 执行策略限制,直接双击即可。
+**双击 `start.bat`**（或命令行 `.\start.bat`）即可。批处理会使用 `ExecutionPolicy Bypass` 调用统一的 `start.ps1`，不受本机 PowerShell 执行策略影响。
 
-会开 3 个窗口分别跑 Part B(8111)、BFF(3004)、前端(3005)。访问 http://localhost:3005/ 。
+一键启动会自动完成：
 
-> `start.bat` 读取 `.env` 注入环境变量。密码若含 `& | < > ^` 等 cmd 特殊字符,需用 `^` 转义(如 `secret^&pass`);普通字母数字密码无此问题。
+1. 读取 `.env` 并检查 Java、Maven、Node.js、npm；
+2. 检查 MySQL；必要时自动启动 Docker Desktop 和 Docker MySQL；
+3. 对 Docker MySQL 幂等执行 `init.sql`；
+4. 清理 8111、3004、3005 上一轮残留服务；
+5. 依次启动 Part B、BFF、前端，并等待三项健康检查通过。
+
+启动成功后访问 http://localhost:3005/ 。三个应用分别在独立窗口运行，关闭对应窗口即可停止应用；Docker MySQL 会保留数据供下次复用。
 
 ## 使用流程
 

@@ -65,7 +65,7 @@ const ModuleConfigModal: React.FC<ModuleConfigModalProps> = ({ module, open, onC
       onCancel={onClose}
       okText="保存"
       cancelText="取消"
-      destroyOnClose
+      destroyOnHidden
       width={520}
     >
       <Form layout="vertical" style={{ marginTop: 12 }}>

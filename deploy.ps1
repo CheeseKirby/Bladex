@@ -168,13 +168,20 @@ services:
     image: mysql:8.0
     container_name: ai-workflow-mysql
     environment:
-      MYSQL_ROOT_PASSWORD: $dbPass
+      MYSQL_ROOT_PASSWORD: `${DB_PASSWORD:?DB_PASSWORD is required in .env}
       MYSQL_DATABASE: ai_workflow
     ports:
-      - "${dbPort}:3306"
+      - "`${DB_PORT:-3307}:3306"
     volumes:
       - ai-workflow-mysql-data:/var/lib/mysql
     command: --character-set-server=utf8mb4 --collation-server=utf8mb4_unicode_ci
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -uroot -p`$`$MYSQL_ROOT_PASSWORD --silent"]
+      interval: 3s
+      timeout: 3s
+      retries: 30
+      start_period: 10s
+    restart: unless-stopped
 volumes:
   ai-workflow-mysql-data:
 "@ | Out-File -FilePath $composeFile -Encoding utf8 -NoNewline
@@ -193,7 +200,7 @@ volumes:
         if ($cont -notmatch '^[yY]') { Fail "请先释放端口 $dbPort 后重跑 deploy.ps1" }
     }
 
-    & docker compose -f $composeFile up -d 2>&1 | Out-Host
+    & docker compose --env-file (Join-Path $Root ".env") -f $composeFile up -d 2>&1 | Out-Host
     if ($LASTEXITCODE -ne 0) {
         Write-Host "[FAIL] docker compose up 失败" -ForegroundColor Red
         Write-Host "      常见原因:端口 $dbPort 被占用、或同名容器残留。" -ForegroundColor Red

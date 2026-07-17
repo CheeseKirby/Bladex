@@ -9,6 +9,7 @@
 
 import { Router, Request, Response } from 'express';
 import { requireBffAdmin } from '../security/adminGuard';
+import { invalidateReferenceSummaryCache } from '../services/referenceSummary';
 
 export const transmissionRouter = Router();
 transmissionRouter.use((req, res, next) => {
@@ -213,6 +214,7 @@ transmissionRouter.post('/reference', async (req: Request, res: Response) => {
     res.status(502).json({ success: false, msg: result.msg });
     return;
   }
+  invalidateReferenceSummaryCache();
   res.json(result.data);
 });
 

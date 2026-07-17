@@ -8,15 +8,25 @@ export interface ReviewStreamResult {
   changeLog: ChangeLogEntry[];
 }
 
-interface ReviewEvent {
+export type ReviewProgressStage = 'preparing' | 'reviewing' | 'analyzing' | 'fixing' | 'complete';
+
+export interface ReviewProgressEvent {
+  message: string;
+  stage?: ReviewProgressStage;
+  round?: number;
+  totalRounds?: number;
+  errorCount?: number;
+  warningCount?: number;
+}
+
+interface ReviewEvent extends Partial<ReviewProgressEvent> {
   type?: string;
-  message?: string;
   data?: Partial<ReviewStreamResult>;
 }
 
 export async function consumeReviewStream(
   reader: ReadableStreamDefaultReader<Uint8Array>,
-  onProgress: (message: string) => void,
+  onProgress: (event: ReviewProgressEvent) => void,
 ): Promise<ReviewStreamResult> {
   const decoder = new TextDecoder();
   let buffer = '';
@@ -35,7 +45,16 @@ export async function consumeReviewStream(
       }
 
       if (event.type === 'progress') {
-        if (typeof event.message === 'string') onProgress(event.message);
+        if (typeof event.message === 'string') {
+          onProgress({
+            message: event.message,
+            ...(typeof event.stage === 'string' ? { stage: event.stage } : {}),
+            ...(typeof event.round === 'number' ? { round: event.round } : {}),
+            ...(typeof event.totalRounds === 'number' ? { totalRounds: event.totalRounds } : {}),
+            ...(typeof event.errorCount === 'number' ? { errorCount: event.errorCount } : {}),
+            ...(typeof event.warningCount === 'number' ? { warningCount: event.warningCount } : {}),
+          });
+        }
         continue;
       }
       if (event.type === 'error') {

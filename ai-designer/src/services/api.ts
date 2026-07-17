@@ -277,8 +277,8 @@ const isRecord = (data: unknown): data is UnknownRecord =>
   typeof data === 'object' && data !== null && !Array.isArray(data);
 const isFiniteNumber = (data: unknown): data is number =>
   typeof data === 'number' && Number.isFinite(data);
-const optionalString = (data: unknown): boolean => data === undefined || typeof data === 'string';
-const optionalNumber = (data: unknown): boolean => data === undefined || isFiniteNumber(data);
+const optionalString = (data: unknown): boolean => data == null || typeof data === 'string';
+const optionalNumber = (data: unknown): boolean => data == null || isFiniteNumber(data);
 
 export function isGeneratedFileSummary(data: unknown): data is GeneratedFileSummary {
   if (!isRecord(data)) return false;

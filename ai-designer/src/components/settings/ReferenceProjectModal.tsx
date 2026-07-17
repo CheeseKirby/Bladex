@@ -57,7 +57,7 @@ const ReferenceProjectModal: React.FC<ReferenceProjectModalProps> = ({ open, onC
   const loadStatus = async () => {
     setLoading(true);
     try {
-      const res = await axios.get('/api/transmission/reference', { timeout: 10000 });
+      const res = await axios.get('/api/transmission/reference', { timeout: 25_000 });
       const s = res.data?.data || res.data;
       setStatus(s);
       setPath(s?.path || '');
@@ -76,7 +76,7 @@ const ReferenceProjectModal: React.FC<ReferenceProjectModalProps> = ({ open, onC
     }
     setScanning(true);
     try {
-      const res = await axios.post('/api/transmission/reference', { path: path.trim() }, { timeout: 30000 });
+      const res = await axios.post('/api/transmission/reference', { path: path.trim() }, { timeout: 70_000 });
       const s = res.data?.data || res.data;
       setStatus(s);
       if (s?.ready) {
@@ -97,7 +97,7 @@ const ReferenceProjectModal: React.FC<ReferenceProjectModalProps> = ({ open, onC
   const handleClear = async () => {
     setScanning(true);
     try {
-      const res = await axios.post('/api/transmission/reference', { path: null }, { timeout: 10000 });
+      const res = await axios.post('/api/transmission/reference', { path: null }, { timeout: 25_000 });
       setStatus(res.data?.data || res.data);
       setPath('');
       message.success('已取消参考项目');
@@ -122,7 +122,7 @@ const ReferenceProjectModal: React.FC<ReferenceProjectModalProps> = ({ open, onC
     setBrowseLoading(true);
     try {
       const url = dir ? `/api/transmission/browse?path=${encodeURIComponent(dir)}` : '/api/transmission/browse';
-      const res = await axios.get(url, { timeout: 10000 });
+      const res = await axios.get(url, { timeout: 25_000 });
       const r: BrowseResult = res.data?.data || res.data;
       setBrowseResult(r);
       if (!r.accessible) {
@@ -163,7 +163,7 @@ const ReferenceProjectModal: React.FC<ReferenceProjectModalProps> = ({ open, onC
           <Button type="primary" onClick={handleScan} loading={scanning}>扫描并应用</Button>
         </Space>
       }
-      destroyOnClose
+      destroyOnHidden
     >
       <Alert
         type="info"

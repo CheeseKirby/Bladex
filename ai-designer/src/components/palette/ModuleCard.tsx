@@ -30,7 +30,7 @@ const ModuleCard: React.FC<ModuleCardProps> = ({ module }) => {
         size="small"
         hoverable
         style={style}
-        bodyStyle={{ padding: '8px 10px', display: 'flex', alignItems: 'center', gap: 8 }}
+        styles={{ body: { padding: '8px 10px', display: 'flex', alignItems: 'center', gap: 8 } }}
       >
         <span style={{ fontSize: 22 }}>{module.icon}</span>
         <span style={{ fontSize: 14, fontWeight: 500, color: '#2c3338' }}>{module.name}</span>

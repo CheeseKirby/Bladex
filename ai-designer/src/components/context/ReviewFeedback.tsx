@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { List, Tag, Empty, Typography, Button, Space, Alert, message } from 'antd';
+import { List, Tag, Empty, Typography, Button, Space, Alert, Progress, message } from 'antd';
 import {
   CheckCircleOutlined,
   WarningOutlined,
@@ -9,6 +9,7 @@ import {
 import { usePlanStore } from '../../store/planStore';
 import { splitPlan } from '../../services/api';
 import { consumeReviewStream } from '../../services/reviewStream';
+import type { ReviewProgressEvent } from '../../services/reviewStream';
 
 const { Text, Paragraph } = Typography;
 
@@ -42,7 +43,8 @@ const ReviewFeedback: React.FC<ReviewFeedbackProps> = ({ onSwitchTab }) => {
   const setSubPlans = usePlanStore((s) => s.setSubPlans);
   const setIsStreaming = usePlanStore((s) => s.setIsStreaming);
   const [activeOp, setActiveOp] = useState<ActiveOp>(null);
-  const [reviewProgress, setReviewProgress] = useState('');
+  const [reviewProgressEvents, setReviewProgressEvents] = useState<ReviewProgressEvent[]>([]);
+  const [reviewProgressOutcome, setReviewProgressOutcome] = useState<'idle' | 'running' | 'success' | 'warning' | 'error'>('idle');
   const operationAbortRef = useRef<AbortController | null>(null);
 
   useEffect(() => () => {
@@ -56,7 +58,13 @@ const ReviewFeedback: React.FC<ReviewFeedbackProps> = ({ onSwitchTab }) => {
     setActiveOp('reviewing');
     setIsStreaming(true);
     setProjectStatus('REVIEWING');
-    setReviewProgress('开始审查...');
+    setReviewProgressOutcome('running');
+    setReviewProgressEvents([{
+      stage: 'preparing',
+      round: 1,
+      totalRounds: 4,
+      message: '正在建立审查任务...',
+    }]);
     setReviewResult(null);
     operationAbortRef.current?.abort();
     const controller = new AbortController();
@@ -72,7 +80,9 @@ const ReviewFeedback: React.FC<ReviewFeedbackProps> = ({ onSwitchTab }) => {
       if (!resp.ok || !resp.body) throw new Error(`HTTP ${resp.status}`);
 
       const reader = resp.body.getReader();
-      const result = await consumeReviewStream(reader, setReviewProgress).finally(() => {
+      const result = await consumeReviewStream(reader, (event) => {
+        setReviewProgressEvents((current) => [...current, event].slice(-16));
+      }).finally(() => {
         void reader.cancel().catch(() => undefined);
       });
 
@@ -90,7 +100,7 @@ const ReviewFeedback: React.FC<ReviewFeedbackProps> = ({ onSwitchTab }) => {
         reviewChangeLog: result.changeLog,
         status: reviewPassed ? 'REVIEWED' : 'PLAN_GENERATED',
       });
-      setReviewProgress('');
+      setReviewProgressOutcome(reviewPassed ? 'success' : 'warning');
       setProjectStatus(reviewPassed ? 'REVIEWED' : 'PLAN_GENERATED');
       if (reviewPassed) message.success('\u5ba1\u67e5\u5b8c\u6210');
       else message.warning('Review finished with unresolved ERROR issues; fix or retry before splitting.');
@@ -169,6 +179,22 @@ const ReviewFeedback: React.FC<ReviewFeedbackProps> = ({ onSwitchTab }) => {
   const reviewing = activeOp === 'reviewing';
   const splitting = activeOp === 'splitting';
   const busy = activeOp !== null;
+  const latestReviewProgress = reviewProgressEvents[reviewProgressEvents.length - 1];
+  const stageFraction: Record<string, number> = {
+    preparing: 0.15,
+    reviewing: 0.45,
+    analyzing: 0.7,
+    fixing: 0.9,
+    complete: 1,
+  };
+  const reviewPercent = latestReviewProgress
+    ? latestReviewProgress.stage === 'complete' || !reviewing
+      ? 100
+      : Math.min(95, Math.round((
+          ((latestReviewProgress.round ?? 1) - 1)
+          + (stageFraction[latestReviewProgress.stage ?? 'preparing'] ?? 0.1)
+        ) / (latestReviewProgress.totalRounds ?? 4) * 100))
+    : 0;
 
   return (
     <div style={{ padding: '0 12px' }}>
@@ -224,11 +250,46 @@ const ReviewFeedback: React.FC<ReviewFeedbackProps> = ({ onSwitchTab }) => {
         )}
       </Space>
 
-      {/* 审查中实时进度 */}
-      {activeOp === 'reviewing' && reviewProgress && (
-        <div style={{ marginBottom: 8, padding: '8px 12px', background: '#e6f7ff', borderRadius: 4, display: 'flex', alignItems: 'center', gap: 8 }}>
-          <LoadingOutlined spin style={{ fontSize: 14, color: '#1890ff' }} />
-          <Text style={{ fontSize: 12, color: '#1890ff' }}>{reviewProgress}</Text>
+      {/* 审查阶段轨迹：审查完成后仍保留，避免快速请求只看到最终结论。 */}
+      {reviewProgressEvents.length > 0 && (
+        <div style={{ marginBottom: 8, padding: '8px 12px', background: '#e6f7ff', borderRadius: 4 }}>
+          <Space direction="vertical" size={5} style={{ width: '100%' }}>
+            <Space size={6}>
+              {reviewing
+                ? <LoadingOutlined spin style={{ color: '#1890ff' }} />
+                : reviewProgressOutcome === 'error'
+                  ? <CloseCircleOutlined style={{ color: '#ff4d4f' }} />
+                  : reviewProgressOutcome === 'warning'
+                    ? <WarningOutlined style={{ color: '#fa8c16' }} />
+                    : <CheckCircleOutlined style={{ color: '#52c41a' }} />}
+              <Text strong style={{ fontSize: 12, color: '#1677ff' }}>
+                {reviewing ? '审查执行进度' : '审查执行轨迹'}
+              </Text>
+              {latestReviewProgress?.round && (
+                <Tag color="blue" style={{ margin: 0 }}>
+                  第 {latestReviewProgress.round}/{latestReviewProgress.totalRounds ?? 4} 轮
+                </Tag>
+              )}
+            </Space>
+            <Progress percent={reviewPercent} size="small" status={reviewing ? 'active' : reviewProgressOutcome === 'error' ? 'exception' : reviewProgressOutcome === 'success' ? 'success' : 'normal'} showInfo />
+            <div style={{ maxHeight: 150, overflowY: 'auto' }}>
+              {reviewProgressEvents.map((event, index) => {
+                const current = reviewing && index === reviewProgressEvents.length - 1;
+                return (
+                  <div key={`${index}-${event.stage}-${event.round}`} style={{ display: 'flex', gap: 6, alignItems: 'flex-start', marginTop: index === 0 ? 0 : 3 }}>
+                    {current
+                      ? <LoadingOutlined spin style={{ fontSize: 11, color: '#1890ff', marginTop: 3 }} />
+                      : index === reviewProgressEvents.length - 1 && reviewProgressOutcome === 'error'
+                        ? <CloseCircleOutlined style={{ fontSize: 11, color: '#ff4d4f', marginTop: 3 }} />
+                        : index === reviewProgressEvents.length - 1 && reviewProgressOutcome === 'warning'
+                          ? <WarningOutlined style={{ fontSize: 11, color: '#fa8c16', marginTop: 3 }} />
+                          : <CheckCircleOutlined style={{ fontSize: 11, color: '#52c41a', marginTop: 3 }} />}
+                    <Text style={{ fontSize: 11, color: current ? '#1677ff' : '#666' }}>{event.message}</Text>
+                  </div>
+                );
+              })}
+            </div>
+          </Space>
         </div>
       )}
 

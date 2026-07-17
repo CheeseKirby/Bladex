@@ -7,8 +7,9 @@
  */
 
 import { Router, Request, Response } from 'express';
-import { getLlmConfig, getLlmConfigMasked, updateLlmConfig } from '../config/llmConfig';
+import { getLlmConfig, getLlmConfigMasked, isLlmConfigured, updateLlmConfig } from '../config/llmConfig';
 import { requireBffAdmin } from '../security/adminGuard';
+import { probeLlmConnection } from '../llm/probe';
 
 export const configRouter = Router();
 
@@ -17,6 +18,20 @@ const PART_B_ADMIN_TOKEN = (process.env.AI_WORKFLOW_ADMIN_TOKEN || '').trim();
 
 configRouter.get('/llm', (_req: Request, res: Response) => {
   res.json({ success: true, data: getLlmConfigMasked() });
+});
+
+configRouter.post('/llm/test', requireBffAdmin, async (_req: Request, res: Response) => {
+  if (!isLlmConfigured()) {
+    res.status(400).json({ success: false, msg: 'LLM credentials are not configured' });
+    return;
+  }
+  try {
+    await probeLlmConnection();
+    res.json({ success: true, msg: 'LLM connection test passed' });
+  } catch (error) {
+    const msg = error instanceof Error ? error.message : String(error);
+    res.status(502).json({ success: false, msg });
+  }
 });
 
 configRouter.put('/llm', requireBffAdmin, (req: Request, res: Response) => {

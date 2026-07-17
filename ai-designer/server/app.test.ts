@@ -46,3 +46,27 @@ test('JSON parser preserves HTTP 413 for transport-level body limits', async () 
     assert.equal((await response.json() as { msg: string }).msg, 'Request body too large');
   });
 });
+
+test('review SSE emits structured stage progress before the final result', async () => {
+  await withServer(async (baseUrl) => {
+    const response = await fetch(`${baseUrl}/api/llm/review-plan`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ planContent: '# Plan', stage: 'master' }),
+    });
+    assert.equal(response.status, 200);
+    assert.match(response.headers.get('content-type') ?? '', /text\/event-stream/);
+    assert.equal(response.headers.get('x-accel-buffering'), 'no');
+
+    const events = (await response.text())
+      .split('\n\n')
+      .map((frame) => frame.split('\n').find((line) => line.startsWith('data:')))
+      .filter((line): line is string => Boolean(line))
+      .map((line) => JSON.parse(line.slice(5).trim()) as { type: string; stage?: string; round?: number; totalRounds?: number });
+
+    const progress = events.filter((event) => event.type === 'progress');
+    assert.deepEqual(progress.map((event) => event.stage), ['preparing', 'reviewing', 'analyzing', 'complete']);
+    assert.ok(progress.every((event) => event.round === 1 && event.totalRounds === 4));
+    assert.equal(events.at(-1)?.type, 'done');
+  });
+});

@@ -62,7 +62,7 @@ const DndProvider: React.FC<DndProviderProps> = ({ children }) => {
               opacity: 0.85,
               boxShadow: '0 4px 12px rgba(0,0,0,0.15)',
             }}
-            bodyStyle={{ padding: '8px 10px', display: 'flex', alignItems: 'center', gap: 8 }}
+            styles={{ body: { padding: '8px 10px', display: 'flex', alignItems: 'center', gap: 8 } }}
           >
             <span style={{ fontSize: 20 }}>{activeModule.icon}</span>
             <span style={{ fontSize: 12, fontWeight: 500 }}>{activeModule.name}</span>

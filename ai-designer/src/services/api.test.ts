@@ -108,3 +108,48 @@ test('Part B DTO validators accept minimal valid data', () => {
     }],
   }), true);
 });
+
+test('Part B DTO validators accept Java nulls for optional fields', () => {
+  assert.equal(isGeneratedFileSummaryArray([{
+    id: 1,
+    subPlanId: 2,
+    partASubPlanId: null,
+    subPlanTitle: null,
+    fileType: null,
+    filePath: '/a',
+    fileName: 'a.java',
+    fileExtension: null,
+    action: null,
+    sizeBytes: null,
+    lineCount: null,
+    createTime: null,
+  }]), true);
+
+  assert.equal(isExecutionTimeline({
+    receptionId: 'r',
+    overallStatus: 'COMPLETED_WITH_ERRORS',
+    totalSubPlans: 1,
+    completedSubPlans: 0,
+    failedSubPlans: 0,
+    subPlanTimelines: [{
+      subPlanId: 1,
+      partASubPlanId: 'sub_1',
+      index: 1,
+      title: 'Entity',
+      status: 'COMPLETED_WITH_ERRORS',
+      errorMessage: null,
+      fileCount: 1,
+      startedAt: null,
+      completedAt: null,
+      steps: [{
+        id: 1,
+        stage: 'CROSS_FILE_VALIDATION',
+        status: 'FAILED',
+        action: null,
+        filePath: null,
+        reason: null,
+        createTime: null,
+      }],
+    }],
+  }), true);
+});

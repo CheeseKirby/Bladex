@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { Empty, Progress, Tag, Typography, Collapse, Timeline, Tooltip, Button, Space, Card } from 'antd';
+import { Empty, Progress, Tag, Typography, Collapse, Timeline, Tooltip, Button, Space, Card, message } from 'antd';
 import {
   CheckCircleOutlined,
   CloseCircleOutlined,
@@ -23,6 +23,7 @@ const STATUS_META: Record<string, { color: string; text: string; icon: React.Rea
   QUEUED: { color: 'default', text: '排队中', icon: <ClockCircleOutlined /> },
   EXECUTING: { color: 'gold', text: '执行中', icon: <LoadingOutlined /> },
   COMPLETED: { color: 'green', text: '已完成', icon: <CheckCircleOutlined /> },
+  COMPLETED_WITH_ERRORS: { color: 'orange', text: '完成但有错误', icon: <WarningOutlined /> },
   FAILED: { color: 'red', text: '失败', icon: <CloseCircleOutlined /> },
   SKIPPED: { color: 'default', text: '已跳过', icon: <MinusCircleOutlined /> },
 };
@@ -34,6 +35,8 @@ const STAGE_META: Record<string, { label: string; icon: React.ReactNode }> = {
   FILE_WRITE: { label: '文件写入', icon: <FileTextOutlined /> },
   BUILD_VERIFY: { label: '编译验证', icon: <CheckOutlined /> },
   SELF_REVIEW: { label: '自我审查', icon: <ExperimentOutlined /> },
+  CROSS_FILE_VALIDATION: { label: '跨文件校验', icon: <CheckOutlined /> },
+  FIX_LOOP: { label: '自动修复', icon: <EditOutlined /> },
 };
 
 function formatDuration(start?: string, end?: string): string {
@@ -83,7 +86,8 @@ const ExecutionTimelinePanel: React.FC = () => {
   const handleRefresh = async () => {
     setRefreshing(true);
     try {
-      await refreshTimeline();
+      const refreshed = await refreshTimeline();
+      if (!refreshed) message.error('执行进度加载失败，请检查 Part B 日志或稍后重试');
     } finally {
       setRefreshing(false);
     }
@@ -102,11 +106,14 @@ const ExecutionTimelinePanel: React.FC = () => {
     );
   }
 
-  const total = timeline.totalSubPlans || 0;
-  const completed = timeline.completedSubPlans || 0;
-  const failed = timeline.failedSubPlans || 0;
+  const total = timeline.totalSubPlans || timeline.subPlanTimelines.length;
+  const completed = timeline.subPlanTimelines.filter((sp) => sp.status === 'COMPLETED').length;
+  const partial = timeline.subPlanTimelines.filter((sp) => sp.status === 'COMPLETED_WITH_ERRORS').length;
+  const failed = timeline.subPlanTimelines.filter((sp) => sp.status === 'FAILED').length;
+  const skipped = timeline.subPlanTimelines.filter((sp) => sp.status === 'SKIPPED').length;
   const inProgress = timeline.subPlanTimelines.filter((sp) => sp.status === 'EXECUTING').length;
-  const percent = total > 0 ? Math.round(((completed + failed) / total) * 100) : 0;
+  const terminalCount = completed + partial + failed + skipped;
+  const percent = total > 0 ? Math.round((terminalCount / total) * 100) : 0;
 
   const overallTag = STATUS_META[timeline.overallStatus || ''] || STATUS_META.QUEUED;
 
@@ -128,13 +135,16 @@ const ExecutionTimelinePanel: React.FC = () => {
           <Progress
             percent={percent}
             size="small"
-            status={failed > 0 ? 'exception' : timeline.overallStatus === 'COMPLETED' ? 'success' : 'active'}
-            format={() => `${completed + failed}/${total}`}
+            status={failed > 0 ? 'exception' : partial > 0 ? 'normal' : timeline.overallStatus === 'COMPLETED' ? 'success' : 'active'}
+            format={() => `${terminalCount}/${total}`}
           />
           <Space size={12} wrap style={{ fontSize: 11 }}>
             <Text type="secondary">✅ 完成 <Text strong style={{ color: '#52c41a' }}>{completed}</Text></Text>
             {inProgress > 0 && (
               <Text type="secondary">⏳ 执行中 <Text strong style={{ color: '#fa8c16' }}>{inProgress}</Text></Text>
+            )}
+            {partial > 0 && (
+              <Text type="secondary">⚠️ 完成但有错误 <Text strong style={{ color: '#d46b08' }}>{partial}</Text></Text>
             )}
             {failed > 0 && (
               <Text type="secondary">❌ 失败 <Text strong style={{ color: '#cf1322' }}>{failed}</Text></Text>

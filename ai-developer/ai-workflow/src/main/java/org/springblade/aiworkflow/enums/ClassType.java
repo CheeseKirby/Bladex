@@ -22,6 +22,7 @@ public enum ClassType {
     WRAPPER("WRAPPER", "Wrapper 转换类"),
     VO("VO", "视图对象"),
     FEIGN("FEIGN", "Feign 客户端"),
+    EXCEL("EXCEL", "Excel model"),
     OTHER("OTHER", "其他");
 
     private final String code;
@@ -58,6 +59,7 @@ public enum ClassType {
         if (name.endsWith("Mapper")) return MAPPER;
         if (name.endsWith("Wrapper")) return WRAPPER;
         if (name.endsWith("Client")) return FEIGN;
+        if (name.endsWith("Excel") || (pkg != null && pkg.contains(".excel"))) return EXCEL;
 
         // 6. Service 接口: IXxxService
         if (cid.isInterface() && name.startsWith("I") && name.endsWith("Service")) return SERVICE;

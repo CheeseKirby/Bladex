@@ -17,6 +17,7 @@ import { createPayloadGuard } from '../http/payloadGuard';
 import { createRateLimitMiddleware } from '../http/rateLimit';
 import { bindUpstreamAbort } from '../http/upstreamAbort';
 import { consumeAnthropicStream } from '../llm/anthropicStream';
+import { getReferenceAdaptationSummary } from '../services/referenceSummary';
 
 export const llmRouter = Router();
 
@@ -149,15 +150,29 @@ llmRouter.post('/review-plan', async (req: Request, res: Response) => {
 
   // SSE: 审查-修复循环每轮发进度, 前端实时显示(不等最终结果, 无超时)
   res.writeHead(200, {
-    'Content-Type': 'text/event-stream',
-    'Cache-Control': 'no-cache',
+    'Content-Type': 'text/event-stream; charset=utf-8',
+    'Cache-Control': 'no-cache, no-transform',
     'Connection': 'keep-alive',
+    'X-Accel-Buffering': 'no',
   });
+  res.flushHeaders();
+  res.socket?.setNoDelay(true);
   const sendSSE = (obj: object) => {
     if (!res.destroyed && !res.writableEnded) res.write(`data: ${JSON.stringify(obj)}\n\n`);
   };
+  const totalRounds = 4;
+  const sendProgress = (
+    stage: 'preparing' | 'reviewing' | 'analyzing' | 'fixing' | 'complete',
+    message: string,
+    round = 1,
+    details: { errorCount?: number; warningCount?: number } = {},
+  ) => sendSSE({ type: 'progress', stage, message, round, totalRounds, ...details });
 
   if (!isLlmConfigured()) {
+    sendProgress('preparing', '正在加载审查规则 (Mock)...');
+    sendProgress('reviewing', '正在执行第 1 轮方案审查 (Mock)...');
+    sendProgress('analyzing', '第 1 轮完成：0 个 ERROR，1 个 WARN', 1, { errorCount: 0, warningCount: 1 });
+    sendProgress('complete', '审查通过 (第 1 轮)', 1, { errorCount: 0, warningCount: 1 });
     sendSSE({ type: 'done', data: { passes: true, issues: [{ severity: 'WARN', rule: 'Controller规范', message: '建议为所有Controller添加@ApiOperationSupport(order=N)' }], fixedContent: planContent, reviewLog: [], changeLog: [] } });
     res.end();
     return;
@@ -185,8 +200,10 @@ llmRouter.post('/review-plan', async (req: Request, res: Response) => {
     const reviewLog: ReviewLogEntry[] = [];
 
     for (let attempt = 0; attempt <= MAX_ROUNDS; attempt++) {
-      sendSSE({ type: 'progress', message: `第 ${attempt + 1} 轮审查中...` });
+      const round = attempt + 1;
+      sendProgress('preparing', `第 ${round}/${totalRounds} 轮：正在加载审查规则和参考项目...`, round);
       const refSummary = await getReferenceAdaptationSummary();
+      sendProgress('reviewing', `第 ${round}/${totalRounds} 轮：LLM 正在检查方案完整性、规范和可执行性...`, round);
       const text = await callAnthropicJson(
         withReferenceSummary(buildReviewPlanSystemPrompt(stage || 'master'), refSummary),
         `请审查如下方案:\n\n${currentContent}`,
@@ -203,16 +220,26 @@ llmRouter.post('/review-plan', async (req: Request, res: Response) => {
 
       const errorCount = Array.isArray(lastData.issues)
         ? lastData.issues.filter((i) => i.severity === 'ERROR').length : 0;
+      const warningCount = Array.isArray(lastData.issues)
+        ? lastData.issues.filter((i) => i.severity === 'WARN').length : 0;
+      sendProgress(
+        'analyzing',
+        `第 ${round}/${totalRounds} 轮完成：${errorCount} 个 ERROR，${warningCount} 个 WARN`,
+        round,
+        { errorCount, warningCount },
+      );
 
-      // 无 ERROR -> 通过
-      if (lastData.passes || errorCount === 0) {
-        lastData.passes = true;
-        reviewLog.push({ round: attempt + 1, action: 'review', errorCount: 0, message: `审查通过(第 ${attempt + 1} 轮)` });
+      // 以实际 ERROR 数量为准，避免模型返回 passes=true 但 issues 中仍有阻断项。
+      lastData.passes = errorCount === 0;
+      if (lastData.passes) {
+        reviewLog.push({ round, action: 'review', errorCount: 0, message: `审查通过(第 ${round} 轮)` });
+        sendProgress('complete', `审查通过 (第 ${round} 轮)`, round, { errorCount: 0, warningCount });
         break;
       }
       // 达上限 -> 停
       if (attempt === MAX_ROUNDS) {
-        reviewLog.push({ round: attempt + 1, action: 'review', errorCount, message: `达最大轮次, 剩余 ${errorCount} 个 ERROR` });
+        reviewLog.push({ round, action: 'review', errorCount, message: `达最大轮次, 剩余 ${errorCount} 个 ERROR` });
+        sendProgress('complete', `审查结束：达到最大轮次，仍有 ${errorCount} 个 ERROR`, round, { errorCount, warningCount });
         break;
       }
 
@@ -236,12 +263,13 @@ llmRouter.post('/review-plan', async (req: Request, res: Response) => {
         reviewLog.push({ round: attempt + 1, action: 'fix-sections', errorCount, message: `片段修复 ${applied} 章节, 原 ${errorCount} ERROR` });
       } else {
         // 有 ERROR 但无修复方案 -> 停
-        reviewLog.push({ round: attempt + 1, action: 'review', errorCount, message: `${errorCount} ERROR 但无修复方案` });
+        reviewLog.push({ round, action: 'review', errorCount, message: `${errorCount} ERROR 但无修复方案` });
+        sendProgress('complete', `审查结束：${errorCount} 个 ERROR 暂无自动修复方案`, round, { errorCount, warningCount });
         break;
       }
-      // 修复后发进度(最后一条 reviewLog)
+      // 修复后发结构化进度，下一轮会重新审查修复后的内容。
       if (reviewLog.length > 0) {
-        sendSSE({ type: 'progress', message: reviewLog[reviewLog.length - 1].message });
+        sendProgress('fixing', reviewLog[reviewLog.length - 1].message, round, { errorCount, warningCount });
       }
     }
 
@@ -533,19 +561,6 @@ llmRouter.post('/split-plan', async (req: Request, res: Response) => {
 });
 
 // ==================== Live LLM 实现 ====================
-
-/** 获取 Part B 参考项目适配摘要(版本+项目结构+衔接点)。参考项目未就绪/Part B 不可达返回 null */
-async function getReferenceAdaptationSummary(): Promise<string | null> {
-  const partBUrl = process.env.PART_B_URL || 'http://localhost:8111';
-  try {
-    const resp = await fetch(`${partBUrl}/api/project/adaptation-summary`, { signal: AbortSignal.timeout(5000) });
-    if (!resp.ok) return null;
-    const data = await resp.json();
-    return data?.data ?? null;
-  } catch {
-    return null;
-  }
-}
 
 /** 拼接参考项目摘要到 systemPrompt(无摘要则原样返回) */
 function withReferenceSummary(basePrompt: string, refSummary: string | null): string {

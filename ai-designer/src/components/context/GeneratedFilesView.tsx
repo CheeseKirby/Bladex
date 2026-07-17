@@ -77,7 +77,8 @@ const GeneratedFilesView: React.FC = () => {
   const handleRefresh = async () => {
     setRefreshing(true);
     try {
-      await refreshFiles();
+      const refreshed = await refreshFiles();
+      if (!refreshed) message.error('生成文件列表加载失败，请检查 Part B 日志或稍后重试');
     } finally {
       setRefreshing(false);
     }

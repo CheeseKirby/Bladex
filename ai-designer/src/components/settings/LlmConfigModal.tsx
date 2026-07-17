@@ -140,17 +140,14 @@ const LlmConfigModal: React.FC<LlmConfigModalProps> = ({ open, onClose }) => {
   const handleTest = async () => {
     setTesting(true);
     try {
-      const res = await axios.post('/api/llm/review-plan', {
-        planContent: '# 测试方案\n创建一个 Order 实体',
-        stage: 'master',
-      });
+      const res = await axios.post('/api/config/llm/test', null, { timeout: 25_000 });
       if (res.data?.success) {
         message.success('LLM 连通测试成功 ✓');
       } else {
-        message.warning(`LLM 测试响应异常: ${JSON.stringify(res.data).slice(0, 200)}`);
+        message.warning('LLM 测试响应异常: ' + (res.data?.msg || '未知响应'));
       }
     } catch (err) {
-      const msg = axios.isAxiosError(err) ? err.response?.data?.error || err.message : (err as Error).message;
+      const msg = axios.isAxiosError(err) ? err.response?.data?.msg || err.response?.data?.error || err.message : (err as Error).message;
       message.error(`LLM 测试失败: ${msg}`);
     } finally {
       setTesting(false);
@@ -174,7 +171,7 @@ const LlmConfigModal: React.FC<LlmConfigModalProps> = ({ open, onClose }) => {
           <Button type="primary" onClick={handleSave} loading={saving}>保存并应用</Button>
         </Space>
       }
-      destroyOnClose
+      destroyOnHidden
     >
       <Alert
         type="info"

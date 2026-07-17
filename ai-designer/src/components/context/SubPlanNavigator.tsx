@@ -23,7 +23,7 @@ const PARTB_TAG: Record<PartBSubPlanStatus, { color: string; text: string }> = {
   QUEUED: { color: 'default', text: '排队中' },
   EXECUTING: { color: 'gold', text: '执行中' },
   COMPLETED: { color: 'green', text: '已完成' },
-  COMPLETED_WITH_ERRORS: { color: 'orange', text: 'Completed with errors' },
+  COMPLETED_WITH_ERRORS: { color: 'orange', text: '完成但有错误' },
   FAILED: { color: 'red', text: '失败' },
   SKIPPED: { color: 'orange', text: '已跳过' },
 };
@@ -133,7 +133,7 @@ const SubPlanNavigator: React.FC<SubPlanNavigatorProps> = ({ onSwitchTab }) => {
       });
       if (!response.ok || !response.body) throw new Error(`HTTP ${response.status}`);
       const reader = response.body.getReader();
-      const result = await consumeReviewStream(reader, setReviewProgress).finally(() => {
+      const result = await consumeReviewStream(reader, (event) => setReviewProgress(event.message)).finally(() => {
         void reader.cancel().catch(() => undefined);
       });
       if (!projectId || usePlanStore.getState().project?.id !== projectId) return;

@@ -181,10 +181,20 @@ public class BladeXCodeAgent {
         //     子方案级检不出; 以 Entity 为源头重生成 VO/IVO/UVO, 写盘 + 更新 DB。修复失败不阻断主流程。
         retryPlanWideVoEntityMismatches(plan);
 
-        // 3.6 全 plan 级跨文件契约校验(修复后跑,反映修复后真实状态) — 仅记录到 execution_log, 不阻断。
-        validatePlanWideContracts(plan);
+        // 3.6 全 plan 级跨文件契约校验(修复后跑,反映修复后真实状态)。
+        Optional<List<CrossFileValidator.ContractIssue>> finalContractValidation = validatePlanWideContracts(plan);
+        boolean finalValidationSucceeded = finalContractValidation.isPresent();
+        long finalContractErrorCount = finalContractValidation
+                .map(issues -> issues.stream().filter(CrossFileValidator.ContractIssue::isError).count())
+                .orElse(0L);
 
-        // 4. 更新最终状态 - H3: 有子方案 FAILED -> FAILED; 有 COMPLETED_WITH_ERRORS(无 FAILED) -> COMPLETED_WITH_ERRORS; 否则 COMPLETED
+        // 子方案级校验发生在 plan 级修复之前。只有最终校验确实执行成功且已无 ERROR，才把此前的
+        // COMPLETED_WITH_ERRORS 恢复成 COMPLETED；校验异常时保留原状态，不能把未知结果误报成功。
+        if (finalValidationSucceeded && finalContractErrorCount == 0) {
+            reconcileRepairedSubPlanStatuses(executionOrder);
+        }
+
+        // 4. 更新最终状态 - 有 FAILED -> FAILED；最终契约/编译仍有 ERROR -> COMPLETED_WITH_ERRORS；否则 COMPLETED。
         // 3.7 C1: REAL 模式编译验证(真实项目有平台 jar 可编译;ISOLATED 跳过-隔离区缺平台 jar)。
         //        编译失败标 COMPLETED_WITH_ERRORS(代码已写盘,不回滚-留人工处理)。
         boolean compileFailed = false;
@@ -194,14 +204,43 @@ public class BladeXCodeAgent {
 
         boolean hasSubPlanErrors = executionOrder.stream()
                 .anyMatch(sp -> sp.getStatus() == SubPlanStatus.COMPLETED_WITH_ERRORS);
-        plan.setStatus(!allSuccess ? PlanStatus.FAILED
-                : (hasSubPlanErrors || compileFailed) ? PlanStatus.COMPLETED_WITH_ERRORS : PlanStatus.COMPLETED);
+        plan.setStatus(determineFinalPlanStatus(
+                allSuccess, hasSubPlanErrors, finalContractErrorCount, compileFailed));
         planMapper.updateById(plan);
 
         // 5. 回调Part A
         statusNotifier.notifyPlan(plan, executionOrder);
 
         log.info("工作流执行完成: receptionId={}, status={}", receptionId, plan.getStatus());
+    }
+
+    static PlanStatus determineFinalPlanStatus(boolean allSuccess,
+                                               boolean hasSubPlanErrors,
+                                               long finalContractErrorCount,
+                                               boolean compileFailed) {
+        if (!allSuccess) return PlanStatus.FAILED;
+        return hasSubPlanErrors || finalContractErrorCount > 0 || compileFailed
+                ? PlanStatus.COMPLETED_WITH_ERRORS
+                : PlanStatus.COMPLETED;
+    }
+
+    /**
+     * plan 级修复成功后清理子方案的过期错误状态。
+     *
+     * <p>子方案会在自身生成结束时先做一次局部跨文件校验；某些错误（如 VO↔Entity）随后由
+     * plan 级修复闭环消除。若最终全局校验已无 ERROR，就应把这些子方案恢复为 COMPLETED，
+     * 并补一条时间线记录说明错误已被自动修复。
+     */
+    void reconcileRepairedSubPlanStatuses(List<AiSubPlan> executionOrder) {
+        for (AiSubPlan subPlan : executionOrder) {
+            if (subPlan.getStatus() != SubPlanStatus.COMPLETED_WITH_ERRORS) continue;
+            subPlan.setStatus(SubPlanStatus.COMPLETED);
+            subPlan.setErrorMessage(null);
+            subPlanMapper.updateById(subPlan);
+            logExecution(subPlan.getId(), "PLAN_CROSS_FIX", "", "SUCCESS",
+                    "plan 级自动修复已消除该子方案的跨文件 ERROR，最终契约校验通过", null);
+            statusNotifier.notifySubPlan(subPlan);
+        }
     }
 
     /** C1: REAL 模式编译验证 - 从 DB 拉全 plan 文件,推受影响 BladeX 模块,跑 mvn compile。
@@ -685,7 +724,7 @@ public class BladeXCodeAgent {
             return null;
         }
         // 参考项目独立于生成目标,不排除同模块(同模块恰是风格最相关的参考)
-        var ref = referenceProjectIndex.findReferenceExample(targetType, null);
+        var ref = referenceProjectIndex.findBestReferenceExample(targetType, task.getModuleName(), task.getEntityName());
         if (ref.isEmpty()) {
             log.debug("REAL 生成: 参考项目中无 {} 类型的参考代码", targetType);
             return null;
@@ -718,6 +757,7 @@ public class BladeXCodeAgent {
             case CUSTOM_MAPPER -> ClassType.MAPPER;
             case WRAPPER -> ClassType.WRAPPER;
             case FEIGN_CLIENT -> ClassType.FEIGN;
+            case EXCEL_IMPORT_EXPORT -> ClassType.EXCEL;
             default -> null; // DDL_STATEMENT / MAPPER_XML / NACOS_CONFIG / EXCEL_IMPORT_EXPORT / OTHER 不参考
         };
     }
@@ -1023,12 +1063,12 @@ public class BladeXCodeAgent {
      * 子方案 A 生成的 Controller 引用的 VO 类是否与子方案 B 生成的 VO 文件契约一致。
      * 结果写到 execution_log 的 PLAN_CROSS_VALIDATION 阶段,不阻断主流程。
      */
-    private void validatePlanWideContracts(AiPlan plan) {
+    private Optional<List<CrossFileValidator.ContractIssue>> validatePlanWideContracts(AiPlan plan) {
         try {
             List<AiGeneratedFile> dbFiles = generatedFileMapper.selectByPlanId(plan.getId());
             if (dbFiles == null || dbFiles.isEmpty()) {
                 log.info("plan 级跨文件校验跳过: 无生成文件");
-                return;
+                return Optional.empty();
             }
             // 转换为 GeneratedFile (.java + .sql + .xml 均纳入，覆盖 entity↔DDL、mapper xml namespace)
             List<GeneratedFile> files = new ArrayList<>();
@@ -1038,7 +1078,7 @@ public class BladeXCodeAgent {
             }
             if (files.isEmpty()) {
                 log.info("plan 级跨文件校验跳过: 无生成文件");
-                return;
+                return Optional.empty();
             }
             List<CrossFileValidator.ContractIssue> issues = crossFileValidator.validate(files, true);
             long errorCount = issues.stream().filter(CrossFileValidator.ContractIssue::isError).count();
@@ -1063,8 +1103,10 @@ public class BladeXCodeAgent {
             entry.setStatus(errorCount > 0 ? "FAILED" : "SUCCESS");
             entry.setCreateTime(LocalDateTime.now());
             executionLogMapper.insert(entry);
+            return Optional.of(issues);
         } catch (Exception e) {
             log.warn("plan 级跨文件校验异常 (不影响主流程): {}", e.getMessage());
+            return Optional.empty();
         }
     }
 

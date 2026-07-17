@@ -19,6 +19,9 @@ const ContextPanel: React.FC = () => {
   const executionTimeline = usePlanStore((s) => s.executionTimeline);
   // 受控的当前 Tab — 允许子组件(如拆分完成后)主动切换
   const [activeTab, setActiveTab] = useState('summary');
+  const terminalTimelineCount = executionTimeline?.subPlanTimelines.filter((item) =>
+    ['COMPLETED', 'COMPLETED_WITH_ERRORS', 'FAILED', 'SKIPPED'].includes(item.status || '')
+  ).length ?? 0;
 
   if (!project) {
     return (
@@ -54,11 +57,13 @@ const ContextPanel: React.FC = () => {
           执行进度
           {executionTimeline && executionTimeline.totalSubPlans > 0 && (
             <Badge
-              count={`${executionTimeline.completedSubPlans + executionTimeline.failedSubPlans}/${executionTimeline.totalSubPlans}`}
+              count={`${terminalTimelineCount}/${executionTimeline.totalSubPlans}`}
               style={{
                 backgroundColor:
                   partBOverallStatus === 'COMPLETED'
                     ? '#52c41a'
+                    : partBOverallStatus === 'COMPLETED_WITH_ERRORS'
+                    ? '#d46b08'
                     : partBOverallStatus === 'FAILED'
                     ? '#cf1322'
                     : '#1677ff',

@@ -62,6 +62,16 @@ function seedProjectWithSubPlans(subPlans: SubPlan[]) {
 describe('createProject', () => {
   beforeEach(() => resetStore());
 
+  test('创建新项目会清除上一项目的执行时间线', () => {
+    usePlanStore.getState().setExecutionTimeline({
+      receptionId: 'old', totalSubPlans: 0, completedSubPlans: 0, failedSubPlans: 0, subPlanTimelines: [],
+    });
+
+    usePlanStore.getState().createProject('新项目');
+
+    assert.equal(usePlanStore.getState().executionTimeline, null);
+  });
+
   test('创建后状态干净且字段正确', () => {
     usePlanStore.getState().createProject('订单');
 
@@ -274,6 +284,9 @@ describe('resetProject', () => {
     usePlanStore.getState().setPartBStatus('sp-1', 'EXECUTING');
     usePlanStore.getState().setReceptionId('rec-1');
     usePlanStore.getState().setGeneratedFiles([{ fileId: 1, fileName: 'a', filePath: '/a', action: 'CREATED' } as never]);
+    usePlanStore.getState().setExecutionTimeline({
+      receptionId: 'rec-1', totalSubPlans: 1, completedSubPlans: 0, failedSubPlans: 0, subPlanTimelines: [],
+    });
 
     usePlanStore.getState().resetProject();
 

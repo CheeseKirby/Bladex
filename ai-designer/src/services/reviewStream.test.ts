@@ -24,7 +24,7 @@ test('没有 done 帧就结束时拒绝，不能标记 REVIEWED', async () => {
 });
 
 test('done 帧返回审查结果并转发进度', async () => {
-  const progress: string[] = [];
+  const progress: unknown[] = [];
   const stream = reviewStream([
     'data: {"type":"progress","message":"round 1"}\n\n',
     'data: {"type":"done","data":{"passes":true,"issues":[],"fixedContent":"fixed","reviewLog":[],"changeLog":[]}}\n\n',
@@ -34,5 +34,23 @@ test('done 帧返回审查结果并转发进度', async () => {
 
   assert.equal(result.passes, true);
   assert.equal(result.fixedContent, 'fixed');
-  assert.deepEqual(progress, ['round 1']);
+  assert.deepEqual(progress, [{ message: 'round 1' }]);
+});
+
+test('结构化审查进度保留阶段、轮次和错误数量', async () => {
+  const progress: unknown[] = [];
+  const stream = reviewStream([
+    'data: {"type":"progress","stage":"analyzing","round":1,"totalRounds":4,"errorCount":2,"message":"发现 2 个 ERROR"}\n\n',
+    'data: {"type":"done","data":{"passes":false,"issues":[],"fixedContent":"fixed","reviewLog":[],"changeLog":[]}}\n\n',
+  ]);
+
+  await consumeReviewStream(stream.getReader(), (event) => progress.push(event));
+
+  assert.deepEqual(progress, [{
+    stage: 'analyzing',
+    round: 1,
+    totalRounds: 4,
+    errorCount: 2,
+    message: '发现 2 个 ERROR',
+  }]);
 });

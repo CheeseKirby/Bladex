@@ -88,6 +88,7 @@ export const usePlanStore = create<PlanStore>((set) => ({
       partBStatuses: {},
       partBOverallStatus: null,
       generatedFiles: [],
+      executionTimeline: null,
     }),
 
   setProjectStatus: (status: WorkflowState) =>
@@ -263,6 +264,7 @@ export const usePlanStore = create<PlanStore>((set) => ({
         partBStatuses: {},
         partBOverallStatus: null,
         generatedFiles: [],
+        executionTimeline: null,
       };
     }),
 
@@ -277,5 +279,6 @@ export const usePlanStore = create<PlanStore>((set) => ({
       partBStatuses: {},
       partBOverallStatus: null,
       generatedFiles: [],
+      executionTimeline: null,
     }),
 }));

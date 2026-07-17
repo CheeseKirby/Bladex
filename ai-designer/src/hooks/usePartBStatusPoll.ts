@@ -25,8 +25,8 @@ let stopped = true;
 interface PollControls {
   startPolling: () => void;
   stopPolling: () => void;
-  refreshFiles: () => Promise<void>;
-  refreshTimeline: () => Promise<void>;
+  refreshFiles: () => Promise<boolean>;
+  refreshTimeline: () => Promise<boolean>;
 }
 
 export function usePartBStatusPoll(): PollControls {
@@ -51,24 +51,34 @@ export function usePartBStatusPoll(): PollControls {
     }
   }, []);
 
-  const refreshFiles = useCallback(async () => {
-    if (!receptionId) return;
+  const refreshFiles = useCallback(async (): Promise<boolean> => {
+    if (!receptionId) return false;
     try {
       const res = await listPartBFiles(receptionId);
-      if (res.success) storeRefs.current.setGeneratedFiles(res.data);
+      if (res.success) {
+        storeRefs.current.setGeneratedFiles(res.data);
+        return true;
+      }
+      console.warn('[Part B 文件列表] 响应无效:', res.msg);
     } catch (err) {
       console.warn('[Part B 文件列表] 拉取失败:', err);
     }
+    return false;
   }, [receptionId]);
 
-  const refreshTimeline = useCallback(async () => {
-    if (!receptionId) return;
+  const refreshTimeline = useCallback(async (): Promise<boolean> => {
+    if (!receptionId) return false;
     try {
       const res = await getPartBTimeline(receptionId);
-      if (res.success && res.data) storeRefs.current.setExecutionTimeline(res.data);
+      if (res.success && res.data) {
+        storeRefs.current.setExecutionTimeline(res.data);
+        return true;
+      }
+      console.warn('[Part B 时间线] 响应无效:', res.msg);
     } catch (err) {
       console.warn('[Part B 时间线] 拉取失败:', err);
     }
+    return false;
   }, [receptionId]);
 
   const startPolling = useCallback(() => {

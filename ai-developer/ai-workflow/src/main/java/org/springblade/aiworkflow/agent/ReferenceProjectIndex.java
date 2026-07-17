@@ -119,13 +119,35 @@ public class ReferenceProjectIndex {
      * @return 任一同类(不再按路径长度排序 — 短路径不等于小类,启发式不准),无匹配返回 empty
      */
     public synchronized Optional<IndexedClassInfo> findReferenceExample(ClassType type, String excludeModule) {
+        return findBestReferenceExample(type, null, null);
+    }
+
+    /** Select the most relevant same-type reference by module and entity name. */
+    public synchronized Optional<IndexedClassInfo> findBestReferenceExample(
+            ClassType type, String preferredModule, String preferredName) {
         if (cachedFlat == null) return Optional.empty();
-        // 参考项目独立于生成目标,不存在"刚生成的"代码,无需排除同模块 — excludeModule 忽略
-        // 排除 PLATFORM 侧基础设施类(auth/gateway/common 的类风格不代表业务模块),优先业务模块
         return cachedFlat.stream()
                 .filter(c -> c.type() == type)
                 .filter(c -> c.side() == null || !"PLATFORM".equals(c.side()))
-                .findFirst();
+                .max(java.util.Comparator.comparingInt(c -> referenceScore(c, preferredModule, preferredName)));
+    }
+
+    private int referenceScore(IndexedClassInfo candidate, String preferredModule, String preferredName) {
+        int score = 0;
+        if (preferredModule != null && candidate.module() != null) {
+            String expected = preferredModule.trim().toLowerCase();
+            String actual = candidate.module().trim().toLowerCase();
+            if (actual.equals(expected)) score += 100;
+            else if (actual.contains(expected) || expected.contains(actual)) score += 40;
+        }
+        if (preferredName != null && candidate.simpleName() != null) {
+            String expected = preferredName.trim().toLowerCase();
+            String actual = candidate.simpleName().toLowerCase();
+            if (actual.startsWith(expected)) score += 30;
+            else if (actual.contains(expected)) score += 15;
+        }
+        if ("API".equals(candidate.side()) || "IMPL".equals(candidate.side())) score += 5;
+        return score;
     }
 
     /**
