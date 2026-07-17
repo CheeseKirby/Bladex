@@ -167,7 +167,8 @@ public class ReferenceProjectIndex {
         if (cachedFlat == null) return fallback;
         Map<String, Long> counts = cachedFlat.stream()
                 .filter(c -> c.type() == type)
-                .filter(c -> classSuffix == null || c.simpleName().endsWith(classSuffix))
+                .filter(c -> c.side() == null || !"PLATFORM".equals(c.side()))
+                .filter(c -> matchesClassSuffix(c.simpleName(), classSuffix))
                 .map(this::packageSuffix)
                 .filter(v -> v != null && !v.isBlank())
                 .collect(Collectors.groupingBy(v -> v, LinkedHashMap::new, Collectors.counting()));
@@ -175,6 +176,14 @@ public class ReferenceProjectIndex {
                 .max(Comparator.<Map.Entry<String, Long>>comparingLong(Map.Entry::getValue)
                         .thenComparing(Map.Entry::getKey))
                 .map(Map.Entry::getKey).orElse(fallback);
+    }
+
+    private boolean matchesClassSuffix(String className, String suffix) {
+        if (suffix == null) return true;
+        if (!className.endsWith(suffix)) return false;
+        if (!"VO".equals(suffix)) return true;
+        return !(className.endsWith("QVO") || className.endsWith("IVO")
+                || className.endsWith("UVO") || className.endsWith("EVO"));
     }
 
     private String packageSuffix(IndexedClassInfo info) {
@@ -700,6 +709,24 @@ public class ReferenceProjectIndex {
      * @param relativePath 相对参考项目根的路径
      * @return 完整代码(小类)或结构化摘要(大类),失败返回 null
      */
+    /** Builds a full parent pom snapshot with the new child module registered. */
+    public synchronized String buildParentPomWithModule(String parentPomPath, String childModuleDirectory) {
+        String pom = readSourceContent(parentPomPath);
+        if (pom == null || childModuleDirectory == null || childModuleDirectory.isBlank()) return null;
+        String moduleTag = "<module>" + childModuleDirectory.trim() + "</module>";
+        if (pom.contains(moduleTag)) return pom;
+        java.util.regex.Matcher modules = java.util.regex.Pattern.compile("(?s)<modules>(.*?)</modules>").matcher(pom);
+        if (modules.find()) {
+            String original = modules.group(0);
+            String replacement = original.replace("</modules>", "    " + moduleTag + "\n</modules>");
+            return pom.substring(0, modules.start()) + replacement + pom.substring(modules.end());
+        }
+        int projectEnd = pom.lastIndexOf("</project>");
+        if (projectEnd < 0) return null;
+        String block = "    <modules>\n        " + moduleTag + "\n    </modules>\n";
+        return pom.substring(0, projectEnd) + block + pom.substring(projectEnd);
+    }
+
     public String buildStructuredSummary(String relativePath) {
         String content = readSourceContent(relativePath);
         if (content == null) return null;
@@ -873,13 +900,11 @@ public class ReferenceProjectIndex {
     }
 
     private String deriveModule(String relPath, String pkg) {
-        String m = BladeXModuleLayout.moduleOfPath(relPath);
-        if (m != null) return m;
         if (pkg != null && pkg.startsWith("org.springblade.")) {
             String[] parts = pkg.split("\\.");
             if (parts.length >= 3) return parts[2];
         }
-        return null;
+        return BladeXModuleLayout.moduleOfPath(relPath);
     }
 
     private String deriveSide(String relPath, String pkg) {

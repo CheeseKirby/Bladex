@@ -232,7 +232,7 @@ public class PromptBuilder {
                 ? task.getEntityName() : "Entity";
         String module = task.getModuleName() != null && !task.getModuleName().isBlank()
                 ? task.getModuleName() : entity.toLowerCase();
-        return switch (task.getType()) {
+        String rolePrompt = switch (task.getType()) {
             case STANDARD_CRUD_ENTITY -> substitute(buildEntitySystemPrompt(), entity, module);
             case STANDARD_CRUD_CONTROLLER -> substitute(buildControllerSystemPrompt(), entity, module);
             case STANDARD_CRUD_SERVICE, COMPLEX_BUSINESS_SERVICE -> substitute(buildServiceSystemPrompt(), entity, module);
@@ -244,6 +244,38 @@ public class PromptBuilder {
             case DDL_STATEMENT -> buildDdlSystemPrompt();
             default -> substitute(buildGeneralSystemPrompt(), entity, module);
         };
+        GenerationContext context = task.getGenerationContext();
+        if (context == null) return rolePrompt;
+        GenerationIdentity identity = context.identity();
+        ReferenceFrameworkProfile profile = context.referenceProfile();
+        StringBuilder authority = new StringBuilder();
+        authority.append("AUTHORITATIVE GENERATION CONTEXT (overrides every generic example below):\n")
+                .append("- canonical moduleName=").append(identity.moduleName()).append("; never create another module\n")
+                .append("- entityName=").append(entity).append("; tableName=").append(identity.tableName()).append("\n")
+                .append("- basePackage=").append(identity.basePackage()).append("\n")
+                .append("- targetPath=").append(task.getTargetPath()).append("\n")
+                .append("- exactClassName=").append(task.getExpectedClassName()).append("\n")
+                .append("- API module=").append(identity.apiModuleName())
+                .append("; service module=").append(identity.serviceModuleName())
+                .append("; serviceName=").append(identity.serviceName()).append("\n")
+                .append("- reference profile: ").append(profile.describeForPrompt()).append("\n")
+                .append("- package declaration must exactly match targetPath\n")
+                .append("- implement every reviewed business endpoint and service method; do not bypass custom validation with generic CRUD\n");
+        int javaMajor = parseJavaMajor(profile.javaVersion());
+        if (javaMajor > 0 && javaMajor < 17) {
+            authority.append("- Java ").append(javaMajor)
+                    .append(": do not use record, sealed, var, switch expressions or text blocks\n");
+        }
+        authority.append("- validation namespace=").append(profile.validationNamespace())
+                .append("; swagger generation=").append(profile.swaggerGeneration()).append("\n\n");
+        return authority + rolePrompt;
+    }
+
+    private int parseJavaMajor(String version) {
+        if (version == null) return -1;
+        String normalized = version.startsWith("1.") ? version.substring(2) : version;
+        java.util.regex.Matcher matcher = java.util.regex.Pattern.compile("^(\\d+)").matcher(normalized);
+        return matcher.find() ? Integer.parseInt(matcher.group(1)) : -1;
     }
 
     /** 把 {Entity} {Name} {module} 占位符替换为真实值 */

@@ -339,7 +339,17 @@ export function isExecutionTimeline(data: unknown): data is ExecutionTimeline {
     && isFiniteNumber(data.failedSubPlans)
     && Array.isArray(data.subPlanTimelines)
     && data.subPlanTimelines.every(isSubPlanTimeline)
-    && optionalString(data.overallStatus);
+    && optionalString(data.overallStatus)
+    && optionalString(data.moduleName)
+    && optionalString(data.entityName)
+    && optionalString(data.tableName)
+    && optionalString(data.basePackage)
+    && optionalString(data.frameworkVersion)
+    && optionalString(data.javaVersion)
+    && optionalString(data.outputDirectory)
+    && optionalString(data.compileVerificationStatus)
+    && optionalNumber(data.qualityErrorCount)
+    && optionalNumber(data.qualityWarningCount);
 }
 
 /** 列出 Part B 生成的文件(摘要) */

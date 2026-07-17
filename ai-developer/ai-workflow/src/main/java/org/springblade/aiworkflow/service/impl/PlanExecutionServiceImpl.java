@@ -7,6 +7,7 @@ import lombok.extern.slf4j.Slf4j;
 import org.springblade.aiworkflow.agent.BladeXCodeAgent;
 import org.springblade.aiworkflow.agent.GenerationIdentity;
 import org.springblade.aiworkflow.agent.GenerationIdentityResolver;
+import org.springblade.aiworkflow.agent.ReferenceFrameworkProfile;
 import org.springblade.aiworkflow.agent.ProjectWriteLockManager;
 import org.springblade.aiworkflow.config.AiWorkflowProperties;
 import org.springblade.aiworkflow.entity.AiExecutionLog;
@@ -412,6 +413,28 @@ public class PlanExecutionServiceImpl implements IPlanExecutionService {
         vo.setTotalSubPlans(subPlans.size());
         vo.setCompletedSubPlans(completed);
         vo.setFailedSubPlans(failed);
+        vo.setOutputDirectory(plan.getOutputDirectory());
+        vo.setCompileVerificationStatus(plan.getCompileVerificationStatus());
+        vo.setQualityErrorCount(plan.getQualityErrorCount());
+        vo.setQualityWarningCount(plan.getQualityWarningCount());
+        try {
+            if (plan.getGenerationIdentityJson() != null) {
+                GenerationIdentity identity = objectMapper.readValue(plan.getGenerationIdentityJson(), GenerationIdentity.class);
+                vo.setModuleName(identity.moduleName());
+                vo.setEntityName(identity.entityName());
+                vo.setTableName(identity.tableName());
+                vo.setBasePackage(identity.basePackage());
+            }
+            if (plan.getReferenceProfileJson() != null) {
+                ReferenceFrameworkProfile profile = objectMapper.readValue(
+                        plan.getReferenceProfileJson(), ReferenceFrameworkProfile.class);
+                vo.setFrameworkVersion(profile.bladeXVersion());
+                vo.setJavaVersion(profile.javaVersion());
+            }
+        } catch (JsonProcessingException e) {
+            log.warn("Unable to deserialize generation quality metadata for receptionId={}: {}",
+                    receptionId, e.getMessage());
+        }
         vo.setSubPlanTimelines(timelines);
         return vo;
     }

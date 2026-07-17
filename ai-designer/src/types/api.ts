@@ -143,5 +143,15 @@ export interface ExecutionTimeline {
   totalSubPlans: number;
   completedSubPlans: number;
   failedSubPlans: number;
+  moduleName?: string;
+  entityName?: string;
+  tableName?: string;
+  basePackage?: string;
+  frameworkVersion?: string;
+  javaVersion?: string;
+  outputDirectory?: string;
+  compileVerificationStatus?: 'NOT_RUN' | 'PASSED' | 'FAILED' | 'SKIPPED_DEPENDENCIES_UNAVAILABLE';
+  qualityErrorCount?: number;
+  qualityWarningCount?: number;
   subPlanTimelines: SubPlanTimeline[];
 }

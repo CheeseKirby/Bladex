@@ -59,6 +59,12 @@ public class AiPlan implements Serializable {
     @Schema(description = "Compile verification status")
     private String compileVerificationStatus;
 
+    @Schema(description = "Final static quality error count")
+    private Integer qualityErrorCount;
+
+    @Schema(description = "Final static quality warning count")
+    private Integer qualityWarningCount;
+
     /**
      * 写入目标 — 阶段2:ISOLATED(落隔离区) / REAL(落目标项目根)。
      * 空/非法按 ISOLATED。决定 executeSubPlan 的写盘 root 与是否查重。

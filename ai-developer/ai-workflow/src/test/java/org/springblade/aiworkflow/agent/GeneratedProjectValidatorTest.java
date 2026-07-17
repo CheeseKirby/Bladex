@@ -52,6 +52,94 @@ class GeneratedProjectValidatorTest {
         assertTrue(hasRule(issues, "MAVEN-INTERNAL-DEPENDENCY-MISSING"));
     }
 
+    @Test
+    void rejectsMapperColumnsAndEntityFieldsOutsideGeneratedDdl() {
+        GeneratedFile ddl = GeneratedFile.create(TaskType.DDL_STATEMENT, BladeXModuleLayout.ddlPath(context), """
+                CREATE TABLE blade_special_period (
+                  id BIGINT,
+                  period_name VARCHAR(100),
+                  is_deleted INT
+                );
+                """);
+        GeneratedFile entity = GeneratedFile.create(TaskType.STANDARD_CRUD_ENTITY,
+                BladeXModuleLayout.entityPath(context, "SpecialPeriod"), """
+                package org.springblade.safeprod.pojo.entity;
+                public class SpecialPeriod { private String periodName; private String remark; }
+                """);
+        GeneratedFile xml = GeneratedFile.create(TaskType.MAPPER_XML,
+                BladeXModuleLayout.mapperXmlPath(context, "SpecialPeriod"), """
+                <mapper><select id="list" resultType="SpecialPeriod">
+                  SELECT id, period_name, remark FROM blade_special_period
+                </select></mapper>
+                """);
+        List<GeneratedProjectValidator.Issue> issues = new GeneratedProjectValidator()
+                .validate(List.of(ddl, entity, xml), List.of(), context, null);
+        assertTrue(hasRule(issues, "ENTITY-DDL-COLUMN-MISSING"));
+        assertTrue(hasRule(issues, "MAPPER-DDL-COLUMN-MISSING"));
+    }
+
+    @Test
+    void rejectsBusinessServiceMethodsThatHaveNoControllerCall() {
+        GeneratedFile service = GeneratedFile.create(TaskType.STANDARD_CRUD_SERVICE,
+                BladeXModuleLayout.serviceInterfacePath(context, "SpecialPeriod"), """
+                package org.springblade.safeprod.service;
+                public interface ISpecialPeriodService { boolean enable(Long id); boolean matchSpecialPeriod(Long id); }
+                """);
+        GeneratedFile controller = GeneratedFile.create(TaskType.STANDARD_CRUD_CONTROLLER,
+                BladeXModuleLayout.controllerPath(context, "SpecialPeriod"), """
+                package org.springblade.safeprod.controller;
+                public class SpecialPeriodController { void enable(){ service.enable(1L); } }
+                """);
+        List<GeneratedProjectValidator.Issue> issues = new GeneratedProjectValidator()
+                .validate(List.of(service, controller), List.of(), context, null);
+        assertTrue(hasRule(issues, "CONTROLLER-SERVICE-BUSINESS-GAP"));
+    }
+
+    @Test
+    void acceptsAReferenceAlignedJava8Module() {
+        ReferenceFrameworkProfile profile = new ReferenceFrameworkProfile(
+                "2.4.0.RELEASE", "1.8", "org.springblade", "blade-service-api", "blade-service",
+                "2.4.0.RELEASE", "2.4.0.RELEASE", "${bladex.project.version}", "javax", "v2",
+                "entity", java.util.Map.of("VO", "vo", "QVO", "vo.qvo", "IVO", "vo.ivo", "UVO", "vo.uvo", "EVO", "vo.evo"),
+                "controller", "service", "service.impl", "mapper", "wrapper", "feign", "excel.support",
+                true, "SPRING_CLOUD_APPLICATION", "blade_lxqt", "SPRING_PROFILES", "reference");
+        GenerationContext aligned = new GenerationContext(context.identity(), profile);
+        List<GeneratedFile> files = new java.util.ArrayList<>();
+        files.add(GeneratedFile.create(TaskType.DDL_STATEMENT, BladeXModuleLayout.ddlPath(aligned), """
+                CREATE TABLE blade_special_period (
+                  id BIGINT,
+                  period_name VARCHAR(100),
+                  is_deleted INT
+                );
+                """));
+        files.add(GeneratedFile.create(TaskType.STANDARD_CRUD_ENTITY,
+                BladeXModuleLayout.entityPath(aligned, "SpecialPeriod"), """
+                package org.springblade.safeprod.entity;
+                public class SpecialPeriod { private String periodName; }
+                """));
+        files.add(GeneratedFile.create(TaskType.STANDARD_CRUD_SERVICE,
+                BladeXModuleLayout.serviceInterfacePath(aligned, "SpecialPeriod"), """
+                package org.springblade.safeprod.service;
+                public interface ISpecialPeriodService { boolean enable(Long id); }
+                """));
+        files.add(GeneratedFile.create(TaskType.STANDARD_CRUD_CONTROLLER,
+                BladeXModuleLayout.controllerPath(aligned, "SpecialPeriod"), """
+                package org.springblade.safeprod.controller;
+                public class SpecialPeriodController { void enable(){ service.enable(1L); } }
+                """));
+        files.add(GeneratedFile.create(TaskType.MAPPER_XML,
+                BladeXModuleLayout.mapperXmlPath(aligned, "SpecialPeriod"), """
+                <mapper><resultMap id="result" type="SpecialPeriod"><result property="periodName" column="period_name"/></resultMap>
+                <select id="list" resultMap="result">SELECT id, period_name, is_deleted FROM blade_special_period</select></mapper>
+                """));
+        files.addAll(BladeXModuleSkeleton.buildApiSide(aligned, false));
+        files.addAll(BladeXModuleSkeleton.buildImplSide(aligned));
+
+        List<GeneratedProjectValidator.Issue> issues = new GeneratedProjectValidator()
+                .validate(files, List.of(), aligned, null);
+        assertTrue(issues.stream().noneMatch(GeneratedProjectValidator.Issue::isError), issues.toString());
+    }
+
     private boolean hasRule(List<GeneratedProjectValidator.Issue> issues, String rule) {
         return issues.stream().anyMatch(issue -> rule.equals(issue.rule()));
     }

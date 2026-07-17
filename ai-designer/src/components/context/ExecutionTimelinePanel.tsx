@@ -37,6 +37,9 @@ const STAGE_META: Record<string, { label: string; icon: React.ReactNode }> = {
   SELF_REVIEW: { label: '自我审查', icon: <ExperimentOutlined /> },
   CROSS_FILE_VALIDATION: { label: '跨文件校验', icon: <CheckOutlined /> },
   FIX_LOOP: { label: '自动修复', icon: <EditOutlined /> },
+  REFERENCE_SELECTION: { label: 'Reference selection', icon: <ExperimentOutlined /> },
+  PROJECT_QUALITY_VALIDATION: { label: 'Artifact quality validation', icon: <CheckOutlined /> },
+  COMPILE_VERIFICATION: { label: 'Compile verification', icon: <CheckOutlined /> },
 };
 
 function formatDuration(start?: string, end?: string): string {
@@ -151,6 +154,41 @@ const ExecutionTimelinePanel: React.FC = () => {
             )}
             <Text type="secondary">📦 共 {total} 个子方案</Text>
           </Space>
+        </Space>
+      </Card>
+
+      <Card size="small" style={{ marginBottom: 8 }} styles={{ body: { padding: 10 } }}>
+        <Space direction="vertical" size={4} style={{ width: '100%' }}>
+          <Space size={6} wrap>
+            <Text strong style={{ fontSize: 12 }}>{'\u4ea7\u7269\u8d28\u91cf'}</Text>
+            {timeline.moduleName && <Tag color="blue">{'\u6a21\u5757'} {timeline.moduleName}</Tag>}
+            {timeline.entityName && <Tag>{'\u5b9e\u4f53'} {timeline.entityName}</Tag>}
+            {timeline.frameworkVersion && <Tag>BladeX {timeline.frameworkVersion}</Tag>}
+            {timeline.javaVersion && <Tag>Java {timeline.javaVersion}</Tag>}
+          </Space>
+          <Space size={6} wrap>
+            <Tag color={(timeline.qualityErrorCount ?? 0) > 0 ? 'red' : 'green'}>
+              {'\u9759\u6001\u6821\u9a8c'} {(timeline.qualityErrorCount ?? 0) > 0 ? `${timeline.qualityErrorCount} ERROR` : '\u901a\u8fc7'}
+            </Tag>
+            {(timeline.qualityWarningCount ?? 0) > 0 && (
+              <Tag color="gold">{timeline.qualityWarningCount} WARN</Tag>
+            )}
+            <Tag color={timeline.compileVerificationStatus === 'PASSED' ? 'green'
+              : timeline.compileVerificationStatus === 'FAILED' ? 'red'
+                : timeline.compileVerificationStatus === 'SKIPPED_DEPENDENCIES_UNAVAILABLE' ? 'gold' : 'default'}>
+              {timeline.compileVerificationStatus === 'PASSED' ? '\u7f16\u8bd1\u5df2\u9a8c\u8bc1'
+                : timeline.compileVerificationStatus === 'FAILED' ? '\u7f16\u8bd1\u5931\u8d25'
+                  : timeline.compileVerificationStatus === 'SKIPPED_DEPENDENCIES_UNAVAILABLE'
+                    ? '\u7f16\u8bd1\u672a\u9a8c\u8bc1\uff08\u4f9d\u8d56\u4e0d\u53ef\u7528\uff09' : '\u7f16\u8bd1\u5c1a\u672a\u6267\u884c'}
+            </Tag>
+          </Space>
+          {timeline.outputDirectory && (
+            <Tooltip title={timeline.outputDirectory}>
+              <Text type="secondary" ellipsis style={{ maxWidth: 280, fontSize: 10 }}>
+                {'\u8f93\u51fa\uff1a'}{timeline.outputDirectory}
+              </Text>
+            </Tooltip>
+          )}
         </Space>
       </Card>
 

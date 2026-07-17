@@ -102,6 +102,9 @@ test('Part B DTO validators accept minimal valid data', () => {
   assert.equal(isGeneratedFileDetail({ ...summary, content: 'class A {}' }), true);
   assert.equal(isExecutionTimeline({
     receptionId: 'r', totalSubPlans: 1, completedSubPlans: 1, failedSubPlans: 0,
+    moduleName: 'safeprod', entityName: 'SpecialPeriod', frameworkVersion: '2.4.0.RELEASE',
+    compileVerificationStatus: 'SKIPPED_DEPENDENCIES_UNAVAILABLE',
+    qualityErrorCount: 0, qualityWarningCount: 2,
     subPlanTimelines: [{
       subPlanId: 1, fileCount: 1,
       steps: [{ id: 1, stage: 'WRITE', status: 'COMPLETED' }],

@@ -167,6 +167,32 @@ public class BladeXCodeAgent {
             }
         }
 
+        boolean expectsApi = expectedDeliverables.stream()
+                .anyMatch(item -> "API".equals(BladeXModuleLayout.sideOfPath(item.targetPath())));
+        boolean expectsImpl = expectedDeliverables.stream()
+                .anyMatch(item -> "IMPL".equals(BladeXModuleLayout.sideOfPath(item.targetPath())));
+        if (expectsApi) {
+            expectedDeliverables.add(new ExpectedDeliverable(null, TaskType.OTHER,
+                    BladeXModuleLayout.apiPomPath(generationContext), generationIdentity.entityName(),
+                    generationIdentity.moduleName(), true));
+            if (referenceProjectIndex != null && referenceProjectIndex.readSourceContent("blade-service-api/pom.xml") != null) {
+                expectedDeliverables.add(new ExpectedDeliverable(null, TaskType.OTHER,
+                        "blade-service-api/pom.xml", generationIdentity.entityName(), generationIdentity.moduleName(), true));
+            }
+        }
+        if (expectsImpl) {
+            for (String path : List.of(BladeXModuleLayout.implPomPath(generationContext),
+                    BladeXModuleLayout.applicationPath(generationContext),
+                    BladeXModuleLayout.bootstrapPath(generationContext), BladeXModuleLayout.appDevPath(generationContext))) {
+                expectedDeliverables.add(new ExpectedDeliverable(null, TaskType.OTHER, path,
+                        generationIdentity.entityName(), generationIdentity.moduleName(), true));
+            }
+            if (referenceProjectIndex != null && referenceProjectIndex.readSourceContent("blade-service/pom.xml") != null) {
+                expectedDeliverables.add(new ExpectedDeliverable(null, TaskType.OTHER,
+                        "blade-service/pom.xml", generationIdentity.entityName(), generationIdentity.moduleName(), true));
+            }
+        }
+
         boolean allSuccess = true;
         Set<Long> failedIds = new HashSet<>();
         Map<Long, List<String>> reverseDeps = topologySorter.buildReverseDependencies(executionOrder);
@@ -207,11 +233,12 @@ public class BladeXCodeAgent {
         // 3.5 plan 级 Entity↔DDL 自动修复 — entity↔DDL 不一致在子方案级检不出(DDL/Entity 跨子方案),
         //     以 DDL 为源头重生成 Entity, 写盘 + 更新 DB。修复失败不阻断主流程。
         //     先修复再校验,确保 execution_log 的 PLAN_CROSS_VALIDATION 反映修复后状态(非过期快照)。
-        retryPlanWideEntityDdlMismatches(plan);
+        retryPlanWideEntityDdlMismatches(plan, generationContext);
 
         // 3.5b plan 级 VO/IVO/UVO <-> Entity 字段一致性修复(B1/B2/B3) - Entity 与 VO 常分属不同子方案,
         //     子方案级检不出; 以 Entity 为源头重生成 VO/IVO/UVO, 写盘 + 更新 DB。修复失败不阻断主流程。
-        retryPlanWideVoEntityMismatches(plan);
+        retryPlanWideVoEntityMismatches(plan, generationContext);
+        repairPackageDeclarations(plan);
 
         // 3.6 全 plan 级跨文件契约校验(修复后跑,反映修复后真实状态)。
         Optional<List<CrossFileValidator.ContractIssue>> finalContractValidation = validatePlanWideContracts(plan);
@@ -219,10 +246,14 @@ public class BladeXCodeAgent {
         long finalContractErrorCount = finalContractValidation
                 .map(issues -> issues.stream().filter(CrossFileValidator.ContractIssue::isError).count())
                 .orElse(0L);
+        long finalContractWarningCount = finalContractValidation
+                .map(issues -> issues.size() - issues.stream().filter(CrossFileValidator.ContractIssue::isError).count())
+                .orElse(0L);
 
         List<GeneratedProjectValidator.Issue> projectIssues = generatedProjectValidator.validate(
                 generatedFileStore.loadPlanFiles(plan), expectedDeliverables, generationContext, referenceProjectIndex);
         long projectQualityErrorCount = projectIssues.stream().filter(GeneratedProjectValidator.Issue::isError).count();
+        long projectQualityWarningCount = projectIssues.size() - projectQualityErrorCount;
         if (!projectIssues.isEmpty()) {
             String report;
             try {
@@ -256,6 +287,9 @@ public class BladeXCodeAgent {
             logExecution(null, "COMPILE_VERIFICATION", "", "SKIPPED",
                     "Compile verification was not run because private reference dependencies are unavailable", null);
         }
+
+        plan.setQualityErrorCount(Math.toIntExact(finalContractErrorCount + projectQualityErrorCount));
+        plan.setQualityWarningCount(Math.toIntExact(finalContractWarningCount + projectQualityWarningCount));
 
         boolean hasSubPlanErrors = executionOrder.stream()
                 .anyMatch(sp -> sp.getStatus() == SubPlanStatus.COMPLETED_WITH_ERRORS);
@@ -485,6 +519,12 @@ public class BladeXCodeAgent {
         if (!skeletons.isEmpty()) {
             allGeneratedFiles.addAll(skeletons);
             log.info("补齐模块骨架: {} 个文件", skeletons.size());
+        }
+        List<GeneratedFile> parentPomUpdates = buildParentPomRegistrations(
+                allGeneratedFiles, ensuredSkeletonKeys, generationContext);
+        if (!parentPomUpdates.isEmpty()) {
+            allGeneratedFiles.addAll(parentPomUpdates);
+            log.info("Parent pom registration snapshots added: {}", parentPomUpdates.size());
         }
 
         // 3d. 写入文件 — 阶段2: 按 plan.writeTarget 决定写盘 root
@@ -836,6 +876,25 @@ public class BladeXCodeAgent {
      * 然后从子方案内容中提取实体名/模块名/包路径,组合出文件路径。
      * 每个 AtomicTask 只对应 <b>一个</b> 目标文件,LLM 一次只生成一个文件,避免多文件拆分歧义。
      */
+    private List<GeneratedFile> buildParentPomRegistrations(
+            List<GeneratedFile> generated, Set<String> ensuredKeys, GenerationContext context) {
+        if (referenceProjectIndex == null) return List.of();
+        List<GeneratedFile> result = new ArrayList<>();
+        boolean hasApi = generated.stream().anyMatch(file -> "API".equals(BladeXModuleLayout.sideOfPath(file.getFilePath())));
+        boolean hasImpl = generated.stream().anyMatch(file -> "IMPL".equals(BladeXModuleLayout.sideOfPath(file.getFilePath())));
+        if (hasApi && ensuredKeys.add(context.identity().moduleName() + ":PARENT_API")) {
+            String content = referenceProjectIndex.buildParentPomWithModule(
+                    "blade-service-api/pom.xml", context.identity().apiModuleName());
+            if (content != null) result.add(GeneratedFile.create(TaskType.OTHER, "blade-service-api/pom.xml", content));
+        }
+        if (hasImpl && ensuredKeys.add(context.identity().moduleName() + ":PARENT_IMPL")) {
+            String content = referenceProjectIndex.buildParentPomWithModule(
+                    "blade-service/pom.xml", context.identity().serviceModuleName());
+            if (content != null) result.add(GeneratedFile.create(TaskType.OTHER, "blade-service/pom.xml", content));
+        }
+        return result;
+    }
+
     private List<AtomicTask> parseAtomicTasks(AiSubPlan subPlan, GenerationContext generationContext) {
         String content = subPlan.getPlanContent();
         if (content == null || content.isBlank()) {
@@ -1118,15 +1177,18 @@ public class BladeXCodeAgent {
     }
 
     private String serviceInterfaceInstructions(String entityName) {
-        return "I" + entityName + "Service 必须 extends BaseService<" + entityName + ">, 接口体可以为空";
+        return "I" + entityName + "Service must extend BaseService<" + entityName + "> and declare every "
+                + "business operation required by the reviewed plan (state changes, matching, configuration checks, "
+                + "custom queries and integration operations). Do not leave the interface empty when the plan defines custom behavior.";
     }
 
     private String serviceImplInstructions(String entityName) {
-        return entityName + "ServiceImpl 必须:\n"
-                + "- extends BaseServiceImpl<" + entityName + "Mapper, " + entityName + ">\n"
-                + "- implements I" + entityName + "Service\n"
-                + "- 类上加 @Service\n"
-                + "- 实现体可以为空(基础 CRUD 由父类提供)";
+        return entityName + "ServiceImpl must:\n"
+                + "- extend BaseServiceImpl<" + entityName + "Mapper, " + entityName + ">\n"
+                + "- implement I" + entityName + "Service\n"
+                + "- use @Service and constructor injection\n"
+                + "- implement every custom method declared by I" + entityName + "Service\n"
+                + "- preserve all validation, uniqueness, state-transition and transaction rules from the reviewed plan";
     }
 
     private String wrapperInstructions(String entityName) {
@@ -1137,14 +1199,13 @@ public class BladeXCodeAgent {
     }
 
     private String controllerInstructions(String entityName, String moduleName) {
-        return entityName + "Controller 必须:\n"
-                + "- extends BladeController\n"
-                + "- @RestController @AllArgsConstructor @RequestMapping(\"/" + moduleName + "\") @Tag(name = \"" + entityName + "管理\")\n"
-                + "- 注入 I" + entityName + "Service\n"
-                + "- 5 个标准端点: /detail (GET), /list (GET 分页), /save (POST), /update (POST), /remove (POST 用 deleteLogic)\n"
-                + "- 所有方法返回 R<...>\n"
-                + "- 使用 " + entityName + "Wrapper.build() 转换 VO\n"
-                + "- 使用 @ApiOperationSupport(order = N)、@Operation(summary = ...)";
+        return entityName + "Controller must:\n"
+                + "- extend BladeController and use the annotation generation detected from the reference project\n"
+                + "- inject I" + entityName + "Service\n"
+                + "- expose every endpoint required by the reviewed plan, including custom enable/disable/match/configuration endpoints\n"
+                + "- call the corresponding custom service method for business operations\n"
+                + "- never replace reviewed business methods with generic save/updateById/deleteLogic calls that bypass validation\n"
+                + "- keep request DTO/VO and return types aligned with the generated service contract";
     }
 
     private String excelInstructions(String entityName) {
@@ -1246,7 +1307,30 @@ public class BladeXCodeAgent {
      * <p>注意: 此处 plan 级无 AtomicTask(子方案级才有), 需从 Entity 文件路径反推实体名/模块名临时构造 task,
      * 供 PromptBuilder 替换 {Entity}/{module} 占位符 + 系统 prompt 角色。
      */
-    private void retryPlanWideEntityDdlMismatches(AiPlan plan) {
+    private void repairPackageDeclarations(AiPlan plan) {
+        List<GeneratedFile> files = generatedFileStore.loadPlanFiles(plan);
+        Pattern packagePattern = Pattern.compile("(?m)^\\s*package\\s+([\\w.]+)\\s*;");
+        int repaired = 0;
+        for (GeneratedFile file : files) {
+            String path = file.getFilePath() == null ? "" : file.getFilePath().replace('\\', '/');
+            if (!path.endsWith(".java")) continue;
+            int source = path.indexOf("/src/main/java/");
+            int fileSlash = path.lastIndexOf('/');
+            if (source < 0 || fileSlash <= source) continue;
+            String expectedPackage = path.substring(source + "/src/main/java/".length(), fileSlash).replace('/', '.');
+            Matcher matcher = packagePattern.matcher(file.getContent());
+            if (!matcher.find() || expectedPackage.equals(matcher.group(1))) continue;
+            String fixedContent = matcher.replaceFirst(Matcher.quoteReplacement("package " + expectedPackage + ";"));
+            GeneratedFile fixed = new GeneratedFile(file.getType(), file.getFilePath(), fixedContent, "MODIFY");
+            if (generatedFileStore.persistRepair(plan, fixed)) repaired++;
+        }
+        if (repaired > 0) {
+            logExecution(null, "PLAN_CROSS_FIX", "", "SUCCESS",
+                    "Synchronized " + repaired + " package declarations with physical target paths", null);
+        }
+    }
+
+    private void retryPlanWideEntityDdlMismatches(AiPlan plan, GenerationContext generationContext) {
         try {
             List<GeneratedFile> files = generatedFileStore.loadPlanFiles(plan);
             if (files.isEmpty()) return;
@@ -1255,7 +1339,7 @@ public class BladeXCodeAgent {
                     "ENTITY-DDL-COLUMN-MISSING", "ENTITY-DDL-TYPE-MISMATCH", "ENTITY-DDL-TENANT");
             runRepairLoop(files, ENTITY_DDL_RULES,
                     (src, contract, task, desc) -> codeGenRouter.fixEntityWithDdl(src, contract, task, desc),
-                    this::buildTaskFromEntityPath,
+                    path -> buildTaskFromEntityPath(path, generationContext),
                     null, "PLAN_CROSS_FIX", "Entity↔DDL",
                     (p, f) -> generatedFileStore.persistRepair(p, f),
                     plan);
@@ -1266,10 +1350,10 @@ public class BladeXCodeAgent {
 
     /** 从 Entity 文件路径反推实体名/模块名, 构造临时 AtomicTask(STANDARD_CRUD_ENTITY)。
      *  路径形如 src/main/java/org/springblade/{module}/pojo/entity/{Entity}.java */
-    private AtomicTask buildTaskFromEntityPath(String path) {
+    private AtomicTask buildTaskFromEntityPath(String path, GenerationContext generationContext) {
         if (path == null) return null;
         java.util.regex.Matcher m = java.util.regex.Pattern
-                .compile("org/springblade/([a-z][a-z0-9_]*)/pojo/entity/([A-Z][a-zA-Z0-9_]*)\\.java")
+                .compile("org/springblade/([a-z][a-z0-9_]*)/(?:pojo/)?entity/([A-Z][a-zA-Z0-9_]*)\\.java")
                 .matcher(path);
         if (!m.find()) return null;
         AtomicTask t = new AtomicTask();
@@ -1277,6 +1361,8 @@ public class BladeXCodeAgent {
         t.setEntityName(m.group(2));
         t.setModuleName(m.group(1));
         t.setTargetPath(path);
+        t.setGenerationContext(generationContext);
+        t.setExpectedClassName(m.group(2));
         t.setTaskDescription("修复 " + m.group(2) + " Entity 使其与 DDL 表结构对齐");
         return t;
     }
@@ -1296,7 +1382,7 @@ public class BladeXCodeAgent {
      * <p>范围: 仅 VO-ENTITY-FIELD-* 两类可定位到 VO 文件的规则。复用 maxReviewRetries 限次;
      * 修复失败不阻断主流程(保留原文件)。plan 级无 AtomicTask, 需从 VO 文件路径反推实体名/模块名临时构造 task。
      */
-    private void retryPlanWideVoEntityMismatches(AiPlan plan) {
+    private void retryPlanWideVoEntityMismatches(AiPlan plan, GenerationContext generationContext) {
         try {
             List<GeneratedFile> files = generatedFileStore.loadPlanFiles(plan);
             if (files.isEmpty()) return;
@@ -1305,7 +1391,7 @@ public class BladeXCodeAgent {
                     "VO-ENTITY-FIELD-MISMATCH", "VO-ENTITY-FIELD-TYPE-MISMATCH");
             runRepairLoop(files, VO_ENTITY_RULES,
                     (src, contract, task, desc) -> codeGenRouter.fixVoWithEntity(src, contract, task, desc),
-                    this::buildTaskFromVoPath,
+                    path -> buildTaskFromVoPath(path, generationContext),
                     null, "PLAN_CROSS_FIX", "VO↔Entity",
                     (p, f) -> generatedFileStore.persistRepair(p, f),
                     plan);
@@ -1316,10 +1402,10 @@ public class BladeXCodeAgent {
 
     /** 从 VO 文件路径反推实体名/模块名, 构造临时 AtomicTask(OTHER 类型, 走 VO 通用系统提示词)。
      *  路径形如 src/main/java/org/springblade/{module}/pojo/vo/{Entity}{Suffix}.java, Suffix 为 VO/IVO/UVO/EVO。 */
-    private AtomicTask buildTaskFromVoPath(String path) {
+    private AtomicTask buildTaskFromVoPath(String path, GenerationContext generationContext) {
         if (path == null) return null;
         java.util.regex.Matcher m = java.util.regex.Pattern
-                .compile("org/springblade/([a-z][a-z0-9_]*)/pojo/vo/([A-Z][a-zA-Z0-9_]*)\\.java")
+                .compile("org/springblade/([a-z][a-z0-9_]*)/(?:pojo/)?vo(?:/(?:ivo|uvo|qvo|evo))?/([A-Z][a-zA-Z0-9_]*)\\.java")
                 .matcher(path);
         if (!m.find()) return null;
         String voClassName = m.group(2);
@@ -1329,6 +1415,8 @@ public class BladeXCodeAgent {
         t.setEntityName(entityName);
         t.setModuleName(m.group(1));
         t.setTargetPath(path);
+        t.setGenerationContext(generationContext);
+        t.setExpectedClassName(m.group(2));
         t.setTaskDescription("修复 " + voClassName + " 使其字段与 " + entityName + " Entity 严格对齐");
         return t;
     }

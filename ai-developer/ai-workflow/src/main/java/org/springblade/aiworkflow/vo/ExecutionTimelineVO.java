@@ -28,6 +28,37 @@ public class ExecutionTimelineVO {
     @Schema(description = "失败子方案数")
     private int failedSubPlans;
 
+    @Schema(description = "Canonical module name")
+    private String moduleName;
+
+    @Schema(description = "Primary entity name")
+    private String entityName;
+
+    @Schema(description = "Canonical table name")
+    private String tableName;
+
+    @Schema(description = "Canonical base package")
+    private String basePackage;
+
+    @Schema(description = "Detected BladeX/reference version")
+    private String frameworkVersion;
+
+    @Schema(description = "Detected Java version")
+    private String javaVersion;
+
+    @Schema(description = "Per-reception output directory")
+    private String outputDirectory;
+
+    @Schema(description = "Compile verification status")
+    private String compileVerificationStatus;
+
+    @Schema(description = "Final static quality error count")
+    private Integer qualityErrorCount;
+
+    @Schema(description = "Final static quality warning count")
+    private Integer qualityWarningCount;
+
+
     @Schema(description = "按子方案分组的步骤列表")
     private List<SubPlanTimeline> subPlanTimelines;
 

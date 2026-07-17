@@ -59,6 +59,10 @@ CALL add_column_if_missing('ai_workflow_plan', 'output_directory',
     "VARCHAR(500) NULL COMMENT 'Per-reception isolated output directory'");
 CALL add_column_if_missing('ai_workflow_plan', 'compile_verification_status',
     "VARCHAR(50) NOT NULL DEFAULT 'NOT_RUN' COMMENT 'Compile verification status'");
+CALL add_column_if_missing('ai_workflow_plan', 'quality_error_count',
+    "INT NOT NULL DEFAULT 0 COMMENT 'Final static quality error count'");
+CALL add_column_if_missing('ai_workflow_plan', 'quality_warning_count',
+    "INT NOT NULL DEFAULT 0 COMMENT 'Final static quality warning count'");
 
 DROP PROCEDURE IF EXISTS add_column_if_missing;
 

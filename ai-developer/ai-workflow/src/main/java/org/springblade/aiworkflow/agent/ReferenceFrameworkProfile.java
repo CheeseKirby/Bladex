@@ -84,7 +84,7 @@ public record ReferenceFrameworkProfile(
     }
 
     public String describeForPrompt() {
-        return "??????: BladeX=" + bladeXVersion + ", Java=" + javaVersion
+        return "Reference profile: BladeX=" + bladeXVersion + ", Java=" + javaVersion
                 + ", validation=" + validationNamespace + ", swagger=" + swaggerGeneration
                 + ", entityPackage=" + entityPackageSuffix + ", voPackages=" + voPackageSuffixes
                 + ", applicationStyle=" + applicationStyle + ", nacosNamespace=" + nacosNamespace;

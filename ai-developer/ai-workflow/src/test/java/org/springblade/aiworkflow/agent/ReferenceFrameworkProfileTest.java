@@ -72,6 +72,8 @@ class ReferenceFrameworkProfileTest {
         assertEquals("blade_lxqt", profile.nacosNamespace());
         assertEquals("SPRING_PROFILES", profile.profileStyle());
         assertTrue(profile.describeForPrompt().contains("2.4.0.RELEASE"));
+        String registered = index.buildParentPomWithModule("blade-service-api/pom.xml", "blade-safeprod-api");
+        assertTrue(registered.contains("<module>blade-safeprod-api</module>"));
     }
 
     private void write(String relative, String content) throws Exception {

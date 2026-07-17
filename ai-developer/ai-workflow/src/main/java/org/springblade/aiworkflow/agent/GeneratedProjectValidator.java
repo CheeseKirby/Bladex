@@ -25,7 +25,7 @@ public final class GeneratedProjectValidator {
     private static final Pattern METHOD_CALL = Pattern.compile("\\b([a-z][A-Za-z0-9_]*)\\.([a-zA-Z][A-Za-z0-9_]*)\\s*\\(");
     private static final Pattern XML_PROPERTY = Pattern.compile("property=\"([a-zA-Z][A-Za-z0-9_]*)\"");
     private static final Pattern JAVA_FIELD = Pattern.compile(
-            "(?m)^\\s*(?:private|protected|public)\\s+(?:static\\s+)?(?:final\\s+)?[A-Za-z0-9_<>?, .]+\\s+([a-z][A-Za-z0-9_]*)\\s*(?:[;=])");
+            "\\b(?:private|protected|public)\\s+(?:static\\s+)?(?:final\\s+)?[A-Za-z0-9_<>?, .]+\\s+([a-z][A-Za-z0-9_]*)\\s*(?:[;=])");
     private static final Set<String> EXTERNAL_PREFIXES = Set.of(
             "java.", "javax.", "jakarta.", "lombok.", "org.springframework.", "com.baomidou.",
             "io.swagger.", "cn.hutool.", "com.fasterxml.", "org.apache.", "org.slf4j.",
@@ -124,6 +124,9 @@ public final class GeneratedProjectValidator {
 
         validateSkeleton(files, context, issues);
         validateMapperXmlProperties(files, fieldsBySimpleName, issues);
+        validateDatabaseContract(files, context, fieldsBySimpleName, issues);
+        validateControllerServiceClosure(files, context, issues);
+        validatePomModel(files, context, issues);
         return issues;
     }
 
@@ -184,6 +187,140 @@ public final class GeneratedProjectValidator {
                 }
             }
         }
+    }
+
+    private void validateDatabaseContract(List<GeneratedFile> files, GenerationContext context,
+                                          Map<String, Set<String>> fieldsBySimpleName, List<Issue> issues) {
+        Set<String> ddlColumns = new LinkedHashSet<>();
+        Pattern column = Pattern.compile("(?m)^\\s*`?([a-z][a-z0-9_]*)`?\\s+"
+                + "(?:BIGINT|INT|INTEGER|VARCHAR|CHAR|TEXT|MEDIUMTEXT|DATETIME|TIMESTAMP|DATE|TIME|DECIMAL|DOUBLE|FLOAT|TINYINT|BOOLEAN|JSON)\\b",
+                Pattern.CASE_INSENSITIVE);
+        for (GeneratedFile file : files) {
+            String path = normalize(file.getFilePath());
+            if (path == null || !path.endsWith(".sql") || file.getContent() == null) continue;
+            Matcher matcher = column.matcher(file.getContent());
+            while (matcher.find()) ddlColumns.add(matcher.group(1).toLowerCase(Locale.ROOT));
+        }
+        if (ddlColumns.isEmpty()) return;
+
+        Set<String> baseColumns = Set.of("id", "create_user", "create_dept", "create_time", "update_user",
+                "update_time", "status", "is_deleted", "tenant_id");
+        Set<String> entityFields = fieldsBySimpleName.getOrDefault(context.identity().entityName(), Set.of());
+        for (String field : entityFields) {
+            if ("serialVersionUID".equals(field)) continue;
+            String dbColumn = camelToSnake(field);
+            if (!ddlColumns.contains(dbColumn) && !baseColumns.contains(dbColumn)) {
+                issues.add(error("ENTITY-DDL-COLUMN-MISSING", null,
+                        "Entity field " + field + " has no DDL column " + dbColumn));
+            }
+        }
+        for (String dbColumn : ddlColumns) {
+            if (baseColumns.contains(dbColumn)) continue;
+            String field = snakeToCamel(dbColumn);
+            if (!entityFields.contains(field)) {
+                issues.add(error("DDL-ENTITY-FIELD-MISSING", null,
+                        "DDL column " + dbColumn + " has no field " + field + " in " + context.identity().entityName()));
+            }
+        }
+
+        Pattern select = Pattern.compile("(?is)<select\\b[^>]*>\\s*select\\s+(.*?)\\s+from\\s+");
+        for (GeneratedFile file : files) {
+            String path = normalize(file.getFilePath());
+            if (path == null || !path.endsWith("Mapper.xml") || file.getContent() == null) continue;
+            Matcher selects = select.matcher(file.getContent());
+            while (selects.find()) {
+                for (String expression : selects.group(1).split(",")) {
+                    String candidate = expression.trim().replaceAll("(?i)\\s+as\\s+.*$", "")
+                            .replaceAll("^[a-zA-Z][a-zA-Z0-9_]*\\.", "").trim();
+                    if (candidate.equals("*") || candidate.contains("(") || candidate.contains(" ")
+                            || !candidate.matches("[a-z][a-z0-9_]*")) continue;
+                    if (!ddlColumns.contains(candidate.toLowerCase(Locale.ROOT))) {
+                        issues.add(error("MAPPER-DDL-COLUMN-MISSING", path,
+                                "Mapper SELECT references column " + candidate + " absent from generated DDL"));
+                    }
+                }
+            }
+        }
+    }
+
+    private void validateControllerServiceClosure(List<GeneratedFile> files, GenerationContext context,
+                                                  List<Issue> issues) {
+        GeneratedFile service = files.stream()
+                .filter(file -> normalize(file.getFilePath()).equals(
+                        BladeXModuleLayout.serviceInterfacePath(context, context.identity().entityName())))
+                .findFirst().orElse(null);
+        GeneratedFile controller = files.stream()
+                .filter(file -> normalize(file.getFilePath()).equals(
+                        BladeXModuleLayout.controllerPath(context, context.identity().entityName())))
+                .findFirst().orElse(null);
+        if (service == null || controller == null || service.getContent() == null || controller.getContent() == null) return;
+        Matcher methods = Pattern.compile(
+                "(?:public\\s+)?[A-Za-z0-9_<>?, .]+\\s+([a-z][A-Za-z0-9_]*)\\s*\\([^;{}]*\\)\\s*;")
+                .matcher(service.getContent());
+        Set<String> serviceMethods = new LinkedHashSet<>();
+        while (methods.find()) serviceMethods.add(methods.group(1));
+        for (String method : serviceMethods) {
+            if (!Pattern.compile("\\.\\s*" + Pattern.quote(method) + "\\s*\\(").matcher(controller.getContent()).find()) {
+                issues.add(error("CONTROLLER-SERVICE-BUSINESS-GAP", controller.getFilePath(),
+                        "Controller does not call custom service method " + method));
+            }
+        }
+    }
+
+    private void validatePomModel(List<GeneratedFile> files, GenerationContext context, List<Issue> issues) {
+        Map<String, GeneratedFile> byPath = new HashMap<>();
+        for (GeneratedFile file : files) byPath.put(normalize(file.getFilePath()), file);
+        GeneratedFile apiPom = byPath.get(BladeXModuleLayout.apiPomPath(context));
+        GeneratedFile implPom = byPath.get(BladeXModuleLayout.implPomPath(context));
+        validateChildPom(apiPom, context.referenceProfile().apiParentArtifactId(),
+                context.referenceProfile().apiParentVersion(), issues);
+        validateChildPom(implPom, context.referenceProfile().serviceParentArtifactId(),
+                context.referenceProfile().serviceParentVersion(), issues);
+        GeneratedFile apiParent = byPath.get("blade-service-api/pom.xml");
+        if (apiParent != null && !apiParent.getContent().contains(
+                "<module>" + context.identity().apiModuleName() + "</module>")) {
+            issues.add(error("PARENT-POM-MODULE-MISSING", apiParent.getFilePath(),
+                    "API parent pom does not register " + context.identity().apiModuleName()));
+        }
+        GeneratedFile serviceParent = byPath.get("blade-service/pom.xml");
+        if (serviceParent != null && !serviceParent.getContent().contains(
+                "<module>" + context.identity().serviceModuleName() + "</module>")) {
+            issues.add(error("PARENT-POM-MODULE-MISSING", serviceParent.getFilePath(),
+                    "Service parent pom does not register " + context.identity().serviceModuleName()));
+        }
+    }
+
+    private void validateChildPom(GeneratedFile pom, String parentArtifact, String parentVersion, List<Issue> issues) {
+        if (pom == null || pom.getContent() == null) return;
+        if (!pom.getContent().contains("<artifactId>" + parentArtifact + "</artifactId>")) {
+            issues.add(error("POM-PARENT-MISMATCH", pom.getFilePath(),
+                    "Expected parent artifactId " + parentArtifact));
+        }
+        if (parentVersion != null && !"UNKNOWN".equalsIgnoreCase(parentVersion)
+                && !pom.getContent().contains("<version>" + parentVersion + "</version>")) {
+            issues.add(error("POM-PARENT-VERSION-MISMATCH", pom.getFilePath(),
+                    "Expected parent version " + parentVersion));
+        }
+        if (pom.getContent().contains("${revision}")
+                && (parentVersion == null || !parentVersion.contains("${revision}"))) {
+            issues.add(error("POM-UNDEFINED-REVISION", pom.getFilePath(),
+                    "Generated pom uses ${revision} although the reference project uses " + parentVersion));
+        }
+    }
+
+    private String camelToSnake(String value) {
+        return value.replaceAll("([a-z0-9])([A-Z])", "$1_$2").toLowerCase(Locale.ROOT);
+    }
+
+    private String snakeToCamel(String value) {
+        StringBuilder result = new StringBuilder();
+        boolean upper = false;
+        for (char c : value.toCharArray()) {
+            if (c == '_') upper = true;
+            else if (upper) { result.append(Character.toUpperCase(c)); upper = false; }
+            else result.append(c);
+        }
+        return result.toString();
     }
 
     private boolean hasExternalPrefix(String imported) {

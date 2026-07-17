@@ -12,6 +12,8 @@ CREATE TABLE IF NOT EXISTS ai_workflow_plan (
     reference_profile_json CLOB,
     output_directory VARCHAR(500),
     compile_verification_status VARCHAR(50) DEFAULT 'NOT_RUN',
+    quality_error_count INT DEFAULT 0,
+    quality_warning_count INT DEFAULT 0,
     create_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     update_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     is_deleted INT DEFAULT 0
