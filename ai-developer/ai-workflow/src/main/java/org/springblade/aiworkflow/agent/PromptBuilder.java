@@ -132,6 +132,30 @@ public class PromptBuilder {
     }
 
     /**
+     * Builds a project-level repair prompt after all sub-plan outputs are available.
+     * The supplied project context contains the authoritative generated paths and the relevant peer contracts.
+     */
+    public Prompt buildProjectQualityFixPrompt(String issueDescription, String sourceCode,
+                                                String projectContext, AtomicTask task) {
+        StringBuilder sb = new StringBuilder();
+        sb.append("The strict project quality gate found errors in one generated file.\n");
+        sb.append("Repair only the target file. Treat physical paths and peer contract files as authoritative.\n\n");
+        sb.append("== Quality errors ==\n").append(issueDescription).append("\n\n");
+        sb.append("== Project contracts ==\n").append(projectContext).append("\n");
+        sb.append("== Current target file ==\n").append(sourceCode).append("\n\n");
+        sb.append("Repair requirements:\n");
+        sb.append("- Preserve the target file path, declared package, top-level type name and task purpose.\n");
+        sb.append("- Imports of generated classes must use the exact packages shown by the generated file inventory.\n");
+        sb.append("- Mapper XML resultMap properties must exist on the Entity or BladeX BaseEntity/TenantEntity; ");
+        sb.append("SELECT columns must exist in the generated DDL and parameter prefixes must match the Mapper interface.\n");
+        sb.append("- Controllers must use the exact generated VO/IVO/UVO/QVO packages and call the public business entry methods ");
+        sb.append("declared by IService. Internal check/validate helpers may remain inside ServiceImpl.\n");
+        sb.append("- Keep Java/validation/Swagger/package conventions from the reference profile.\n");
+        sb.append("- Return the complete repaired file only, without explanation or markdown fences.\n");
+        return new Prompt(buildSystemPrompt(task), sb.toString());
+    }
+
+    /**
      * 构建 Entity↔DDL 修复提示词 — 以 DDL 为契约源头,重生成与表结构不一致的 Entity。
      *
      * <p>场景: Entity 与 DDL 不一致(缺列/类型不符/多租户丢失),导致编译或运行失败。

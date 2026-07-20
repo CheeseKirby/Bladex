@@ -60,6 +60,7 @@ public class BladeXCodeAgent {
     /** 跨文件契约校验器 — 无状态工具, 直接持有实例 */
     private final CrossFileValidator crossFileValidator = new CrossFileValidator();
     private final GeneratedProjectValidator generatedProjectValidator = new GeneratedProjectValidator();
+    private final ProjectQualityRepairer projectQualityRepairer;
 
     /** 拓扑排序器(H8 拆出)- 子方案 DAG 排序 + 依赖解析 */
     private final TopologySorter topologySorter;
@@ -99,6 +100,8 @@ public class BladeXCodeAgent {
         this.topologySorter = topologySorter;
         this.generatedFileStore = generatedFileStore;
         this.statusNotifier = statusNotifier;
+        this.projectQualityRepairer = new ProjectQualityRepairer(generatedProjectValidator, crossFileValidator,
+                conventionValidator != null ? conventionValidator : new ConventionValidator());
     }
 
     /**
@@ -158,13 +161,27 @@ public class BladeXCodeAgent {
         //    无依赖关系的并列子方案继续执行,让 Part A 拿到尽可能多的部分结果。
         Map<Long, List<AtomicTask>> plannedTasks = new LinkedHashMap<>();
         List<ExpectedDeliverable> expectedDeliverables = new ArrayList<>();
+        PlannedTaskRegistry taskRegistry = new PlannedTaskRegistry();
         for (AiSubPlan plannedSubPlan : executionOrder) {
-            List<AtomicTask> subPlanTasks = parseAtomicTasks(plannedSubPlan, generationContext);
-            subPlanTasks.forEach(task -> task.setSourceSubPlanId(plannedSubPlan.getId()));
-            plannedTasks.put(plannedSubPlan.getId(), subPlanTasks);
-            for (AtomicTask task : subPlanTasks) {
+            List<AtomicTask> parsedTasks = parseAtomicTasks(plannedSubPlan, generationContext);
+            List<AtomicTask> acceptedTasks = new ArrayList<>();
+            for (AtomicTask task : parsedTasks) {
+                task.setSourceSubPlanId(plannedSubPlan.getId());
+                PlannedTaskRegistry.Registration registration = taskRegistry.claim(plannedSubPlan.getId(), task);
+                if (!registration.accepted()) {
+                    PlannedTaskRegistry.Claim owner = registration.owner();
+                    String reason = "rule=" + registration.rule() + ", ownerSubPlanId=" + owner.subPlanId()
+                            + ", ownerPath=" + owner.targetPath();
+                    log.warn("Plan task skipped because its target is already owned: subPlanId={}, path={}, {}",
+                            plannedSubPlan.getId(), task.getTargetPath(), reason);
+                    logExecution(plannedSubPlan.getId(), "PLAN_TASK_DEDUP", task.getTargetPath(),
+                            "SKIPPED", reason, null);
+                    continue;
+                }
+                acceptedTasks.add(task);
                 expectedDeliverables.add(ExpectedDeliverable.from(plannedSubPlan.getId(), task));
             }
+            plannedTasks.put(plannedSubPlan.getId(), acceptedTasks);
         }
 
         boolean expectsApi = expectedDeliverables.stream()
@@ -240,7 +257,13 @@ public class BladeXCodeAgent {
         retryPlanWideVoEntityMismatches(plan, generationContext);
         repairPackageDeclarations(plan);
 
-        // 3.6 全 plan 级跨文件契约校验(修复后跑,反映修复后真实状态)。
+        // 3.6 Strict project-quality repair loop. Deterministic fixes run first; Mapper/Controller errors are
+        //     regenerated with the complete relevant project contract, persisted, and revalidated before status.
+        List<AtomicTask> allPlannedTasks = plannedTasks.values().stream().flatMap(Collection::stream).toList();
+        List<GeneratedProjectValidator.Issue> projectIssues = repairPlanWideProjectQuality(
+                plan, expectedDeliverables, generationContext, allPlannedTasks);
+
+        // 3.6b Final cross-file validation runs after project-quality repair so status reflects persisted files.
         Optional<List<CrossFileValidator.ContractIssue>> finalContractValidation = validatePlanWideContracts(plan);
         boolean finalValidationSucceeded = finalContractValidation.isPresent();
         long finalContractErrorCount = finalContractValidation
@@ -250,8 +273,6 @@ public class BladeXCodeAgent {
                 .map(issues -> issues.size() - issues.stream().filter(CrossFileValidator.ContractIssue::isError).count())
                 .orElse(0L);
 
-        List<GeneratedProjectValidator.Issue> projectIssues = generatedProjectValidator.validate(
-                generatedFileStore.loadPlanFiles(plan), expectedDeliverables, generationContext, referenceProjectIndex);
         long projectQualityErrorCount = projectIssues.stream().filter(GeneratedProjectValidator.Issue::isError).count();
         long projectQualityWarningCount = projectIssues.size() - projectQualityErrorCount;
         if (!projectIssues.isEmpty()) {
@@ -295,7 +316,6 @@ public class BladeXCodeAgent {
                 .anyMatch(sp -> sp.getStatus() == SubPlanStatus.COMPLETED_WITH_ERRORS);
         plan.setStatus(determineFinalPlanStatus(
                 allSuccess, hasSubPlanErrors, finalContractErrorCount + projectQualityErrorCount, compileFailed));
-        List<AtomicTask> allPlannedTasks = plannedTasks.values().stream().flatMap(Collection::stream).toList();
         GenerationReportWriter.write(plan, generatedFileStore.loadPlanFiles(plan), expectedDeliverables,
                 allPlannedTasks, projectIssues, objectMapper);
         planMapper.updateById(plan);
@@ -908,13 +928,14 @@ public class BladeXCodeAgent {
         String moduleName = generationContext.identity().moduleName();
 
         String title = subPlan.getTitle() == null ? "" : subPlan.getTitle();
-        String tLower = title.toLowerCase();
         String fullContext = "【子方案完整上下文】\n" + content;
+
+        SubPlanLayerClassifier.Classification classification = SubPlanLayerClassifier.classify(title, content);
 
         List<AtomicTask> tasks = new ArrayList<>();
 
         // 1. DDL — 标题含 "DDL/数据库/建表/SQL"（落 doc/sql/{module}）
-        if (tLower.contains("ddl") || title.contains("数据库") || title.contains("建表") || title.contains("sql")) {
+        if (classification.ddl()) {
             tasks.add(buildTask(TaskType.DDL_STATEMENT,
                     title + " — 生成数据库 DDL\n\n" + fullContext,
                     BladeXModuleLayout.ddlPath(generationContext),
@@ -922,7 +943,7 @@ public class BladeXCodeAgent {
         }
 
         // 2. Entity — 标题含 "Entity/实体"（落 API 模块 pojo.entity）
-        if (title.contains("Entity") || title.contains("实体")) {
+        if (classification.entity()) {
             tasks.add(buildTask(TaskType.STANDARD_CRUD_ENTITY,
                     title + " — 生成 Entity 类 (" + entityName + ")\n\n" + fullContext,
                     BladeXModuleLayout.entityPath(generationContext, entityName),
@@ -930,7 +951,7 @@ public class BladeXCodeAgent {
         }
 
         // 3. VO 类 — 标题含 "VO/视图",生成所有在内容里被提及的 VO 类（落 API 模块 pojo.vo）
-        if (title.contains("VO") || title.contains("视图")) {
+        if (classification.vo()) {
             for (String suffix : new String[]{"QVO", "IVO", "UVO", "VO", "EVO"}) {
                     tasks.add(buildTask(TaskType.OTHER,
                     title + " — 生成 " + entityName + suffix + " 类\n\n" + voInstructions(suffix, entityName) + "\n\n" + fullContext,
@@ -940,7 +961,7 @@ public class BladeXCodeAgent {
         }
 
         // 4. Mapper — 标题含 "Mapper" 或 "Service"(Service 子方案通常同时含 Mapper)（落 IMPL 模块 mapper）
-        if (title.contains("Mapper") || title.contains("Service") || title.contains("服务")) {
+        if (classification.mapper()) {
             tasks.add(buildTask(TaskType.CUSTOM_MAPPER,
                     title + " — 生成 " + entityName + "Mapper 接口\n\n" + fullContext,
                     BladeXModuleLayout.mapperJavaPath(generationContext, entityName),
@@ -953,7 +974,7 @@ public class BladeXCodeAgent {
         }
 
         // 5. Service 接口 + 实现（落 IMPL 模块 service / service.impl）
-        if (title.contains("Service") || title.contains("服务")) {
+        if (classification.service()) {
             tasks.add(buildTask(TaskType.STANDARD_CRUD_SERVICE,
                     title + " — 生成 I" + entityName + "Service 接口\n\n" + serviceInterfaceInstructions(entityName) + "\n\n" + fullContext,
                     BladeXModuleLayout.serviceInterfacePath(generationContext, entityName),
@@ -966,7 +987,7 @@ public class BladeXCodeAgent {
         }
 
         // 7. Wrapper（落 IMPL 模块 wrapper；用 WRAPPER 类型命中 buildWrapperSystemPrompt 的 DeptCache 禁令）
-        if (title.contains("Wrapper") || title.contains("包装") || title.contains("Controller")) {
+        if (classification.wrapper()) {
             tasks.add(buildTask(TaskType.WRAPPER,
                     title + " — 生成 " + entityName + "Wrapper 转换类\n\n" + wrapperInstructions(entityName) + "\n\n" + fullContext,
                     BladeXModuleLayout.wrapperPath(generationContext, entityName),
@@ -974,7 +995,7 @@ public class BladeXCodeAgent {
         }
 
         // 8. Controller（落 IMPL 模块 controller）
-        if (title.contains("Controller") || title.contains("控制器") || title.contains("API")) {
+        if (classification.controller()) {
             tasks.add(buildTask(TaskType.STANDARD_CRUD_CONTROLLER,
                     title + " — 生成 " + entityName + "Controller 类\n\n" + controllerInstructions(entityName, moduleName) + "\n\n" + fullContext,
                     BladeXModuleLayout.controllerPath(generationContext, entityName),
@@ -982,7 +1003,7 @@ public class BladeXCodeAgent {
         }
 
         // 9. Excel（落 IMPL 模块 excel）
-        if (title.contains("Excel") || title.contains("导入导出")) {
+        if (classification.excel()) {
             tasks.add(buildTask(TaskType.EXCEL_IMPORT_EXPORT,
                     title + " — 生成 " + entityName + "Excel 类\n\n" + excelInstructions(entityName) + "\n\n" + fullContext,
                     BladeXModuleLayout.excelPath(generationContext, entityName),
@@ -990,7 +1011,7 @@ public class BladeXCodeAgent {
         }
 
         // 10. Feign — description 必须明确接口名 I{Entity}Client,否则 LLM 容易把实体名漂移成其他词（落 API 模块 feign）
-        if (title.contains("Feign") || title.contains("远程")) {
+        if (classification.feign()) {
             tasks.add(buildTask(TaskType.FEIGN_CLIENT,
                     title + " — 生成 Feign 客户端接口 I" + entityName + "Client (实体名: " + entityName + ")\n\n"
                             + feignInstructions(entityName, moduleName) + "\n\n" + fullContext,
@@ -1239,6 +1260,41 @@ public class BladeXCodeAgent {
         logEntry.setStatus("FAILED".equals(action) || "ROLLED_BACK".equals(action) ? "FAILED" : "SUCCESS");
         logEntry.setCreateTime(LocalDateTime.now());
         executionLogMapper.insert(logEntry);
+    }
+
+    private List<GeneratedProjectValidator.Issue> repairPlanWideProjectQuality(
+            AiPlan plan, List<ExpectedDeliverable> expectedDeliverables,
+            GenerationContext generationContext, List<AtomicTask> tasks) {
+        try {
+            Map<String, AtomicTask> tasksByPath = new LinkedHashMap<>();
+            for (AtomicTask task : tasks) {
+                if (task.getTargetPath() != null) {
+                    tasksByPath.put(task.getTargetPath().replace('\\', '/'), task);
+                }
+            }
+            ProjectQualityRepairer.RepairResult result = projectQualityRepairer.repair(
+                    generatedFileStore.loadPlanFiles(plan), expectedDeliverables, generationContext,
+                    referenceProjectIndex, tasksByPath, maxReviewRetries,
+                    (source, projectContext, task, issues) ->
+                            codeGenRouter.fixProjectQuality(source, projectContext, task, issues),
+                    file -> generatedFileStore.persistRepair(plan, file));
+            for (ProjectQualityRepairer.RepairEvent event : result.events()) {
+                logExecution(null, "PLAN_QUALITY_FIX", event.filePath(),
+                        event.success() ? "CREATED" : "FAILED",
+                        "attempt=" + event.attempt() + ", strategy=" + event.strategy() + ": " + event.detail(), null);
+            }
+            long remainingErrors = result.issues().stream().filter(GeneratedProjectValidator.Issue::isError).count();
+            if (!result.events().isEmpty()) {
+                log.info("Project quality repair completed: attempts={}, events={}, remainingErrors={}",
+                        result.attempts(), result.events().size(), remainingErrors);
+            }
+            return result.issues();
+        } catch (Exception e) {
+            log.warn("Project quality repair failed unexpectedly; final validator will report persisted files: {}",
+                    e.getMessage(), e);
+            return generatedProjectValidator.validate(generatedFileStore.loadPlanFiles(plan),
+                    expectedDeliverables, generationContext, referenceProjectIndex);
+        }
     }
 
     /**

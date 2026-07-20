@@ -40,10 +40,14 @@ class CrossFileValidatorTest {
                 "package org.springblade.order.vo; public class OrderIVO {}"
         );
 
-        List<CrossFileValidator.ContractIssue> issues = validator.validate(List.of(controller, ivo));
+        List<CrossFileValidator.ContractIssue> issues = validator.validate(List.of(controller, ivo), true);
 
-        assertTrue(issues.stream().anyMatch(i -> "CROSS-IMPORT-PATH".equals(i.rule)),
-                "应检出 import 包路径不一致");
+        CrossFileValidator.ContractIssue issue = issues.stream()
+                .filter(i -> "CROSS-IMPORT-PATH".equals(i.rule))
+                .findFirst().orElseThrow();
+        assertTrue(issue.isError(), "Plan-wide generated import mismatch must enter the repair loop");
+        assertEquals(controller.getFilePath(), issue.sourceFilePath);
+        assertEquals(ivo.getFilePath(), issue.contractFilePath);
     }
 
     @Test

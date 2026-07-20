@@ -153,6 +153,31 @@ public class BladeCodeGenRouter {
         }
     }
 
+    /** Repairs a file with the complete relevant generated-project contract. */
+    public GenerationResult fixProjectQuality(GeneratedFile fileToFix, String projectContext,
+                                               AtomicTask task, String issueDescription) {
+        try {
+            Prompt fixPrompt = promptBuilder.buildProjectQualityFixPrompt(
+                    issueDescription, fileToFix.getContent(), projectContext, task);
+            log.info("LLM project-quality repair: {}", fileToFix.getFilePath());
+            String rawResponse = llmClient.generate(fixPrompt.getSystemPrompt(), fixPrompt.getUserPrompt());
+            String fixedCode = extractCode(rawResponse, task);
+            if (fixedCode == null) {
+                String preview = rawResponse == null ? "(null)"
+                        : rawResponse.substring(0, Math.min(300, rawResponse.length()));
+                log.warn("Project-quality repair response contained no usable source: filePath={}, rawPreview={}",
+                        fileToFix.getFilePath(), preview);
+                return GenerationResult.failure("LLM",
+                        "Project-quality repair response contained no recognizable source (rawPreview=" + preview + ")");
+            }
+            return GenerationResult.llmSuccess(List.of(
+                    GeneratedFile.modify(fileToFix.getType(), fileToFix.getFilePath(), fixedCode)));
+        } catch (Exception e) {
+            log.error("Project-quality repair failed: {}", fileToFix.getFilePath(), e);
+            return GenerationResult.failure("LLM", e.getMessage());
+        }
+    }
+
     /**
      * Entity↔DDL 修复 — 以 DDL 为契约源头,重生成与表结构不一致的 Entity。
      *

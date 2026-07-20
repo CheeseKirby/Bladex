@@ -140,6 +140,149 @@ class GeneratedProjectValidatorTest {
         assertTrue(issues.stream().noneMatch(GeneratedProjectValidator.Issue::isError), issues.toString());
     }
 
+    @Test
+    void acceptsMapperPropertiesInheritedFromBaseEntity() {
+        GeneratedFile ddl = GeneratedFile.create(TaskType.DDL_STATEMENT, BladeXModuleLayout.ddlPath(context), """
+                CREATE TABLE blade_special_period (
+                  id BIGINT,
+                  period_name VARCHAR(100),
+                  create_user BIGINT,
+                  create_dept BIGINT,
+                  create_time DATETIME,
+                  update_user BIGINT,
+                  update_time DATETIME,
+                  status INT,
+                  is_deleted INT
+                );
+                """);
+        GeneratedFile entity = GeneratedFile.create(TaskType.STANDARD_CRUD_ENTITY,
+                BladeXModuleLayout.entityPath(context, "SpecialPeriod"), """
+                package org.springblade.safeprod.pojo.entity;
+                import org.springblade.core.mp.base.BaseEntity;
+                public class SpecialPeriod extends BaseEntity { private String periodName; }
+                """);
+        GeneratedFile xml = GeneratedFile.create(TaskType.MAPPER_XML,
+                BladeXModuleLayout.mapperXmlPath(context, "SpecialPeriod"), """
+                <mapper><resultMap id="result" type="SpecialPeriod">
+                  <id property="id" column="id"/>
+                  <result property="periodName" column="period_name"/>
+                  <result property="createUser" column="create_user"/>
+                  <result property="createDept" column="create_dept"/>
+                  <result property="createTime" column="create_time"/>
+                  <result property="updateUser" column="update_user"/>
+                  <result property="updateTime" column="update_time"/>
+                  <result property="status" column="status"/>
+                  <result property="isDeleted" column="is_deleted"/>
+                </resultMap></mapper>
+                """);
+
+        List<GeneratedProjectValidator.Issue> issues = new GeneratedProjectValidator()
+                .validate(List.of(ddl, entity, xml), List.of(), context, null);
+
+        assertTrue(issues.stream().noneMatch(issue -> "MAPPER-RESULT-PROPERTY-MISSING".equals(issue.rule())),
+                issues.toString());
+    }
+
+    @Test
+    void acceptsMapperPropertiesInheritedThroughVoEntityAndBaseEntity() {
+        GeneratedFile ddl = GeneratedFile.create(TaskType.DDL_STATEMENT, BladeXModuleLayout.ddlPath(context), """
+                CREATE TABLE blade_special_period (
+                  id BIGINT,
+                  period_name VARCHAR(100),
+                  create_user BIGINT,
+                  create_time DATETIME,
+                  status INT,
+                  is_deleted INT
+                );
+                """);
+        GeneratedFile entity = GeneratedFile.create(TaskType.STANDARD_CRUD_ENTITY,
+                BladeXModuleLayout.entityPath(context, "SpecialPeriod"), """
+                package org.springblade.safeprod.pojo.entity;
+                import org.springblade.core.mp.base.BaseEntity;
+                public class SpecialPeriod extends BaseEntity { private String periodName; }
+                """);
+        GeneratedFile vo = GeneratedFile.create(TaskType.OTHER,
+                BladeXModuleLayout.voPath(context, "SpecialPeriod", "VO"), """
+                package org.springblade.safeprod.pojo.vo;
+                import org.springblade.safeprod.pojo.entity.SpecialPeriod;
+                public class SpecialPeriodVO extends SpecialPeriod { private String periodNameDesc; }
+                """);
+        GeneratedFile xml = GeneratedFile.create(TaskType.MAPPER_XML,
+                BladeXModuleLayout.mapperXmlPath(context, "SpecialPeriod"), """
+                <mapper>
+                  <resultMap id="vo" type="org.springblade.safeprod.pojo.vo.SpecialPeriodVO">
+                    <id property="id" column="id"/>
+                    <result property="periodName" column="period_name"/>
+                    <result property="createUser" column="create_user"/>
+                    <result property="createTime" column="create_time"/>
+                    <result property="status" column="status"/>
+                    <result property="isDeleted" column="is_deleted"/>
+                    <result property="periodNameDesc" column="period_name_desc"/>
+                  </resultMap>
+                  <resultMap id="entity" type="org.springblade.safeprod.pojo.entity.SpecialPeriod">
+                    <id property="id" column="id"/>
+                    <result property="periodName" column="period_name"/>
+                  </resultMap>
+                </mapper>
+                """);
+
+        List<GeneratedProjectValidator.Issue> issues = new GeneratedProjectValidator()
+                .validate(List.of(ddl, entity, vo, xml), List.of(), context, null);
+
+        assertTrue(issues.stream().noneMatch(issue -> "MAPPER-RESULT-PROPERTY-MISSING".equals(issue.rule())),
+                issues.toString());
+    }
+
+    @Test
+    void duplicatePathIsReportedOnceWithoutRepeatingDownstreamMapperDiagnostics() {
+        GeneratedFile entity = GeneratedFile.create(TaskType.STANDARD_CRUD_ENTITY,
+                BladeXModuleLayout.entityPath(context, "SpecialPeriod"), """
+                package org.springblade.safeprod.pojo.entity;
+                public class SpecialPeriod { private String periodName; }
+                """);
+        String xmlContent = """
+                <mapper><resultMap id="result" type="SpecialPeriod">
+                  <result property="missingField" column="missing_field"/>
+                </resultMap></mapper>
+                """;
+        GeneratedFile first = GeneratedFile.create(TaskType.MAPPER_XML,
+                BladeXModuleLayout.mapperXmlPath(context, "SpecialPeriod"), xmlContent);
+        GeneratedFile duplicate = GeneratedFile.create(TaskType.MAPPER_XML,
+                BladeXModuleLayout.mapperXmlPath(context, "SpecialPeriod"), xmlContent);
+
+        List<GeneratedProjectValidator.Issue> issues = new GeneratedProjectValidator()
+                .validate(List.of(entity, first, duplicate), List.of(), context, null);
+
+        assertTrue(issues.stream().filter(issue -> "DUPLICATE-PATH".equals(issue.rule())).count() == 1, issues.toString());
+        assertTrue(issues.stream().filter(issue -> "MAPPER-RESULT-PROPERTY-MISSING".equals(issue.rule())).count() == 1,
+                issues.toString());
+    }
+
+    @Test
+    void doesNotRequireControllerToCallInternalValidationHelper() {
+        GeneratedFile service = GeneratedFile.create(TaskType.STANDARD_CRUD_SERVICE,
+                BladeXModuleLayout.serviceInterfacePath(context, "SpecialPeriod"), """
+                package org.springblade.safeprod.service;
+                public interface ISpecialPeriodService {
+                    boolean checkPeriodNameUnique(String name);
+                    boolean importExcel();
+                    java.util.List<String> exportData();
+                }
+                """);
+        GeneratedFile controller = GeneratedFile.create(TaskType.STANDARD_CRUD_CONTROLLER,
+                BladeXModuleLayout.controllerPath(context, "SpecialPeriod"), """
+                package org.springblade.safeprod.controller;
+                public class SpecialPeriodController {
+                    void importData(){ service.importExcel(); }
+                    void export(){ service.exportData(); }
+                }
+                """);
+
+        List<GeneratedProjectValidator.Issue> issues = new GeneratedProjectValidator()
+                .validate(List.of(service, controller), List.of(), context, null);
+
+        assertTrue(issues.stream().noneMatch(issue -> issue.message().contains("checkPeriodNameUnique")), issues.toString());
+    }
     private boolean hasRule(List<GeneratedProjectValidator.Issue> issues, String rule) {
         return issues.stream().anyMatch(issue -> rule.equals(issue.rule()));
     }

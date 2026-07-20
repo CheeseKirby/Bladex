@@ -128,7 +128,8 @@ public class ConventionValidator {
     public ValidationResult validate(GeneratedFile file) {
         List<ValidationResult.ValidationIssue> issues = new ArrayList<>();
 
-        switch (file.getType()) {
+        TaskType taskType = file.getType() == null ? TaskType.OTHER : file.getType();
+        switch (taskType) {
             case STANDARD_CRUD_ENTITY -> validateEntity(file.getContent(), issues);
             case STANDARD_CRUD_CONTROLLER -> validateController(file.getContent(), issues);
             case STANDARD_CRUD_SERVICE, COMPLEX_BUSINESS_SERVICE -> validateService(file.getContent(), issues);

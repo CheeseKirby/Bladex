@@ -6,6 +6,7 @@ import org.springblade.aiworkflow.config.AiWorkflowProperties;
 import org.springblade.aiworkflow.entity.AiGeneratedFile;
 import org.springblade.aiworkflow.entity.AiPlan;
 import org.springblade.aiworkflow.entity.AiSubPlan;
+import org.springblade.aiworkflow.enums.TaskType;
 import org.springblade.aiworkflow.enums.WriteTarget;
 import org.springblade.aiworkflow.mapper.AiGeneratedFileMapper;
 import org.springframework.stereotype.Component;
@@ -13,7 +14,9 @@ import org.springframework.stereotype.Component;
 import java.nio.charset.StandardCharsets;
 import java.time.LocalDateTime;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 
 /** Owns generated-file persistence and repair write-back metadata. */
 @Slf4j
@@ -35,9 +38,24 @@ public class GeneratedFileStore {
     /** Saves generated output for UI inspection. Individual row failures do not abort the workflow. */
     public void saveBatch(AiSubPlan subPlan, AiPlan plan, List<GeneratedFile> files, String action) {
         if (files == null || files.isEmpty()) return;
+        Map<String, AiGeneratedFile> existingByPath = indexFirstRowByPath(
+                generatedFileMapper.selectByPlanId(plan.getId()));
         for (GeneratedFile file : files) {
             try {
-                generatedFileMapper.insert(toEntity(subPlan, plan, file, action));
+                AiGeneratedFile row = toEntity(subPlan, plan, file, action);
+                String path = normalize(file.getFilePath());
+                AiGeneratedFile existing = existingByPath.get(path);
+                if (existing == null) {
+                    generatedFileMapper.insert(row);
+                    existingByPath.put(path, row);
+                } else {
+                    row.setId(existing.getId());
+                    row.setSubPlanId(existing.getSubPlanId());
+                    row.setCreateTime(existing.getCreateTime());
+                    generatedFileMapper.updateById(row);
+                    log.info("Generated-file snapshot updated instead of duplicated: planId={}, ownerSubPlanId={}, path={}",
+                            plan.getId(), existing.getSubPlanId(), file.getFilePath());
+                }
             } catch (Exception e) {
                 log.warn("Generated-file persistence failed: subPlanId={}, path={}",
                         subPlan.getId(), file.getFilePath(), e);
@@ -46,14 +64,46 @@ public class GeneratedFileStore {
     }
 
     public List<GeneratedFile> loadPlanFiles(AiPlan plan) {
-        List<AiGeneratedFile> rows = generatedFileMapper.selectByPlanId(plan.getId());
-        if (rows == null || rows.isEmpty()) return new ArrayList<>();
+        Map<String, AiGeneratedFile> rowsByPath = indexFirstRowByPath(
+                generatedFileMapper.selectByPlanId(plan.getId()));
+        if (rowsByPath.isEmpty()) return new ArrayList<>();
         List<GeneratedFile> files = new ArrayList<>();
-        for (AiGeneratedFile row : rows) {
-            if (row.getFilePath() == null || row.getContent() == null) continue;
-            files.add(new GeneratedFile(null, row.getFilePath(), row.getContent(), row.getAction()));
+        for (AiGeneratedFile row : rowsByPath.values()) {
+            if (row.getContent() == null) continue;
+            files.add(new GeneratedFile(resolveTaskType(row), row.getFilePath(), row.getContent(), row.getAction()));
         }
         return files;
+    }
+
+    private Map<String, AiGeneratedFile> indexFirstRowByPath(List<AiGeneratedFile> rows) {
+        Map<String, AiGeneratedFile> result = new LinkedHashMap<>();
+        if (rows == null) return result;
+        for (AiGeneratedFile row : rows) {
+            String path = normalize(row.getFilePath());
+            if (path == null || path.isBlank()) continue;
+            AiGeneratedFile previous = result.putIfAbsent(path, row);
+            if (previous != null) {
+                log.warn("Duplicate generated-file rows detected; keeping the first owner snapshot: path={}, keptId={}, ignoredId={}",
+                        path, previous.getId(), row.getId());
+            }
+        }
+        return result;
+    }
+
+    private TaskType resolveTaskType(AiGeneratedFile row) {
+        String fileType = row.getFileType();
+        if (fileType == null || fileType.isBlank()) {
+            log.warn("Generated file row has no task type; falling back to OTHER: id={}, path={}",
+                    row.getId(), row.getFilePath());
+            return TaskType.OTHER;
+        }
+        try {
+            return TaskType.fromCode(fileType);
+        } catch (IllegalArgumentException ex) {
+            log.warn("Generated file row has unknown task type {}; falling back to OTHER: id={}, path={}",
+                    fileType, row.getId(), row.getFilePath());
+            return TaskType.OTHER;
+        }
     }
 
     /** Writes a repaired file and updates its database snapshot only when the disk write succeeds. */
@@ -120,6 +170,10 @@ public class GeneratedFileStore {
                 .set("line_count", lineCount)
                 .set("action", "MODIFY");
         generatedFileMapper.update(null, update);
+    }
+
+    private String normalize(String path) {
+        return path == null ? null : path.replace('\\', '/');
     }
 
     private String extractFileName(String path) {

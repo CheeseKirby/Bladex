@@ -24,20 +24,37 @@ public final class GeneratedProjectValidator {
             "(?:private|protected|public)\\s+(?:final\\s+)?([A-Z][A-Za-z0-9_<>?, .]*)\\s+([a-z][A-Za-z0-9_]*)\\s*[;=]");
     private static final Pattern METHOD_CALL = Pattern.compile("\\b([a-z][A-Za-z0-9_]*)\\.([a-zA-Z][A-Za-z0-9_]*)\\s*\\(");
     private static final Pattern XML_PROPERTY = Pattern.compile("property=\"([a-zA-Z][A-Za-z0-9_]*)\"");
+    private static final Pattern RESULT_MAP = Pattern.compile(
+            "(?is)<resultMap\\b[^>]*\\btype=\"(?:[\\w.]+\\.)?([A-Z][A-Za-z0-9_]*)\"[^>]*>(.*?)</resultMap>");
+    private static final Pattern EXTENDS_TYPE = Pattern.compile(
+            "\\b(?:class|interface)\\s+([A-Z][A-Za-z0-9_]*)(?:\\s*<[^>{}]+>)?\\s+extends\\s+([\\w.]+)");
     private static final Pattern JAVA_FIELD = Pattern.compile(
             "\\b(?:private|protected|public)\\s+(?:static\\s+)?(?:final\\s+)?[A-Za-z0-9_<>?, .]+\\s+([a-z][A-Za-z0-9_]*)\\s*(?:[;=])");
     private static final Set<String> EXTERNAL_PREFIXES = Set.of(
             "java.", "javax.", "jakarta.", "lombok.", "org.springframework.", "com.baomidou.",
             "io.swagger.", "cn.hutool.", "com.fasterxml.", "org.apache.", "org.slf4j.",
             "org.springblade.core.", "org.springblade.common.", "org.springblade.modules.");
+    private static final Set<String> BASE_ENTITY_FIELDS = Set.of(
+            "id", "createUser", "createDept", "createTime", "updateUser", "updateTime",
+            "status", "isDeleted", "tenantId");
+    private static final Set<String> INTERNAL_SERVICE_HELPER_PREFIXES = Set.of(
+            "check", "validate", "verify", "assert", "ensure");
 
     public List<Issue> validate(List<GeneratedFile> files, List<ExpectedDeliverable> expected,
                                 GenerationContext context, ReferenceProjectIndex referenceIndex) {
         List<Issue> issues = new ArrayList<>();
         Map<String, List<GeneratedFile>> byPath = new LinkedHashMap<>();
-        for (GeneratedFile file : files) byPath.computeIfAbsent(normalize(file.getFilePath()), k -> new ArrayList<>()).add(file);
+        if (files != null) {
+            for (GeneratedFile file : files) {
+                byPath.computeIfAbsent(normalize(file.getFilePath()), k -> new ArrayList<>()).add(file);
+            }
+        }
+        List<GeneratedFile> canonicalFiles = byPath.values().stream()
+                .filter(group -> !group.isEmpty())
+                .map(group -> group.get(0))
+                .toList();
 
-        for (ExpectedDeliverable deliverable : expected) {
+        for (ExpectedDeliverable deliverable : expected == null ? List.<ExpectedDeliverable>of() : expected) {
             if (deliverable.required() && !byPath.containsKey(normalize(deliverable.targetPath()))) {
                 issues.add(error("DELIVERABLE-MISSING", deliverable.targetPath(),
                         "Required deliverable was not generated for sub-plan " + deliverable.subPlanId()));
@@ -50,8 +67,8 @@ public final class GeneratedProjectValidator {
 
         Map<String, GeneratedFile> fqcnToFile = new LinkedHashMap<>();
         Set<String> generatedFqcns = new LinkedHashSet<>();
-        Map<String, Set<String>> fieldsBySimpleName = new HashMap<>();
-        for (GeneratedFile file : files) {
+        Map<String, TypeShape> typeShapesBySimpleName = new HashMap<>();
+        for (GeneratedFile file : canonicalFiles) {
             String path = normalize(file.getFilePath());
             if (path == null || !path.endsWith(".java") || file.getContent() == null) continue;
             Matcher pkgMatcher = PACKAGE.matcher(file.getContent());
@@ -71,10 +88,11 @@ public final class GeneratedProjectValidator {
                         fqcn + " is also generated at " + previous.getFilePath()));
             }
             generatedFqcns.add(fqcn);
-            Set<String> javaFields = new HashSet<>();
+            Set<String> javaFields = new LinkedHashSet<>();
             Matcher fieldMatcher = JAVA_FIELD.matcher(file.getContent());
             while (fieldMatcher.find()) javaFields.add(fieldMatcher.group(1));
-            fieldsBySimpleName.put(type, javaFields);
+            typeShapesBySimpleName.putIfAbsent(type,
+                    new TypeShape(javaFields, extractParentSimpleName(type, file.getContent())));
 
             String module = BladeXModuleLayout.moduleOfPath(path);
             if (module != null && !module.equals(context.identity().moduleName())) {
@@ -82,6 +100,8 @@ public final class GeneratedProjectValidator {
                         "File belongs to module " + module + " but canonical module is " + context.identity().moduleName()));
             }
         }
+
+        Map<String, Set<String>> fieldsBySimpleName = resolveEffectiveFields(typeShapesBySimpleName);
 
         Set<String> referenceFqcns = new HashSet<>();
         Map<String, IndexedClassInfo> referencesBySimple = new HashMap<>();
@@ -92,10 +112,10 @@ public final class GeneratedProjectValidator {
                 referencesBySimple.putIfAbsent(info.simpleName(), info);
             }
         }
-        GeneratedFile servicePom = files.stream()
+        GeneratedFile servicePom = canonicalFiles.stream()
                 .filter(f -> normalize(f.getFilePath()).equals(BladeXModuleLayout.implPomPath(context)))
                 .findFirst().orElse(null);
-        for (GeneratedFile file : files) {
+        for (GeneratedFile file : canonicalFiles) {
             String path = normalize(file.getFilePath());
             String content = file.getContent();
             if (path == null || content == null || !path.endsWith(".java")) continue;
@@ -122,11 +142,11 @@ public final class GeneratedProjectValidator {
             validateReferenceMethodCalls(path, content, referencesBySimple, issues);
         }
 
-        validateSkeleton(files, context, issues);
-        validateMapperXmlProperties(files, fieldsBySimpleName, issues);
-        validateDatabaseContract(files, context, fieldsBySimpleName, issues);
-        validateControllerServiceClosure(files, context, issues);
-        validatePomModel(files, context, issues);
+        validateSkeleton(canonicalFiles, context, issues);
+        validateMapperXmlProperties(canonicalFiles, fieldsBySimpleName, issues);
+        validateDatabaseContract(canonicalFiles, context, fieldsBySimpleName, issues);
+        validateControllerServiceClosure(canonicalFiles, context, issues);
+        validatePomModel(canonicalFiles, context, issues);
         return issues;
     }
 
@@ -174,16 +194,18 @@ public final class GeneratedProjectValidator {
         for (GeneratedFile file : files) {
             String path = normalize(file.getFilePath());
             if (path == null || !path.endsWith("Mapper.xml") || file.getContent() == null) continue;
-            Matcher type = Pattern.compile("type=\"(?:[\\w.]+\\.)?([A-Z][A-Za-z0-9_]*)\"").matcher(file.getContent());
-            if (!type.find()) continue;
-            Set<String> fields = fieldsBySimple.get(type.group(1));
-            if (fields == null) continue;
-            Matcher properties = XML_PROPERTY.matcher(file.getContent());
-            while (properties.find()) {
-                String property = properties.group(1);
-                if (!fields.contains(property)) {
-                    issues.add(error("MAPPER-RESULT-PROPERTY-MISSING", path,
-                            "resultMap property " + property + " is absent from " + type.group(1)));
+            Matcher resultMaps = RESULT_MAP.matcher(file.getContent());
+            while (resultMaps.find()) {
+                String typeName = resultMaps.group(1);
+                Set<String> fields = fieldsBySimple.get(typeName);
+                if (fields == null) continue;
+                Matcher properties = XML_PROPERTY.matcher(resultMaps.group(2));
+                while (properties.find()) {
+                    String property = properties.group(1);
+                    if (!fields.contains(property)) {
+                        issues.add(error("MAPPER-RESULT-PROPERTY-MISSING", path,
+                                "resultMap property " + property + " is absent from " + typeName));
+                    }
                 }
             }
         }
@@ -260,11 +282,57 @@ public final class GeneratedProjectValidator {
         Set<String> serviceMethods = new LinkedHashSet<>();
         while (methods.find()) serviceMethods.add(methods.group(1));
         for (String method : serviceMethods) {
+            if (isInternalServiceHelper(method)) continue;
             if (!Pattern.compile("\\.\\s*" + Pattern.quote(method) + "\\s*\\(").matcher(controller.getContent()).find()) {
                 issues.add(error("CONTROLLER-SERVICE-BUSINESS-GAP", controller.getFilePath(),
                         "Controller does not call custom service method " + method));
             }
         }
+    }
+
+    private String extractParentSimpleName(String typeName, String content) {
+        if (content == null) return null;
+        Matcher matcher = EXTENDS_TYPE.matcher(content);
+        while (matcher.find()) {
+            if (!typeName.equals(matcher.group(1))) continue;
+            String parent = matcher.group(2);
+            int dot = parent.lastIndexOf('.');
+            return dot >= 0 ? parent.substring(dot + 1) : parent;
+        }
+        return null;
+    }
+
+    private Map<String, Set<String>> resolveEffectiveFields(Map<String, TypeShape> shapes) {
+        Map<String, Set<String>> resolved = new HashMap<>();
+        for (String typeName : shapes.keySet()) {
+            resolveEffectiveFields(typeName, shapes, resolved, new LinkedHashSet<>());
+        }
+        return resolved;
+    }
+
+    private Set<String> resolveEffectiveFields(String typeName, Map<String, TypeShape> shapes,
+                                               Map<String, Set<String>> resolved, Set<String> visiting) {
+        Set<String> cached = resolved.get(typeName);
+        if (cached != null) return cached;
+        TypeShape shape = shapes.get(typeName);
+        if (shape == null) return Set.of();
+        if (!visiting.add(typeName)) return new LinkedHashSet<>(shape.directFields());
+
+        Set<String> effective = new LinkedHashSet<>(shape.directFields());
+        String parent = shape.parentSimpleName();
+        if ("BaseEntity".equals(parent) || "TenantEntity".equals(parent)) {
+            effective.addAll(BASE_ENTITY_FIELDS);
+        } else if (parent != null && shapes.containsKey(parent)) {
+            effective.addAll(resolveEffectiveFields(parent, shapes, resolved, visiting));
+        }
+        visiting.remove(typeName);
+        resolved.put(typeName, effective);
+        return effective;
+    }
+
+    private boolean isInternalServiceHelper(String method) {
+        String lower = method == null ? "" : method.toLowerCase(Locale.ROOT);
+        return INTERNAL_SERVICE_HELPER_PREFIXES.stream().anyMatch(lower::startsWith);
     }
 
     private void validatePomModel(List<GeneratedFile> files, GenerationContext context, List<Issue> issues) {
@@ -334,6 +402,9 @@ public final class GeneratedProjectValidator {
 
     private Issue error(String rule, String file, String message) {
         return new Issue("ERROR", rule, file, message);
+    }
+
+    private record TypeShape(Set<String> directFields, String parentSimpleName) {
     }
 
     public record Issue(String severity, String rule, String filePath, String message) {

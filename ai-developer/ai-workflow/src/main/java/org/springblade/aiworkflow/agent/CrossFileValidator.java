@@ -160,10 +160,10 @@ public class CrossFileValidator {
                         String expectedPkg = target.pkg;
                         String importPkg = imped.substring(0, Math.max(0, imped.length() - simpleName.length() - 1));
                         if (!expectedPkg.equals(importPkg)) {
-                            issues.add(new ContractIssue("WARN",
+                            issues.add(new ContractIssue(planWide ? "ERROR" : "WARN",
                                     cu.getPrimaryTypeName().orElse("?") + " import 的 " + simpleName
                                             + " 包路径不一致: import=" + importPkg + ", 实际=" + expectedPkg,
-                                    "CROSS-IMPORT-PATH"));
+                                    "CROSS-IMPORT-PATH", cuToFilePath.get(cu), target.filePath));
                         }
                     }
                 }
