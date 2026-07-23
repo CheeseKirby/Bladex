@@ -24,6 +24,12 @@ public final class GeneratedProjectValidator {
             "(?:private|protected|public)\\s+(?:final\\s+)?([A-Z][A-Za-z0-9_<>?, .]*)\\s+([a-z][A-Za-z0-9_]*)\\s*[;=]");
     private static final Pattern METHOD_CALL = Pattern.compile("\\b([a-z][A-Za-z0-9_]*)\\.([a-zA-Z][A-Za-z0-9_]*)\\s*\\(");
     private static final Pattern XML_PROPERTY = Pattern.compile("property=\"([a-zA-Z][A-Za-z0-9_]*)\"");
+    private static final Pattern XML_COLUMN = Pattern.compile("column=\"([a-z][a-z0-9_]*)\"");
+    private static final Pattern XML_MAPPING_TAG = Pattern.compile("(?is)<(?:id|result)\\b[^>]*>");
+    private static final Pattern QVO_PROPERTY_REFERENCE = Pattern.compile("\\bqvo\\.([a-z][A-Za-z0-9_]*)\\b");
+    private static final Pattern BLADEX2_LONG_SELECT_COUNT = Pattern.compile(
+            "(?m)\\b(?:Long|long)\\s+([a-z][A-Za-z0-9_]*)\\s*=\\s*(?:this\\.)?"
+                    + "(?:baseMapper|[a-z][A-Za-z0-9_]*Mapper)\\.selectCount\\s*\\(");
     private static final Pattern RESULT_MAP = Pattern.compile(
             "(?is)<resultMap\\b[^>]*\\btype=\"(?:[\\w.]+\\.)?([A-Z][A-Za-z0-9_]*)\"[^>]*>(.*?)</resultMap>");
     private static final Pattern EXTENDS_TYPE = Pattern.compile(
@@ -95,9 +101,10 @@ public final class GeneratedProjectValidator {
                     new TypeShape(javaFields, extractParentSimpleName(type, file.getContent())));
 
             String module = BladeXModuleLayout.moduleOfPath(path);
-            if (module != null && !module.equals(context.identity().moduleName())) {
+            if (module != null && !belongsToCanonicalPhysicalModule(path, context.identity())) {
                 issues.add(error("MODULE-IDENTITY-MISMATCH", path,
-                        "File belongs to module " + module + " but canonical module is " + context.identity().moduleName()));
+                        "File belongs to physical module " + module + " but canonical modules are "
+                                + context.identity().apiModuleName() + " / " + context.identity().serviceModuleName()));
             }
         }
 
@@ -142,12 +149,45 @@ public final class GeneratedProjectValidator {
             validateReferenceMethodCalls(path, content, referencesBySimple, issues);
         }
 
-        validateSkeleton(canonicalFiles, context, issues);
+        validateSkeleton(canonicalFiles, context, referenceIndex, issues);
         validateMapperXmlProperties(canonicalFiles, fieldsBySimpleName, issues);
         validateDatabaseContract(canonicalFiles, context, fieldsBySimpleName, issues);
+        validateCanonicalDomainContract(canonicalFiles, context, fieldsBySimpleName, issues);
+        validateCanonicalApiModels(canonicalFiles, context, fieldsBySimpleName, issues);
         validateControllerServiceClosure(canonicalFiles, context, issues);
+        validateFrameworkCompatibility(canonicalFiles, context, issues);
         validatePomModel(canonicalFiles, context, issues);
         return issues;
+    }
+
+    private void validateFrameworkCompatibility(List<GeneratedFile> files, GenerationContext context,
+                                                List<Issue> issues) {
+        String frameworkVersion = context == null || context.referenceProfile() == null
+                ? null : context.referenceProfile().bladeXVersion();
+        if (frameworkVersion == null || !frameworkVersion.matches("^2(?:\\..*)?$")) return;
+        for (GeneratedFile file : files) {
+            String path = normalize(file.getFilePath());
+            String content = file.getContent();
+            if (path == null || content == null || !path.endsWith(".java")) continue;
+            Matcher matcher = BLADEX2_LONG_SELECT_COUNT.matcher(content);
+            while (matcher.find()) {
+                issues.add(error("FRAMEWORK-SELECTCOUNT-TYPE-MISMATCH", path,
+                        "BladeX " + frameworkVersion + " / MyBatis-Plus 3.1 selectCount returns Integer; variable "
+                                + matcher.group(1) + " cannot be declared as Long"));
+            }
+        }
+    }
+
+    private boolean belongsToCanonicalPhysicalModule(String path, GenerationIdentity identity) {
+        String normalized = normalize(path);
+        if (normalized == null) return true;
+        if (normalized.startsWith("blade-service-api/")) {
+            return normalized.startsWith("blade-service-api/" + identity.apiModuleName() + "/");
+        }
+        if (normalized.startsWith("blade-service/")) {
+            return normalized.startsWith("blade-service/" + identity.serviceModuleName() + "/");
+        }
+        return true;
     }
 
     private void validateReferenceMethodCalls(String path, String content,
@@ -172,21 +212,28 @@ public final class GeneratedProjectValidator {
         }
     }
 
-    private void validateSkeleton(List<GeneratedFile> files, GenerationContext context, List<Issue> issues) {
+    private void validateSkeleton(List<GeneratedFile> files, GenerationContext context,
+                                  ReferenceProjectIndex referenceIndex, List<Issue> issues) {
         Set<String> paths = new HashSet<>();
         for (GeneratedFile file : files) paths.add(normalize(file.getFilePath()));
         boolean hasApi = paths.stream().anyMatch(path -> path.startsWith("blade-service-api/"));
         boolean hasImpl = paths.stream().anyMatch(path -> path.startsWith("blade-service/"));
-        if (hasApi && !paths.contains(BladeXModuleLayout.apiPomPath(context))) {
-            issues.add(error("API-POM-MISSING", BladeXModuleLayout.apiPomPath(context), "Generated API module has no pom.xml"));
+        String apiPom = BladeXModuleLayout.apiPomPath(context);
+        if (hasApi && !pathAvailable(paths, apiPom, referenceIndex)) {
+            issues.add(error("API-POM-MISSING", apiPom,
+                    "API module has no generated or reference-project pom.xml"));
         }
         if (hasImpl) {
             for (String required : List.of(BladeXModuleLayout.implPomPath(context),
                     BladeXModuleLayout.applicationPath(context), BladeXModuleLayout.bootstrapPath(context))) {
-                if (!paths.contains(required)) issues.add(error("SERVICE-SKELETON-MISSING", required,
-                        "Generated service module skeleton is incomplete"));
+                if (!pathAvailable(paths, required, referenceIndex)) issues.add(error("SERVICE-SKELETON-MISSING", required,
+                        "Service module skeleton is absent from both generated output and the reference project"));
             }
         }
+    }
+
+    private boolean pathAvailable(Set<String> generatedPaths, String required, ReferenceProjectIndex referenceIndex) {
+        return generatedPaths.contains(required) || (referenceIndex != null && referenceIndex.pathExists(required));
     }
 
     private void validateMapperXmlProperties(List<GeneratedFile> files, Map<String, Set<String>> fieldsBySimple,
@@ -213,6 +260,9 @@ public final class GeneratedProjectValidator {
 
     private void validateDatabaseContract(List<GeneratedFile> files, GenerationContext context,
                                           Map<String, Set<String>> fieldsBySimpleName, List<Issue> issues) {
+        String entityPath = files.stream().map(GeneratedFile::getFilePath).map(this::normalize)
+                .filter(path -> path != null && path.endsWith("/entity/" + context.identity().entityName() + ".java"))
+                .findFirst().orElse(BladeXModuleLayout.entityPath(context, context.identity().entityName()));
         Set<String> ddlColumns = new LinkedHashSet<>();
         Pattern column = Pattern.compile("(?m)^\\s*`?([a-z][a-z0-9_]*)`?\\s+"
                 + "(?:BIGINT|INT|INTEGER|VARCHAR|CHAR|TEXT|MEDIUMTEXT|DATETIME|TIMESTAMP|DATE|TIME|DECIMAL|DOUBLE|FLOAT|TINYINT|BOOLEAN|JSON)\\b",
@@ -228,11 +278,14 @@ public final class GeneratedProjectValidator {
         Set<String> baseColumns = Set.of("id", "create_user", "create_dept", "create_time", "update_user",
                 "update_time", "status", "is_deleted", "tenant_id");
         Set<String> entityFields = fieldsBySimpleName.getOrDefault(context.identity().entityName(), Set.of());
+        String ddlPath = files.stream().map(GeneratedFile::getFilePath).map(this::normalize)
+                .filter(path -> path != null && path.endsWith(".sql"))
+                .findFirst().orElse(BladeXModuleLayout.ddlPath(context));
         for (String field : entityFields) {
             if ("serialVersionUID".equals(field)) continue;
             String dbColumn = camelToSnake(field);
             if (!ddlColumns.contains(dbColumn) && !baseColumns.contains(dbColumn)) {
-                issues.add(error("ENTITY-DDL-COLUMN-MISSING", null,
+                issues.add(error("ENTITY-DDL-COLUMN-MISSING", entityPath,
                         "Entity field " + field + " has no DDL column " + dbColumn));
             }
         }
@@ -240,8 +293,42 @@ public final class GeneratedProjectValidator {
             if (baseColumns.contains(dbColumn)) continue;
             String field = snakeToCamel(dbColumn);
             if (!entityFields.contains(field)) {
-                issues.add(error("DDL-ENTITY-FIELD-MISSING", null,
+                issues.add(error("DDL-ENTITY-FIELD-MISSING", entityPath,
                         "DDL column " + dbColumn + " has no field " + field + " in " + context.identity().entityName()));
+            }
+        }
+
+        Set<String> requiredMappedColumns = new LinkedHashSet<>();
+        Set<String> qvoFields = fieldsBySimpleName.getOrDefault(context.identity().entityName() + "QVO", Set.of());
+        for (GeneratedFile file : files) {
+            String path = normalize(file.getFilePath());
+            if (path == null || !path.endsWith("Mapper.xml") || file.getContent() == null) continue;
+            Matcher mappingTags = XML_MAPPING_TAG.matcher(file.getContent());
+            while (mappingTags.find()) {
+                Matcher columnAttr = XML_COLUMN.matcher(mappingTags.group());
+                Matcher propertyAttr = XML_PROPERTY.matcher(mappingTags.group());
+                if (!columnAttr.find() || !propertyAttr.find()) continue;
+                String property = propertyAttr.group(1);
+                if (entityFields.contains(property) || BASE_ENTITY_FIELDS.contains(property)) {
+                    requiredMappedColumns.add(columnAttr.group(1).toLowerCase(Locale.ROOT));
+                }
+            }
+            Set<String> missingQvoProperties = new LinkedHashSet<>();
+            Matcher qvoReferences = QVO_PROPERTY_REFERENCE.matcher(file.getContent());
+            while (qvoReferences.find()) {
+                String property = qvoReferences.group(1);
+                if (!qvoFields.contains(property)) missingQvoProperties.add(property);
+            }
+            for (String property : missingQvoProperties) {
+                issues.add(error("MAPPER-PARAM-PROPERTY-MISSING", path,
+                        "Mapper XML references qvo." + property + " but "
+                                + context.identity().entityName() + "QVO does not declare that property"));
+            }
+        }
+        for (String mappedColumn : requiredMappedColumns) {
+            if (!ddlColumns.contains(mappedColumn)) {
+                issues.add(error("MAPPER-DDL-COLUMN-MISSING", ddlPath,
+                        "Mapper result mapping requires column " + mappedColumn + " absent from generated DDL"));
             }
         }
 
@@ -263,6 +350,167 @@ public final class GeneratedProjectValidator {
                 }
             }
         }
+    }
+
+    private void validateCanonicalDomainContract(List<GeneratedFile> files, GenerationContext context,
+                                                 Map<String, Set<String>> fieldsBySimpleName,
+                                                 List<Issue> issues) {
+        CanonicalDomainContract contract = context.domainContract();
+        if (contract == null || contract.isEmpty()) return;
+        String entityName = context.identity().entityName();
+        String entityPath = files.stream().map(GeneratedFile::getFilePath).map(this::normalize)
+                .filter(path -> path != null && path.endsWith("/entity/" + entityName + ".java"))
+                .findFirst().orElse(BladeXModuleLayout.entityPath(context, entityName));
+        GeneratedFile entityFile = files.stream()
+                .filter(file -> entityPath.equals(normalize(file.getFilePath())))
+                .findFirst().orElse(null);
+        Set<String> entityFields = fieldsBySimpleName.getOrDefault(entityName, Set.of());
+        Map<String, String> entityTypes = new LinkedHashMap<>();
+        if (entityFile != null && entityFile.getContent() != null) {
+            Matcher matcher = FIELD.matcher(entityFile.getContent());
+            while (matcher.find()) entityTypes.put(matcher.group(2), matcher.group(1).replaceAll("\s+", ""));
+        }
+        for (CanonicalDomainContract.DomainField field : contract.persistentFields()) {
+            if (!entityFields.contains(field.name())) {
+                issues.add(error("CANONICAL-ENTITY-FIELD-MISSING", entityPath,
+                        "Canonical field " + field.name() + " (" + field.javaType() + ") is absent from " + entityName));
+            } else if (entityTypes.containsKey(field.name())
+                    && !simpleType(entityTypes.get(field.name())).equals(simpleType(field.javaType()))) {
+                issues.add(error("CANONICAL-ENTITY-FIELD-TYPE", entityPath,
+                        "Canonical field " + field.name() + " must use " + field.javaType()
+                                + " but Entity declares " + entityTypes.get(field.name())));
+            }
+        }
+        for (String field : entityFields) {
+            if ("serialVersionUID".equals(field) || contract.isBaseField(field)) continue;
+            if (!contract.persistentNames().contains(field)) {
+                issues.add(error("CANONICAL-ENTITY-FIELD-UNEXPECTED", entityPath,
+                        "Entity field " + field + " is not part of the authoritative persistent contract"));
+            }
+        }
+
+        String ddlPath = files.stream().map(GeneratedFile::getFilePath).map(this::normalize)
+                .filter(path -> path != null && path.endsWith(".sql"))
+                .findFirst().orElse(BladeXModuleLayout.ddlPath(context));
+        GeneratedFile ddlFile = files.stream().filter(file -> ddlPath.equals(normalize(file.getFilePath())))
+                .findFirst().orElse(null);
+        Set<String> tableColumns = ddlFile == null ? Set.of()
+                : extractPrimaryTableColumns(ddlFile.getContent(), context.identity().tableName());
+        for (CanonicalDomainContract.DomainField field : contract.persistentFields()) {
+            if (!tableColumns.contains(field.columnName())) {
+                issues.add(error("CANONICAL-DDL-COLUMN-MISSING", ddlPath,
+                        "Canonical column " + field.columnName() + " for field " + field.name()
+                                + " is absent from table " + context.identity().tableName()));
+            }
+        }
+    }
+
+    private Set<String> extractPrimaryTableColumns(String sql, String tableName) {
+        if (sql == null) return Set.of();
+        Pattern table = Pattern.compile("(?is)CREATE\\s+TABLE\\s+(?:IF\\s+NOT\\s+EXISTS\\s+)?`?"
+                + Pattern.quote(tableName) + "`?\\s*\\((.*?)\\)\\s*ENGINE");
+        Matcher tableMatcher = table.matcher(sql);
+        if (!tableMatcher.find()) return Set.of();
+        Set<String> result = new LinkedHashSet<>();
+        Matcher column = Pattern.compile("(?m)^\\s*`([a-z][a-z0-9_]*)`\\s+").matcher(tableMatcher.group(1));
+        while (column.find()) result.add(column.group(1));
+        return result;
+    }
+
+    private String simpleType(String type) {
+        if (type == null) return "";
+        String value = type.replaceAll("<.*>", "").trim();
+        int dot = value.lastIndexOf('.');
+        return dot >= 0 ? value.substring(dot + 1) : value;
+    }
+
+    private void validateCanonicalApiModels(List<GeneratedFile> files, GenerationContext context,
+                                            Map<String, Set<String>> fieldsBySimpleName,
+                                            List<Issue> issues) {
+        CanonicalDomainContract contract = context.domainContract();
+        if (contract == null || contract.isEmpty()) return;
+        String entity = context.identity().entityName();
+        validateInputModel(files, fieldsBySimpleName, contract, entity + "IVO", false, issues);
+        validateInputModel(files, fieldsBySimpleName, contract, entity + "UVO", true, issues);
+        GeneratedFile vo = findJavaType(files, entity + "VO");
+        if (vo != null) {
+            Set<String> fields = fieldsBySimpleName.getOrDefault(entity + "VO", Set.of());
+            for (String derived : contract.derivedNames()) {
+                if (!fields.contains(derived)) {
+                    issues.add(error("CANONICAL-VO-DERIVED-FIELD-MISSING", normalize(vo.getFilePath()),
+                            entity + "VO must expose reviewed derived field " + derived));
+                }
+            }
+            Set<String> allowed = new LinkedHashSet<>(contract.persistentNames());
+            allowed.addAll(contract.derivedNames());
+            boolean extendsEntity = Pattern.compile("\\bextends\\s+" + Pattern.quote(entity) + "\\b")
+                    .matcher(vo.getContent()).find();
+            if (extendsEntity) {
+                Matcher directFields = FIELD.matcher(vo.getContent());
+                while (directFields.find()) {
+                    String field = directFields.group(2);
+                    if ("serialVersionUID".equals(field)) continue;
+                    if (contract.isBaseField(field) || contract.persistentNames().contains(field)) {
+                        issues.add(error("CANONICAL-VO-FIELD-SHADOW", normalize(vo.getFilePath()),
+                                entity + "VO redeclares inherited canonical field " + field));
+                    }
+                }
+            }
+            for (String field : fields) {
+                if ("serialVersionUID".equals(field) || contract.isBaseField(field) || allowed.contains(field)) continue;
+                issues.add(error("CANONICAL-VO-FIELD-UNEXPECTED", normalize(vo.getFilePath()),
+                        entity + "VO field " + field + " is absent from the authoritative persistent/derived contract"));
+            }
+        }
+    }
+
+    private void validateInputModel(List<GeneratedFile> files, Map<String, Set<String>> fieldsBySimpleName,
+                                    CanonicalDomainContract contract, String typeName,
+                                    boolean updateModel, List<Issue> issues) {
+        GeneratedFile file = findJavaType(files, typeName);
+        if (file == null || file.getContent() == null) return;
+        String path = normalize(file.getFilePath());
+        Set<String> fields = fieldsBySimpleName.getOrDefault(typeName, Set.of());
+        String validationSource = file.getContent();
+        if (updateModel) {
+            GeneratedFile createModel = findJavaType(files, contract.identity().entityName() + "IVO");
+            if (createModel != null && createModel.getContent() != null) {
+                validationSource = createModel.getContent() + "\n" + validationSource;
+            }
+        }
+        for (CanonicalDomainContract.DomainField field : contract.persistentFields()) {
+            if (!fields.contains(field.name())) {
+                issues.add(error("CANONICAL-INPUT-FIELD-MISSING", path,
+                        typeName + " is missing canonical input field " + field.name()));
+            }
+            if (field.required() && !hasValidationAnnotation(validationSource, field.name())) {
+                issues.add(error("CANONICAL-INPUT-VALIDATION-MISSING", path,
+                        typeName + " field " + field.name() + " is required but has no validation annotation"));
+            }
+        }
+        if (updateModel) {
+            if (!fields.contains("id")) {
+                issues.add(error("CANONICAL-UVO-ID-MISSING", path, typeName + " must declare or inherit id"));
+            }
+            if (!file.getContent().matches("(?s).*class\s+" + Pattern.quote(typeName)
+                    + "\s+extends\s+" + Pattern.quote(contract.identity().entityName() + "IVO") + ".*")) {
+                issues.add(error("CANONICAL-UVO-INHERITANCE", path,
+                        typeName + " must extend " + contract.identity().entityName() + "IVO"));
+            }
+        }
+    }
+
+    private boolean hasValidationAnnotation(String content, String fieldName) {
+        Pattern declaration = Pattern.compile("(?s)(@(?:NotNull|NotBlank|NotEmpty)[^;]{0,300})"
+                + "\\b" + Pattern.quote(fieldName) + "\\s*;");
+        return declaration.matcher(content).find();
+    }
+
+    private GeneratedFile findJavaType(List<GeneratedFile> files, String typeName) {
+        return files.stream().filter(file -> {
+            String path = normalize(file.getFilePath());
+            return path != null && path.endsWith("/" + typeName + ".java");
+        }).findFirst().orElse(null);
     }
 
     private void validateControllerServiceClosure(List<GeneratedFile> files, GenerationContext context,

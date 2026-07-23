@@ -27,6 +27,11 @@ export interface PlanTransmitRequest {
     title: string;
     content: string;
     prerequisites: string[];
+    deliverableIds: string[];
+    contractHash: string;
+    referencedElementIds?: string[];
+    inputTypes?: string[];
+    outputTypes?: string[];
   }[];
   metadata: {
     sourceService: string;
@@ -34,6 +39,18 @@ export interface PlanTransmitRequest {
     transmittedAt: string;
   };
   generationIdentity: GenerationIdentityPayload;
+  reviewManifest: {
+    masterReviewId: string;
+    masterContentHash?: string;
+    contractHash?: string;
+    rulesetVersion?: string;
+    referenceSnapshotId?: string;
+    subPlanReviews: { subPlanId: string; reviewId: string; contentHash?: string }[];
+  };
+  canonicalContract?: unknown;
+  bundleHash?: string;
+  /** HMAC-SHA256 issued by trusted Part A for the reviewed bundle. */
+  bundleSignature?: string;
   /** 写入目标: 'ISOLATED'(默认,隔离区) | 'REAL'(真实 blade_hgsjy,需鉴权+查重)。可选,不传按 ISOLATED */
   writeTarget?: 'ISOLATED' | 'REAL';
 }
@@ -150,7 +167,9 @@ export interface ExecutionTimeline {
   frameworkVersion?: string;
   javaVersion?: string;
   outputDirectory?: string;
-  compileVerificationStatus?: 'NOT_RUN' | 'PASSED' | 'FAILED' | 'SKIPPED_DEPENDENCIES_UNAVAILABLE';
+  compileVerificationStatus?: 'NOT_RUN' | 'PASSED' | 'FAILED' | 'FAILED_SOURCE_GATE'
+    | 'PASSED_SOURCE_GATE_DEPENDENCIES_UNVERIFIED' | 'SKIPPED_DEPENDENCIES_UNAVAILABLE'
+    | 'NOT_RUN_PLAN_COMPILATION_FAILED';
   qualityErrorCount?: number;
   qualityWarningCount?: number;
   subPlanTimelines: SubPlanTimeline[];

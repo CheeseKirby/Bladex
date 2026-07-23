@@ -10,6 +10,7 @@
  * - 客户端关闭连接时,通过 AbortController 取消上游 fetch,避免上游 socket 与配额泄漏。
  */
 
+import { randomUUID } from 'node:crypto';
 import { Router, Request, Response } from 'express';
 import { buildAuthHeaders, getLlmConfig, isLlmConfigured } from '../config/llmConfig';
 import { requireBffAdmin } from '../security/adminGuard';
@@ -18,135 +19,263 @@ import { createRateLimitMiddleware } from '../http/rateLimit';
 import { bindUpstreamAbort } from '../http/upstreamAbort';
 import { fetchWithTransientRetry } from '../http/fetchRetry';
 import { consumeAnthropicStream } from '../llm/anthropicStream';
-import { getReferenceAdaptationSummary } from '../services/referenceSummary';
+import {
+  parseReviewModelResponseWithRecovery,
+  REVIEW_RULESET_VERSION,
+  type ReviewAuditEvidence,
+  type ReviewRoundEvidence,
+} from '../llm/reviewProtocol';
+import {
+  buildCanonicalReferenceIntent,
+  formatReferenceReviewEvidence,
+  formatReferenceReviewEvidenceForGeneration,
+  formatReferenceReviewEvidenceForSemanticReview,
+  getReferenceAdaptationSummary,
+  getReferenceReviewContext,
+  getReferenceReviewEvidence,
+} from '../services/referenceSummary';
+import {
+  applyPlanRepairOperations,
+  compilePlanContract,
+  formatDeterministicIssues,
+  hashPlanContent,
+  hashPlanContract,
+  hashSubPlanDescriptor,
+  planSafeDeterministicRepairs,
+  renderCanonicalContractSummary,
+  stripPlanContractBlock,
+  upsertPlanContractBlock,
+  validateNarrativeContractConsistency,
+  validatePlanContract,
+  withContractReviewMetadata,
+  type DeterministicPlanIssue,
+  type PlanRepairOperation,
+  type SubPlanDescriptorHashMaterial,
+} from '../llm/planContract';
+import { parseSplitModelResponse, parseSplitModelResponseWithRecovery } from '../llm/splitProtocol';
+import { gateSemanticIssues, normalizeRule } from '../llm/semanticIssueGate';
+import { compileStructuredPlanDraft, isPlanDraftGenerationBlockingIssue, normalizePlanDraftAgainstRequirement, parsePlanDraftResponse, renderStructuredPlan, type PlanDraftV2 } from '../llm/planDraft';
+import { assertSingleConfiguredEntity, normalizeOneShotSuggestions } from '../llm/oneShotNormalization';
+import { compileConfiguredPlanDraft } from '../llm/configuredPlanDraft';
+import { applyReferenceGrounding, groundPlanDraftWithReferenceEvidence } from '../llm/referenceGrounding';
+import { buildSemanticReviewSubject } from '../llm/reviewSubject';
+import { reviewStore, type ReviewRecord, type ReviewPhase } from '../services/reviewStore';
 
 export const llmRouter = Router();
+const activeReviewControllers = new Map<string, AbortController>();
 
 // LLM calls consume privileged server-side credentials and must never be an open proxy.
 llmRouter.use(requireBffAdmin);
-llmRouter.use(createRateLimitMiddleware({
+const llmRateLimit = createRateLimitMiddleware({
   maxRequests: Number(process.env.BFF_LLM_RATE_LIMIT || 30),
   windowMs: Number(process.env.BFF_LLM_RATE_WINDOW_MS || 60_000),
-}));
+});
+llmRouter.use((req, res, next) => req.path.startsWith('/review-status')
+  ? next() : llmRateLimit(req, res, next));
 llmRouter.use(createPayloadGuard());
 
 const LLM_DEFAULT_REQUEST_TIMEOUT_MS = 240_000;
 const LLM_LONG_REQUEST_TIMEOUT_MS = 600_000; // 10 分钟(大方案审查/拆分非流式 LLM 生成完整 JSON 较慢,5min 曾导致 abort)
+const PLAN_DRAFT_MAX_TOKENS = 6_000;
+const REVIEW_HEARTBEAT_MS = Math.max(5_000, Number(process.env.BFF_REVIEW_HEARTBEAT_MS || 15_000));
 
 interface ModuleSummary { type: string; name: string; icon: string; config?: unknown }
 
+function reviewStatusPayload(record: ReviewRecord): object {
+  return {
+    reviewId: record.reviewId,
+    projectId: record.projectId,
+    subjectId: record.subjectId,
+    stage: record.stage,
+    status: record.status,
+    contractHash: record.contractHash,
+    referenceSnapshotId: record.referenceSnapshotId,
+    rulesetVersion: record.rulesetVersion,
+    issues: record.issues,
+    progress: record.progress,
+    startedAt: record.startedAt,
+    completedAt: record.completedAt,
+    updatedAt: record.updatedAt,
+    ...(record.result ? {
+      result: {
+        reviewId: record.reviewId,
+        contractHash: record.contractHash,
+        status: record.result.finalStatus ?? record.status,
+        passes: record.result.passes,
+        issues: record.issues,
+        fixedContent: record.result.fixedContent,
+        reviewLog: record.result.reviewLog,
+        changeLog: record.result.changeLog,
+        audit: record.audit,
+        cacheHit: record.result.cacheHit ?? false,
+      },
+    } : {}),
+  };
+}
+
+llmRouter.get('/review-status/:reviewId', (req: Request, res: Response) => {
+  const record = reviewStore.get(req.params.reviewId);
+  if (!record) {
+    res.status(404).json({ success: false, code: 'REVIEW_NOT_FOUND', error: 'Review record was not found.' });
+    return;
+  }
+  res.json({ success: true, data: reviewStatusPayload(record) });
+});
+
+llmRouter.get('/review-status', (req: Request, res: Response) => {
+  const projectId = typeof req.query.projectId === 'string' ? req.query.projectId.trim() : '';
+  const subjectId = typeof req.query.subjectId === 'string' ? req.query.subjectId.trim() : '';
+  const stage = req.query.stage === 'subplan' ? 'subplan' : req.query.stage === 'master' ? 'master' : undefined;
+  if (!projectId || !subjectId || !stage) {
+    res.status(400).json({ success: false, code: 'INVALID_REVIEW_SUBJECT', error: 'projectId, subjectId and stage are required.' });
+    return;
+  }
+  const record = reviewStore.latest(projectId, subjectId, stage);
+  if (!record) {
+    res.status(404).json({ success: false, code: 'REVIEW_NOT_FOUND', error: 'Review record was not found.' });
+    return;
+  }
+  res.json({ success: true, data: reviewStatusPayload(record) });
+});
+
+llmRouter.post('/review-status/:reviewId/cancel', async (req: Request, res: Response) => {
+  const record = reviewStore.get(req.params.reviewId);
+  if (!record) {
+    res.status(404).json({ success: false, code: 'REVIEW_NOT_FOUND', error: 'Review record was not found.' });
+    return;
+  }
+  if (record.status !== 'IN_PROGRESS') {
+    res.json({ success: true, data: reviewStatusPayload(record) });
+    return;
+  }
+  activeReviewControllers.get(record.reviewId)?.abort(new Error('Review cancelled by user'));
+  await reviewStore.updateProgress(record.reviewId, { phase: 'FINALIZING', message: 'Cancellation requested by user.' });
+  res.json({ success: true, data: { reviewId: record.reviewId, status: 'CANCELLING' } });
+});
+
 function buildGeneratePlanSystemPrompt(): string {
-  return `你是一位资深 BladeX 后端架构师。
-任务: 把用户的自然语言需求 + 拖入的模块清单, 转化为一份**完整、可执行**的 BladeX 后端开发方案(Markdown)。
+  return `You are a senior BladeX backend architect. Convert the requirement and configured modules into one compact JSON object only.
 
-== 处理简短需求的策略 ==
-用户的需求可能非常简短(如"做一个员工管理模块"、"我要一个订单系统")。
-此时你应当扮演一位有经验的产品+架构师, **主动展开**合理默认设计:
-- 根据业务领域常识推断字段集 (员工→工号/姓名/部门/手机/邮箱/职位/状态; 订单→订单号/客户/金额/状态; 商品→编码/名称/分类/价格/库存)
-- 自动设计合理的业务状态机 (如订单: 待付款→已付款→已发货→已完成→已取消)
-- 默认提供 5 个标准 CRUD 端点 (/detail /list /save /update /remove)
-- 默认提供 Excel 导出能力 (业务表常需)
-- 默认提供 Feign 远程调用接口 (BladeX 微服务架构默认)
-- 表名默认 blade_{模块名}, 实体名 PascalCase, 模块名 lowercase
-- 字段默认含唯一索引(如编号/工号)和常用查询字段索引(如状态/部门)
+Schema:
+{
+  "identity":{"moduleName":"lowercase","entityName":"PascalCase","tableName":"snake_case","basePackage":"org.springblade.module"},
+  "title":"plan title",
+  "requirementSummary":"business goal and key rules",
+  "fields":[{"name":"camelCase","columnName":"snake_case","javaType":"String|Long|Integer|Date|Boolean|BigDecimal|LocalDateTime","required":true,"role":"PERSISTENT|DERIVED","description":"meaning"}],
+  "states":[{"name":"businessState","values":["DRAFT","APPROVED"],"transitions":[{"from":"DRAFT","to":"APPROVED","trigger":"submit"}],"referenceField":"optional existing state field"}],
+  "integrations":[{"type":"API|FEIGN|WORKFLOW|EVENT|OTHER","sourceModule":"module","targetModule":"optional module","entrypoint":"ConcreteClass.method or /path"}],
+  "deliverables":[{"kind":"DDL|ENTITY|VO|MAPPER|SERVICE|CONTROLLER|FEIGN|EXCEL|CONFIG|OTHER","className":"optional class","moduleSide":"API|IMPL|DOC|UNKNOWN","action":"CREATE|MODIFY|EXTEND|PROHIBIT"}],
+  "architectureDecisions":[{"decision":"explicit decision","rationale":"why","evidence":["reference symbol or requirement"]}]
+}
 
-== 处理详细需求的策略 ==
-如果用户已经明确给出字段/校验/状态机, 必须严格遵守, 不要自由发挥替换。
-拖入的模块配置(表名/字段/路径前缀)是**强约束**, 必须采用。
-
-== 必须输出的章节 ==
-1. 需求分析 (业务目标 / 核心能力 / 关键校验)
-2. 模块结构 (blade-service-api / blade-service 命名)
-3. 数据库 DDL (snake_case, 含 BaseEntity 标准字段: id/create_user/create_time/update_user/update_time/status/is_deleted)
-4. Entity 定义 (extends BaseEntity, @TableName, @EqualsAndHashCode(callSuper=true))
-5. VO 类型 (QVO/IVO/UVO/VO/EVO 用途和关键字段)
-6. Mapper 接口 (extends BaseMapper<Entity>)
-7. Service 层 (I*Service extends BaseService / *ServiceImpl extends BaseServiceImpl)
-8. Controller 端点 (5 个标准 CRUD + 必要业务接口, 返回 R<T>, extends BladeController)
-9. Wrapper 转换类 (必须含 entityVO/entity(IVO)/entity(UVO))
-10. Excel 导入导出类 (如适用)
-11. Feign 客户端接口 (如适用, 不要引用 fallback 类)
-12. 关键业务逻辑 (状态机/事务/校验) 与异常处理
-13. 实现顺序 (DDL → Entity/VO → Mapper → Service → Controller → Excel/Feign → 集成测试)
-
-要求:
-- 输出 Markdown, 中文表述, 代码片段用 \`\`\`sql / \`\`\`java
-- 严格遵循 BladeX 规范, 不要写 @Autowired, 用 @AllArgsConstructor 构造器注入
-- VO 全部平铺在 org.springblade.{module}.vo 包 (不要 ivo/qvo/uvo 子包)
-- 方案开头**必须**明确写出: 实体名(PascalCase) / 模块名(lowercase) / 表名(blade_xxx) / 包路径
-  示例: "**实体名**: Employee  **模块名**: employee  **表名**: blade_employee  **包路径**: org.springblade.employee"
-- 不要解释你在做什么, 直接给方案
-
-== Canonical generation identity ==
-The plan must start with a dedicated identity section containing exactly one moduleName, entityName, tableName and basePackage.
-These values are immutable for the whole plan and all sub-plans. Never use pom/entity/vo/controller/service as moduleName.
-When a reference-project profile is supplied, its framework version, Java version, package layout, application style and configuration conventions override all generic defaults.
-`;
+Hard rules:
+- Return JSON only, without Markdown or code fences.
+- Configured table/module/entity/field values are immutable constraints.
+- Include persistent business fields exactly once; BaseEntity audit fields are not business fields.
+- Required deliverables: exactly one DDL, ENTITY, MAPPER, SERVICE and CONTROLLER, plus at least one VO. Add FEIGN/EXCEL/CONFIG only when required.
+- ENTITY className must equal identity.entityName. SERVICE represents both the I{Entity}Service interface and {Entity}ServiceImpl; never emit ServiceImpl as a second SERVICE deliverable.
+- Each VO deliverable names one physical VO class. Do not claim or repeat an implicit VO family in the draft. Export/Excel classes must not be declared as ENTITY.
+- Every integration must have a concrete entrypoint. Never use vague text such as "integrate later".
+- When reference evidence assigns ownership to an existing module, bind/extend it or leave an explicit unresolved architecture decision; do not silently create a parallel capability.
+- Java/framework/package conventions from the reference profile override generic defaults.
+- Do not invent architecture evidence.`;
 }
 
 function buildSplitPlanSystemPrompt(): string {
-  return `你是一位 BladeX 开发任务拆分专家。
-任务: 把总方案拆分成 5-7 个相互独立、可顺序执行的子方案。
+  return `You organize an already-reviewed Canonical Plan Contract v2 into dependency-ordered sub-plans.
 
-每个子方案必须包含:
-- id        : 字符串, 形如 "sub_1", "sub_2"
-- index     : 序号(1 起)
-- title     : 简短中文标题, **必须**包含以下模块层关键字之一: DDL / 数据库 / 建表 / Entity / 实体 / VO / 视图 / Mapper / Service / 服务 / Controller / 控制器 / API / Wrapper / 包装 / Excel / 导入导出 / Feign / 远程
-  反例(禁止): "改进订单号生成逻辑" / "编译验证" / "确认现状" — 这种标题 Part B 无法识别为模块层任务
-- planContent: 子方案 Markdown 内容, **必须**明确写出: 实体名(如"实体名: Order"), 模块名(如"模块名: order"), 包路径(如"org.springblade.order.entity"), 表名(如"blade_order")
-- prerequisites: 前置依赖的子方案 id 列表
-
-**强制拆分维度: 按 BladeX 模块层而非开发步骤拆分**
-标准模板(可选裁剪):
-1. 数据库 DDL — 建表语句
-2. Entity 与 VO — Entity 类 + QVO/IVO/UVO/VO/EVO 五类视图对象
-3. Mapper 与 Service — Mapper 接口 + IService 接口 + ServiceImpl 实现
-4. Wrapper 与 Controller — Wrapper 转换类 + Controller 5 个 CRUD 端点
-5. Excel — Excel 导入导出类(如需)
-6. Feign — Feign 远程调用接口(如需)
-
-只输出 JSON, 不要 markdown 包裹, 不要解释, 结构:
+Return JSON only:
 {
-  "subPlans": [
-    { "id": "sub_1", "index": 1, "title": "数据库 DDL", "planContent": "实体名: Order, 模块名: order, 表名: blade_order ...", "prerequisites": [] }
-  ]
+  "subPlans": [{
+    "id": "sub_1",
+    "index": 1,
+    "title": "short task boundary",
+    "planContent": "explanation of the assigned canonical deliverables",
+    "prerequisites": [],
+    "deliverableIds": ["deliverable.ddl.1"],
+    "referencedElementIds": ["entity.order", "field.order.order-no"]
+  }]
 }
 
-Canonical identity rules:
-- Read moduleName/entityName/tableName/basePackage from the master plan once.
-- Repeat the same values in every sub-plan; never infer a new module from sub-plan titles such as POM, Feign or Entity.
-- Every deliverable must declare its class name, target layer and owning module.
-`;
+Hard rules:
+- Use exact deliverable and contract element IDs from the supplied plan-contract.
+- Assign every active required deliverable exactly once; never assign a PROHIBIT deliverable.
+- Do not create modules, entities, fields, types, services, states, integrations or deliverables.
+- A sub-plan that consumes a type must have the provider sub-plan in its prerequisite transitive closure.
+- prerequisites must form an acyclic graph with contiguous indexes 1..N.
+- Titles and prose are explanatory only and never replace deliverableIds.
+- Keep the canonical identity unchanged in every sub-plan.`;
+}
+
+function buildSplitSchemaRecoverySystemPrompt(): string {
+  return `${buildSplitPlanSystemPrompt()}
+
+Repair one malformed split response into the exact JSON schema above.
+- Preserve the original task boundaries and prose where possible.
+- Convert prerequisites to arrays of exact sub-plan string ids.
+- Use only deliverableIds and referencedElementIds present in the supplied canonical contract.
+- Do not add, remove, duplicate or reassign canonical deliverables.
+- Return JSON only; arrays must never be null.`;
 }
 
 function buildReviewPlanSystemPrompt(stage: string): string {
-  return `你是一位 BladeX 代码审查专家。请审查以下 ${stage === 'master' ? '总方案' : '子方案'} 是否符合 BladeX 规范并指出问题。
+  return `You are a senior BladeX architecture reviewer. Review the supplied ${stage === 'master' ? 'master plan' : 'sub-plan'} against its canonical plan-contract and the authoritative deterministic findings.
 
-只输出 JSON, 不要 markdown 包裹, 结构:
+Return JSON only with exactly this shape:
 {
   "passes": true|false,
-  "issues": [
-    { "severity": "ERROR"|"WARN", "rule": "...", "message": "..." }
-  ],
-  "fixes": [
-    { "section": "原方案的 ## 章节标题(必须与原方案完全一致)", "newContent": "修复后的完整章节(含 ## 标题行)" }
-  ],
-  "fixedContent": "(仅当问题太复杂无法片段修复时提供完整方案)",
-  "changeLog": [
-    { "what": "...", "why": "...", "before": "...", "after": "..." }
-  ]
+  "issues": [{ "severity": "ERROR"|"WARN", "rule": "registered rule id", "message": "concise message", "elementIds": ["contract element id"], "evidence": { "source": "DETERMINISTIC_RULE"|"CONTRACT_INVARIANT"|"REFERENCE_DECISION", "expected": "optional", "actual": "optional" } }],
+  "repairs": [{
+    "operation": "ADD_MODULE|MOVE_ENTITY|SPLIT_AGGREGATE|BIND_EXISTING_SYMBOL|ADD_REFERENCE_BINDING|ADD_DELIVERABLE|ADD_INTEGRATION|CHANGE_STATE_OWNER|DECLARE_ARCHITECTURE_DECISION|RENAME_ENTITY",
+    "targetId": "contract element id when required",
+    "arguments": {},
+    "resolves": ["RULE-ID"],
+    "preconditions": ["concrete precondition"]
+  }],
+  "fixes": [],
+  "changeLog": []
 }
 
-要求:
-- 发现 ERROR 级问题时 passes=false
-- **优先用 fixes(章节替换)修复**: 只返回需要改的章节, section 必须是原方案 ## 标题的精确文本
-- 如果问题跨多个章节关联(如 DDL 改字段 -> Entity/VO/Mapper 都要改), 把所有相关章节都放入 fixes, 保持章节间一致
-- 只有当问题太复杂无法用片段修复(需整体重组)时, 才提供完整 fixedContent
-- fixes 的 newContent 必须是完整章节(含 ## 标题行), 不要省略章节内未改动部分
-- 只有 WARN(无 ERROR)时 passes=true, fixes 为空`;
+Rules:
+- Deterministic findings are authoritative and cannot be waived.
+- A new semantic ERROR must identify existing elementIds and structured evidence that the server can independently verify. Unsupported semantic claims must be WARN.
+- Never use a new spelling or alias for an existing deterministic rule id.
+- For each deterministic ERROR, return a typed repair against an existing plan-contract id, or leave it as an unresolved ERROR when no safe repair exists.
+- Never invent target ids. Use only ids from the supplied plan-contract.
+- Prefer binding/extending reference symbols over creating parallel capabilities.
+- Review only semantic invariants not already owned by deterministic validation: domain/module ownership, aggregate boundaries, reference binding relevance, state ownership, and concrete integration entrypoints.
+- Do not re-analyze type closure, hashes, schema validity, deliverable topology, source code, formatting, or framework compatibility; deterministic validators own those checks.
+- When deterministic ERROR is zero and the semantic projection contains no independently verifiable contradiction, return passes=true immediately with empty arrays.
+- Keep the response compact: at most 12 issues and 12 repairs.
+- Repair arguments must contain only fields required by the selected operation. Do not repeat plan chapters, source code, or the complete contract.
+- fixes and changeLog must be empty arrays. Do not return fixedContent.
+- passes=true only when there are no ERROR issues, and then repairs must be empty.
+- Arrays must never be null. If review cannot be completed, return one concise ERROR issue and no repair.`;
 }
 
-// ==================== /generate-plan (流式) ====================
+
+function buildFastSemanticReviewSystemPrompt(stage: string): string {
+  return `Perform one focused semantic audit of the supplied ${stage === 'master' ? 'master plan' : 'sub-plan'} semantic projection.
+Deterministic validation has already passed. Inspect only: module/domain ownership, aggregate boundary coherence, reference-binding relevance, state ownership, and concrete integration entrypoints.
+Return JSON only in exactly this shape:
+{"passes":true|false,"issues":[{"severity":"ERROR"|"WARN","rule":"registered rule id","message":"concise message","elementIds":["existing contract id"],"evidence":{"source":"CONTRACT_INVARIANT"|"REFERENCE_DECISION","expected":"optional","actual":"optional"}}],"repairs":[],"fixes":[],"changeLog":[]}
+If no independently verifiable contradiction exists, return exactly {"passes":true,"issues":[],"repairs":[],"fixes":[],"changeLog":[]} immediately.
+Do not explain your reasoning. Do not inspect types, hashes, schemas, deliverable topology, framework compatibility, formatting, or source code. Never invent element ids or rule aliases. Maximum 6 issues.`;
+}
+
+function buildReviewSchemaRecoverySystemPrompt(): string {
+  return `Repair a malformed review response into one compact JSON object. Preserve intended issues and typed repairs, but fix JSON syntax and enforce this schema exactly:
+{
+  "passes": boolean,
+  "issues": [{"severity":"ERROR"|"WARN","rule":"registered rule id","message":"concise message","elementIds":["contract id"],"evidence":{"source":"DETERMINISTIC_RULE"|"CONTRACT_INVARIANT"|"REFERENCE_DECISION","expected":"optional","actual":"optional"}}],
+  "repairs": [{"operation":"ADD_MODULE|MOVE_ENTITY|SPLIT_AGGREGATE|BIND_EXISTING_SYMBOL|ADD_REFERENCE_BINDING|ADD_DELIVERABLE|ADD_INTEGRATION|CHANGE_STATE_OWNER|DECLARE_ARCHITECTURE_DECISION|RENAME_ENTITY","targetId":"optional id","arguments":{},"resolves":["RULE-ID"],"preconditions":["concrete precondition"]}],
+  "fixes": [],
+  "changeLog": []
+}
+Return JSON only. Maximum 12 issues and 12 repairs. Never return fixedContent, Markdown, code fences, prose, null arrays, or invented plan element ids.`;
+}
+
+// ==================== /generate-plan ====================
 
 llmRouter.post('/generate-plan', async (req: Request, res: Response) => {
   if (!isLlmConfigured()) {
@@ -159,9 +288,92 @@ llmRouter.post('/generate-plan', async (req: Request, res: Response) => {
 // ==================== /review-plan (非流式 JSON) ====================
 
 llmRouter.post('/review-plan', async (req: Request, res: Response) => {
-  const { planContent, stage } = req.body as { planContent: string; stage: 'master' | 'subplan' };
+  const { planContent, stage, projectId: requestedProjectId, subjectId: requestedSubjectId, subjectDescriptor,
+    parentReviewId: requestedParentReviewId } = req.body as {
+    planContent: string;
+    stage: 'master' | 'subplan';
+    projectId?: string;
+    subjectId?: string;
+    parentReviewId?: string;
+    subjectDescriptor?: Omit<SubPlanDescriptorHashMaterial, 'contentHash'>;
+  };
+  const projectId = requestedProjectId?.trim();
+  const subjectId = requestedSubjectId?.trim();
+  if (!planContent?.trim() || (stage !== 'master' && stage !== 'subplan') || !projectId || !subjectId) {
+    res.status(400).json({ success: false, code: 'INVALID_REVIEW_SUBJECT',
+      error: 'planContent, stage, projectId and subjectId are required for a persisted review' });
+    return;
+  }
 
-  // SSE: 审查-修复循环每轮发进度, 前端实时显示(不等最终结果, 无超时)
+  const requestCompilation = compilePlanContract(planContent);
+  const requestContentHash = hashPlanContent(planContent);
+  const requestContractHash = hashPlanContract(requestCompilation.contract);
+
+  // SSE review progress is recoverable through the persisted review-status endpoint.
+  let normalizedSubjectDescriptor: SubPlanDescriptorHashMaterial | undefined;
+  let subjectDescriptorHash: string | undefined;
+  let parentReviewRecord: ReturnType<typeof reviewStore.get>;
+  if (stage === 'subplan') {
+    const descriptor = normalizeReviewSubjectDescriptor(subjectDescriptor, planContent, subjectId);
+    if (!descriptor.ok) {
+      res.status(400).json({ success: false, code: 'INVALID_REVIEW_DESCRIPTOR', error: descriptor.error });
+      return;
+    }
+    const currentContractHash = requestContractHash;
+    if (descriptor.value.contractHash !== currentContractHash) {
+      res.status(412).json({ success: false, code: 'CONTRACT_STALE', error: 'Sub-plan descriptor contractHash does not match its embedded contract.' });
+      return;
+    }
+    normalizedSubjectDescriptor = descriptor.value;
+    subjectDescriptorHash = hashSubPlanDescriptor(descriptor.value);
+    const parentReviewId = requestedParentReviewId?.trim();
+    parentReviewRecord = parentReviewId ? reviewStore.get(parentReviewId) : reviewStore.list(projectId)
+      .find((record) => record.stage === 'master' && reviewStore.isCurrent(record.reviewId)
+        && (record.status === 'PASSED' || record.status === 'PASSED_WITH_WARNINGS')
+        && record.contractHash === currentContractHash);
+    if (!parentReviewRecord || !reviewStore.isCurrent(parentReviewRecord.reviewId)
+      || parentReviewRecord.stage !== 'master' || parentReviewRecord.projectId !== projectId
+      || (parentReviewRecord.status !== 'PASSED' && parentReviewRecord.status !== 'PASSED_WITH_WARNINGS')) {
+      res.status(428).json({ success: false, code: 'REVIEW_REQUIRED',
+        error: 'A current successful master review is required before reviewing a sub-plan.' });
+      return;
+    }
+    if (parentReviewRecord.contractHash !== currentContractHash
+      || parentReviewRecord.rulesetVersion !== REVIEW_RULESET_VERSION) {
+      res.status(412).json({ success: false, code: 'REVIEW_CONTEXT_MISMATCH',
+        error: 'Sub-plan contract or ruleset does not match the current master review.' });
+      return;
+    }
+  }
+  let reviewReferenceSnapshotId = parentReviewRecord?.referenceSnapshotId;
+  const reviewId = randomUUID();
+  const reviewStartedAt = new Date().toISOString();
+  const queuedCanonicalContent = upsertPlanContractBlock(planContent, requestCompilation.contract);
+  const queuedCanonicalContract = compilePlanContract(queuedCanonicalContent).contract;
+  try {
+    const started = await reviewStore.begin({
+      reviewId, projectId, subjectId, stage, status: 'IN_PROGRESS',
+      contentHash: requestContentHash, contractHash: requestContractHash,
+      subjectDescriptorHash, contract: queuedCanonicalContract,
+      referenceSnapshotId: reviewReferenceSnapshotId,
+      rulesetVersion: REVIEW_RULESET_VERSION, issues: [],
+      audit: buildReviewAudit(reviewId, reviewStartedAt, []),
+      progress: { phase: 'QUEUED', message: 'Review queued.', lastHeartbeatAt: reviewStartedAt, sequence: 0 },
+      startedAt: reviewStartedAt, updatedAt: reviewStartedAt,
+    });
+    if (!started.created) {
+      res.setHeader('X-Review-Id', started.record.reviewId);
+      res.status(409).json({ success: false, code: 'REVIEW_IN_PROGRESS',
+        error: 'An identical review is already in progress.', reviewId: started.record.reviewId });
+      return;
+    }
+  } catch (error) {
+    res.status(500).json({ success: false, code: 'REVIEW_STORE_ERROR',
+      error: `Unable to persist the review task: ${error instanceof Error ? error.message : String(error)}` });
+    return;
+  }
+
+  res.setHeader('X-Review-Id', reviewId);
   res.writeHead(200, {
     'Content-Type': 'text/event-stream; charset=utf-8',
     'Cache-Control': 'no-cache, no-transform',
@@ -173,127 +385,475 @@ llmRouter.post('/review-plan', async (req: Request, res: Response) => {
   const sendSSE = (obj: object) => {
     if (!res.destroyed && !res.writableEnded) res.write(`data: ${JSON.stringify(obj)}\n\n`);
   };
-  const totalRounds = 4;
+  const totalRounds = 1;
+  const reviewRoundEvidence: ReviewRoundEvidence[] = [];
   const sendProgress = (
     stage: 'preparing' | 'reviewing' | 'analyzing' | 'fixing' | 'complete',
     message: string,
     round = 1,
     details: { errorCount?: number; warningCount?: number } = {},
-  ) => sendSSE({ type: 'progress', stage, message, round, totalRounds, ...details });
+  ) => {
+    const phase: ReviewPhase = stage === 'preparing' ? 'REFERENCE_EVIDENCE'
+      : stage === 'reviewing' ? 'SEMANTIC_REVIEW'
+        : stage === 'fixing' ? 'DETERMINISTIC_VALIDATION'
+          : stage === 'analyzing' ? 'FINALIZING' : 'COMPLETE';
+    sendSSE({ type: 'progress', reviewId, stage, message, round, totalRounds, ...details });
+    void reviewStore.updateProgress(reviewId, { phase, message, ...details }).catch((error) => {
+      console.warn(`[/review-plan] failed to persist progress for ${reviewId}: ${error instanceof Error ? error.message : String(error)}`);
+    });
+  };
 
   if (!isLlmConfigured()) {
-    sendProgress('preparing', '正在加载审查规则 (Mock)...');
-    sendProgress('reviewing', '正在执行第 1 轮方案审查 (Mock)...');
-    sendProgress('analyzing', '第 1 轮完成：0 个 ERROR，1 个 WARN', 1, { errorCount: 0, warningCount: 1 });
-    sendProgress('complete', '审查通过 (第 1 轮)', 1, { errorCount: 0, warningCount: 1 });
-    sendSSE({ type: 'done', data: { passes: true, issues: [{ severity: 'WARN', rule: 'Controller规范', message: '建议为所有Controller添加@ApiOperationSupport(order=N)' }], fixedContent: planContent, reviewLog: [], changeLog: [] } });
-    res.end();
+    try {
+    const initialMockContent = queuedCanonicalContent;
+    const initialMockContract = queuedCanonicalContract;
+    sendProgress('preparing', 'Loading deterministic review rules and reference evidence (Mock)...');
+    const referenceEvidence = parentReviewRecord
+      ? { adaptationSummary: await getReferenceAdaptationSummary(), search: null, searchStatus: 'SUCCESS' as const, searchDurationMs: 0 }
+      : await getReferenceReviewEvidence(buildCanonicalReferenceIntent(initialMockContract));
+    reviewReferenceSnapshotId ??= referenceEvidence.search?.snapshotId;
+    let mockContent = planContent;
+    let mockCompilation = compilePlanContract(mockContent);
+    let mockIssues = validatePlanContract(mockCompilation, referenceEvidence, mockContent);
+    const safeRepairs = planSafeDeterministicRepairs(mockCompilation.contract, mockIssues, referenceEvidence);
+    if (safeRepairs.length > 0) {
+      const repairResult = applyPlanRepairOperations(mockCompilation.contract, safeRepairs);
+      if (repairResult.applied.length > 0 && repairResult.rejected.length === 0) {
+        mockContent = upsertPlanContractBlock(mockContent, repairResult.contract);
+        mockCompilation = compilePlanContract(mockContent);
+        mockIssues = validatePlanContract(mockCompilation, referenceEvidence, mockContent);
+      }
+    }
+    let mockContract = withContractReviewMetadata(mockCompilation.contract, {
+      referenceSnapshotId: reviewReferenceSnapshotId,
+      rulesetVersion: REVIEW_RULESET_VERSION,
+    });
+    mockContent = renderCanonicalContractSummary(mockContent, mockContract);
+    mockCompilation = compilePlanContract(mockContent);
+    mockContract = withContractReviewMetadata(mockCompilation.contract, {
+      referenceSnapshotId: reviewReferenceSnapshotId,
+      rulesetVersion: REVIEW_RULESET_VERSION,
+    });
+    mockContent = upsertPlanContractBlock(mockContent, mockContract);
+    mockIssues = [
+      ...validatePlanContract(compilePlanContract(mockContent), referenceEvidence, mockContent),
+      ...validateNarrativeContractConsistency(mockContent, mockContract),
+      { severity: 'WARN', rule: 'MOCK-SEMANTIC-REVIEW-UNAVAILABLE', message: 'Semantic model review was unavailable; only deterministic review rules were executed.' },
+    ];
+    const mockErrorCount = mockIssues.filter((issue) => issue.severity === 'ERROR').length;
+    const mockStatus = mockErrorCount === 0 ? 'REVIEW_INFRA_ERROR' : 'BLOCKED';
+    if (mockStatus === 'REVIEW_INFRA_ERROR') {
+      mockIssues.push({ severity: 'ERROR', rule: 'REVIEW-INFRA',
+        message: 'Semantic review model is not configured; deterministic-only review cannot issue a passing credential.' });
+    }
+    const mockWarningCount = mockIssues.filter((issue) => issue.severity === 'WARN').length;
+    const mockAudit = buildReviewAudit(reviewId, reviewStartedAt, []);
+    if (normalizedSubjectDescriptor) {
+      subjectDescriptorHash = hashSubPlanDescriptor({ ...normalizedSubjectDescriptor,
+        contentHash: hashPlanContent(mockContent), contractHash: hashPlanContract(mockContract) });
+    }
+    await reviewStore.save({
+      reviewId, projectId, subjectId, stage: stage || 'master', status: mockStatus,
+      contentHash: hashPlanContent(mockContent), contractHash: hashPlanContract(mockContract), subjectDescriptorHash, contract: mockContract,
+      referenceSnapshotId: reviewReferenceSnapshotId,
+      rulesetVersion: REVIEW_RULESET_VERSION, issues: mockIssues, audit: mockAudit,
+      progress: { phase: 'COMPLETE', message: mockStatus === 'BLOCKED' ? 'Mock review blocked.' : 'Review infrastructure unavailable.',
+        lastHeartbeatAt: mockAudit.completedAt, sequence: 1, errorCount: mockErrorCount, warningCount: mockWarningCount },
+      ...(mockStatus === 'BLOCKED' ? { result: {
+        finalStatus: 'BLOCKED' as const,
+        passes: false,
+        fixedContent: mockContent,
+        reviewLog: [{ round: 1, action: 'deterministic-review', errorCount: mockErrorCount,
+          message: `Mock deterministic review completed with ${mockErrorCount} ERROR` }],
+        changeLog: safeRepairs.map((repair) => ({ what: repair.operation,
+          why: repair.resolves.join(', ') || 'mechanically provable repair', before: repair.targetId || '', after: JSON.stringify(repair.arguments) })),
+      } } : {}),
+      startedAt: reviewStartedAt, completedAt: mockAudit.completedAt, updatedAt: mockAudit.completedAt,
+    });
+    sendProgress('reviewing', 'Running deterministic mock review...');
+    sendProgress('analyzing', `Mock review completed: ${mockErrorCount} ERROR, ${mockWarningCount} WARN`, 1,
+      { errorCount: mockErrorCount, warningCount: mockWarningCount });
+    sendProgress('complete', mockErrorCount === 0 ? 'Review infrastructure unavailable' : 'Mock deterministic review blocked', 1,
+      { errorCount: mockErrorCount, warningCount: mockWarningCount });
+    if (mockErrorCount === 0) {
+      sendSSE({ type: 'error', code: 'REVIEW_INFRA_ERROR',
+        message: 'Semantic review model is not configured; deterministic-only review cannot issue a passing credential.', audit: mockAudit });
+    } else {
+      sendSSE({
+        type: 'done',
+        data: {
+          reviewId,
+          contractHash: hashPlanContract(mockContract),
+          status: mockStatus,
+          passes: false,
+          issues: mockIssues,
+          fixedContent: mockContent,
+          reviewLog: [{ round: 1, action: 'deterministic-review', errorCount: mockErrorCount,
+            message: `Mock deterministic review completed with ${mockErrorCount} ERROR` }],
+          changeLog: safeRepairs.map((repair) => ({
+            what: repair.operation,
+            why: repair.resolves.join(', ') || 'mechanically provable repair',
+            before: repair.targetId || '',
+            after: JSON.stringify(repair.arguments),
+          })),
+          audit: mockAudit,
+        },
+      });
+    }
+      res.end();
+    } catch (error) {
+      const failureMessage = error instanceof Error ? error.message : String(error);
+      const audit = buildReviewAudit(reviewId, reviewStartedAt, []);
+      await reviewStore.save({
+        reviewId, projectId, subjectId, stage, status: 'REVIEW_INFRA_ERROR',
+        contentHash: requestContentHash, contractHash: requestContractHash,
+        subjectDescriptorHash, contract: queuedCanonicalContract,
+        referenceSnapshotId: reviewReferenceSnapshotId,
+        rulesetVersion: REVIEW_RULESET_VERSION,
+        issues: [{ severity: 'ERROR', rule: 'REVIEW-INFRA', message: failureMessage }], audit,
+        progress: { phase: 'COMPLETE', message: failureMessage, lastHeartbeatAt: audit.completedAt, sequence: 1, errorCount: 1 },
+        startedAt: reviewStartedAt, completedAt: audit.completedAt, updatedAt: audit.completedAt,
+      }).catch((storeError) => console.error('[/review-plan] failed to persist mock review failure:', storeError));
+      sendSSE({ type: 'error', code: 'REVIEW_INFRA_ERROR', message: failureMessage, audit });
+      if (!res.destroyed && !res.writableEnded) res.end();
+    }
     return;
   }
 
   const reviewController = new AbortController();
-  const finishReviewLifetime = bindUpstreamAbort(
-    res,
-    reviewController,
-    LLM_LONG_REQUEST_TIMEOUT_MS,
-    (reason) => console.warn(`[/review-plan] cancelled: ${reason}`),
-  );
+  activeReviewControllers.set(reviewId, reviewController);
+  const reviewTimeout = setTimeout(() => reviewController.abort(new Error('Review request timed out')), LLM_LONG_REQUEST_TIMEOUT_MS);
+  const finishReviewLifetime = () => {
+    clearTimeout(reviewTimeout);
+    activeReviewControllers.delete(reviewId);
+  };
 
   try {
-    // 审查-修复闭环: 审查 -> 有 ERROR -> 片段修复(前 2 轮) -> 全局重写(第 3 轮) -> 重审查 -> 直到无 ERROR
+    // Contract-driven review loop: deterministic validation -> semantic review -> typed repair -> revalidation.
     type Fix = { section: string; newContent: string };
-    type ReviewIssue = { severity?: string; rule?: string; message?: string };
-    type ReviewData = { passes?: boolean; issues?: ReviewIssue[]; fixes?: Fix[]; fixedContent?: string; changeLog?: unknown[] };
+    type ReviewIssue = { severity: 'ERROR' | 'WARN'; rule: string; message: string };
+    type AppliedChangeLog = { what: string; why: string; before: string; after: string };
+    type ReviewData = { passes: boolean; issues: ReviewIssue[]; repairs: PlanRepairOperation[]; fixes: Fix[]; fixedContent?: string; changeLog: AppliedChangeLog[] };
     type ReviewLogEntry = { round: number; action: string; errorCount: number; message: string };
 
-    const MAX_ROUNDS = 3; // 最多 4 轮(初始审查 + 3 修复)
-    const FIX_ONLY_ROUNDS = 2; // 前 2 轮优先片段修复, 第 3 轮可全局重写
     let currentContent = planContent;
-    let lastData: ReviewData = { passes: true, issues: [], fixes: [], fixedContent: planContent, changeLog: [] };
+    let lastData: ReviewData = { passes: false, issues: [], repairs: [], fixes: [], fixedContent: planContent, changeLog: [] };
     const reviewLog: ReviewLogEntry[] = [];
+    const accumulatedChangeLog: AppliedChangeLog[] = [];
+    const round = 1;
+    const initialCanonicalContract = queuedCanonicalContract;
 
-    for (let attempt = 0; attempt <= MAX_ROUNDS; attempt++) {
-      const round = attempt + 1;
-      sendProgress('preparing', `第 ${round}/${totalRounds} 轮：正在加载审查规则和参考项目...`, round);
-      const refSummary = await getReferenceAdaptationSummary();
-      sendProgress('reviewing', `第 ${round}/${totalRounds} 轮：LLM 正在检查方案完整性、规范和可执行性...`, round);
-      const text = await callAnthropicJson(
-        withReferenceSummary(buildReviewPlanSystemPrompt(stage || 'master'), refSummary),
-        `请审查如下方案:\n\n${currentContent}`,
-        { timeoutMs: LLM_LONG_REQUEST_TIMEOUT_MS, signal: reviewController.signal },
+    sendProgress('preparing', 'Loading review rules and reference project...', round);
+    const lastReferenceEvidence = parentReviewRecord
+      ? { adaptationSummary: await getReferenceAdaptationSummary(), search: null, searchStatus: 'SUCCESS' as const, searchDurationMs: 0 }
+      : await getReferenceReviewEvidence(buildCanonicalReferenceIntent(initialCanonicalContract));
+    reviewReferenceSnapshotId ??= lastReferenceEvidence.search?.snapshotId;
+    if (!parentReviewRecord && (lastReferenceEvidence.searchStatus !== 'SUCCESS' || !lastReferenceEvidence.search)) {
+      throw new ReviewInfrastructureError(
+        `Reference evidence unavailable: ${lastReferenceEvidence.searchStatus ?? 'INVALID_RESPONSE'}${lastReferenceEvidence.searchDiagnostic ? ` (${lastReferenceEvidence.searchDiagnostic})` : ''}`,
+        buildReviewAudit(reviewId, reviewStartedAt, reviewRoundEvidence),
       );
-      const data: ReviewData = safeJsonParse(text) ?? lastData;
-      lastData = {
-        passes: data.passes ?? true,
-        issues: data.issues ?? [],
-        fixes: data.fixes ?? [],
-        fixedContent: data.fixedContent ?? currentContent,
-        changeLog: data.changeLog ?? [],
-      };
+    }
+    const reusable = reviewStore.findReusable({
+      projectId, subjectId, stage, contentHash: requestContentHash, contractHash: requestContractHash,
+      subjectDescriptorHash, rulesetVersion: REVIEW_RULESET_VERSION,
+      referenceSnapshotId: reviewReferenceSnapshotId, excludeReviewId: reviewId,
+    });
+    if (reusable?.result) {
+      const audit = buildReviewAudit(reviewId, reviewStartedAt, []);
+      const reusableStatus = reusable.result.finalStatus
+        ?? (reusable.status === 'PASSED' || reusable.status === 'PASSED_WITH_WARNINGS' || reusable.status === 'BLOCKED'
+          ? reusable.status : undefined);
+      if (!reusableStatus) throw new Error('Reusable review record is missing its original final status.');
+      const cachedResult = { ...reusable.result, finalStatus: reusableStatus, cacheHit: true };
+      await reviewStore.save({
+        ...reusable,
+        reviewId,
+        status: reusableStatus,
+        audit,
+        progress: { phase: 'COMPLETE', message: 'Reused identical reviewed result.', lastHeartbeatAt: audit.completedAt, sequence: 1 },
+        result: cachedResult,
+        startedAt: reviewStartedAt,
+        completedAt: audit.completedAt,
+        updatedAt: audit.completedAt,
+      });
+      sendProgress('complete', '相同内容、契约和参考快照已审核，直接复用已有结果。', 1,
+        { errorCount: reusable.issues.filter((issue) => issue.severity === 'ERROR').length,
+          warningCount: reusable.issues.filter((issue) => issue.severity === 'WARN').length });
+      sendSSE({ type: 'done', data: {
+        reviewId, contractHash: reusable.contractHash, status: reusableStatus,
+        passes: cachedResult.passes, issues: reusable.issues, fixedContent: cachedResult.fixedContent,
+        reviewLog: cachedResult.reviewLog, changeLog: cachedResult.changeLog, audit, cacheHit: true,
+      } });
+      finishReviewLifetime();
+      res.end();
+      return;
+    }
+    const refSummary = formatReferenceReviewEvidenceForSemanticReview(lastReferenceEvidence);
+    let sourceCompilation = compilePlanContract(currentContent);
+    currentContent = upsertPlanContractBlock(currentContent, sourceCompilation.contract);
+    let canonicalCompilation = compilePlanContract(currentContent);
+    let compilationForReview = {
+      ...canonicalCompilation,
+      source: sourceCompilation.source,
+      diagnostics: sourceCompilation.diagnostics,
+    };
+    let deterministicIssues = validatePlanContract(compilationForReview, lastReferenceEvidence, currentContent);
 
-      const errorCount = Array.isArray(lastData.issues)
-        ? lastData.issues.filter((i) => i.severity === 'ERROR').length : 0;
-      const warningCount = Array.isArray(lastData.issues)
-        ? lastData.issues.filter((i) => i.severity === 'WARN').length : 0;
-      sendProgress(
-        'analyzing',
-        `第 ${round}/${totalRounds} 轮完成：${errorCount} 个 ERROR，${warningCount} 个 WARN`,
-        round,
-        { errorCount, warningCount },
-      );
-
-      // 以实际 ERROR 数量为准，避免模型返回 passes=true 但 issues 中仍有阻断项。
-      lastData.passes = errorCount === 0;
-      if (lastData.passes) {
-        reviewLog.push({ round, action: 'review', errorCount: 0, message: `审查通过(第 ${round} 轮)` });
-        sendProgress('complete', `审查通过 (第 ${round} 轮)`, round, { errorCount: 0, warningCount });
-        break;
-      }
-      // 达上限 -> 停
-      if (attempt === MAX_ROUNDS) {
-        reviewLog.push({ round, action: 'review', errorCount, message: `达最大轮次, 剩余 ${errorCount} 个 ERROR` });
-        sendProgress('complete', `审查结束：达到最大轮次，仍有 ${errorCount} 个 ERROR`, round, { errorCount, warningCount });
-        break;
-      }
-
-      // 修复: 前 FIX_ONLY_ROUNDS 轮优先片段, 之后可全局
-      const fixes = Array.isArray(lastData.fixes) ? lastData.fixes : [];
-      const hasFixedContent = lastData.fixedContent && lastData.fixedContent !== currentContent;
-
-      if (fixes.length > 0 && attempt < FIX_ONLY_ROUNDS) {
-        // 片段修复(优先)
-        const { result, applied, skipped } = applyFixes(currentContent, fixes);
-        currentContent = result;
-        reviewLog.push({ round: attempt + 1, action: 'fix-sections', errorCount, message: `片段修复 ${applied} 章节(跳过 ${skipped}), 原 ${errorCount} ERROR` });
-      } else if (hasFixedContent) {
-        // 全局重写(片段修不好 或 超过 FIX_ONLY_ROUNDS)
-        currentContent = lastData.fixedContent!;
-        reviewLog.push({ round: attempt + 1, action: 'fix-full-rewrite', errorCount, message: `全局重写, 原 ${errorCount} ERROR` });
-      } else if (fixes.length > 0) {
-        // 超过 FIX_ONLY_ROUNDS 但只有 fixes, 继续片段
-        const { result, applied } = applyFixes(currentContent, fixes);
-        currentContent = result;
-        reviewLog.push({ round: attempt + 1, action: 'fix-sections', errorCount, message: `片段修复 ${applied} 章节, 原 ${errorCount} ERROR` });
-      } else {
-        // 有 ERROR 但无修复方案 -> 停
-        reviewLog.push({ round, action: 'review', errorCount, message: `${errorCount} ERROR 但无修复方案` });
-        sendProgress('complete', `审查结束：${errorCount} 个 ERROR 暂无自动修复方案`, round, { errorCount, warningCount });
-        break;
-      }
-      // 修复后发结构化进度，下一轮会重新审查修复后的内容。
-      if (reviewLog.length > 0) {
-        sendProgress('fixing', reviewLog[reviewLog.length - 1].message, round, { errorCount, warningCount });
+    // Phase 1: apply only mechanically provable repairs before semantic review.
+    const mechanicalRepairs = planSafeDeterministicRepairs(
+      canonicalCompilation.contract, deterministicIssues, lastReferenceEvidence);
+    if (mechanicalRepairs.length > 0) {
+      const mechanicalResult = applyPlanRepairOperations(canonicalCompilation.contract, mechanicalRepairs);
+      if (mechanicalResult.applied.length > 0 && mechanicalResult.rejected.length === 0) {
+        const mechanicallyRepaired = upsertPlanContractBlock(currentContent, mechanicalResult.contract);
+        const repairedCompilation = compilePlanContract(mechanicallyRepaired);
+        const repairedIssues = validatePlanContract(repairedCompilation, lastReferenceEvidence, mechanicallyRepaired);
+        const beforeErrors = deterministicIssues.filter((issue) => issue.severity === 'ERROR').length;
+        const afterErrors = repairedIssues.filter((issue) => issue.severity === 'ERROR').length;
+        const previousRules = new Set(deterministicIssues.filter((issue) => issue.severity === 'ERROR').map((issue) => issue.rule));
+        const introducedRules = repairedIssues.filter((issue) => issue.severity === 'ERROR' && !previousRules.has(issue.rule));
+        if (afterErrors < beforeErrors && introducedRules.length === 0) {
+          currentContent = mechanicallyRepaired;
+          sourceCompilation = compilePlanContract(currentContent);
+          canonicalCompilation = sourceCompilation;
+          compilationForReview = sourceCompilation;
+          deterministicIssues = repairedIssues;
+          const entries = mechanicalResult.applied.map((repair) => ({
+            what: repair.operation,
+            why: repair.resolves.join(', ') || 'mechanically provable repair',
+            before: repair.targetId ?? '',
+            after: JSON.stringify(repair.arguments),
+          }));
+          accumulatedChangeLog.push(...entries);
+          reviewLog.push({ round, action: 'mechanical-repair', errorCount: afterErrors,
+            message: `Applied ${mechanicalResult.applied.length} deterministic repairs before semantic review; ERROR ${beforeErrors} -> ${afterErrors}` });
+          sendProgress('fixing', reviewLog[reviewLog.length - 1].message, round, { errorCount: afterErrors });
+        }
       }
     }
 
-    sendSSE({ type: 'done', data: { passes: lastData.passes ?? true, issues: lastData.issues ?? [], fixedContent: currentContent, reviewLog, changeLog: lastData.changeLog ?? [] } });
+    const deterministicErrorCount = deterministicIssues.filter((issue) => issue.severity === 'ERROR').length;
+    const deterministicWarningCount = deterministicIssues.filter((issue) => issue.severity === 'WARN').length;
+    const deterministicContext = formatDeterministicIssues(deterministicIssues);
+    sendProgress('reviewing', 'Deterministic validation completed; one semantic review is running...', round, {
+      errorCount: deterministicErrorCount,
+      warningCount: deterministicWarningCount,
+    });
+    let waitingSeconds = 0;
+    const text = await awaitWithHeartbeat(
+      callAnthropicJson(
+        withReferenceSummary(
+          deterministicErrorCount === 0
+            ? buildFastSemanticReviewSystemPrompt(stage || 'master')
+            : buildReviewPlanSystemPrompt(stage || 'master'),
+          refSummary,
+        ) + `
+
+${deterministicContext}`,
+        `Review the plan below. The machine-readable plan-contract is the source of truth. All structural fixes must use typed repairs first:
+
+${buildSemanticReviewSubject(currentContent, canonicalCompilation.contract)}`,
+        { timeoutMs: LLM_LONG_REQUEST_TIMEOUT_MS, signal: reviewController.signal },
+      ),
+      () => {
+        waitingSeconds += Math.round(REVIEW_HEARTBEAT_MS / 1000);
+        sendProgress('reviewing', `Semantic review is still processing (${waitingSeconds}s elapsed)...`, round);
+      },
+    );
+    const parsed = await parseReviewModelResponseWithRecovery(text, {
+      round,
+      referenceSummaryAvailable: Boolean(refSummary),
+      referenceSnapshotId: reviewReferenceSnapshotId,
+      contractSource: sourceCompilation.source,
+      contractSourceHash: canonicalCompilation.contract.sourceHash,
+      deterministicErrorCount,
+      deterministicWarningCount,
+    }, async (invalidRaw, protocolError) => {
+      sendProgress('reviewing', 'Response protocol invalid; attempting one audited schema recovery...', round);
+      return callAnthropicJson(
+        buildReviewSchemaRecoverySystemPrompt(),
+        `Protocol error: ${protocolError}\n\nMalformed response to repair:\n${invalidRaw}`,
+        { timeoutMs: LLM_LONG_REQUEST_TIMEOUT_MS, signal: reviewController.signal, maxTokens: 6_000 },
+      );
+    });
+    reviewRoundEvidence.push(...parsed.evidence);
+    if (!parsed.ok) {
+      throw new ReviewInfrastructureError(
+        `Semantic review returned an invalid response: ${parsed.error}`,
+        buildReviewAudit(reviewId, reviewStartedAt, reviewRoundEvidence),
+      );
+    }
+
+    const semanticGate = gateSemanticIssues(parsed.value.issues, deterministicIssues,
+      canonicalCompilation.contract, lastReferenceEvidence);
+    const data: ReviewData = { ...parsed.value, issues: semanticGate.issues };
+    if (semanticGate.downgradedErrorCount > 0) {
+      reviewLog.push({ round, action: 'semantic-claim-gate', errorCount: deterministicErrorCount,
+        message: `Downgraded ${semanticGate.downgradedErrorCount} unverified semantic ERROR claim(s) to advisory warnings.` });
+    }
+    const blockingRules = new Set([
+      ...deterministicIssues.filter((issue) => issue.severity === 'ERROR').map((issue) => normalizeRule(issue.rule)),
+      ...data.issues.filter((issue) => issue.severity === 'ERROR').map((issue) => normalizeRule(issue.rule)),
+    ]);
+    const plannedRepairs = filterAutomaticRepairOperations(data.repairs, lastReferenceEvidence, canonicalCompilation.contract)
+      .filter((repair) => repair.resolves.some((rule) => blockingRules.has(normalizeRule(rule))));
+    let candidateContent = currentContent;
+    let appliedRepairs: PlanRepairOperation[] = [];
+    if (plannedRepairs.length > 0) {
+      const repairResult = applyPlanRepairOperations(canonicalCompilation.contract, plannedRepairs);
+      appliedRepairs = repairResult.applied;
+      if (repairResult.applied.length > 0) {
+        candidateContent = upsertPlanContractBlock(candidateContent, repairResult.contract);
+      }
+      if (repairResult.rejected.length > 0) {
+        reviewLog.push({ round, action: 'repair-rejected', errorCount: deterministicErrorCount,
+          message: `Rejected typed repairs: ${repairResult.rejected.map((entry) => entry.reason).join('; ')}` });
+      }
+    }
+    if (data.fixes.length > 0) {
+      const sectionResult = applyFixes(candidateContent, data.fixes);
+      candidateContent = sectionResult.result;
+      const repairedContract = compilePlanContract(candidateContent).contract;
+      candidateContent = upsertPlanContractBlock(candidateContent, repairedContract);
+      reviewLog.push({ round, action: 'repair-narrative', errorCount: deterministicErrorCount,
+        message: `Updated ${sectionResult.applied} narrative sections; skipped ${sectionResult.skipped}` });
+    }
+
+    const candidateCompilation = compilePlanContract(candidateContent);
+    candidateContent = upsertPlanContractBlock(candidateContent, candidateCompilation.contract);
+    const candidateDeterministicIssues = validatePlanContract(
+      compilePlanContract(candidateContent), lastReferenceEvidence, candidateContent);
+    const currentRules = new Set(deterministicIssues.filter((issue) => issue.severity === 'ERROR').map((issue) => issue.rule));
+    const introducedRules = candidateDeterministicIssues
+      .filter((issue) => issue.severity === 'ERROR' && !currentRules.has(issue.rule));
+    const candidateErrorCount = candidateDeterministicIssues.filter((issue) => issue.severity === 'ERROR').length;
+    if (introducedRules.length > 0 || candidateErrorCount > deterministicErrorCount) {
+      appliedRepairs = [];
+      candidateContent = currentContent;
+      reviewLog.push({ round, action: 'repair-rejected', errorCount: deterministicErrorCount,
+        message: `Candidate repair failed the non-regression gate; ERROR ${deterministicErrorCount} -> ${candidateErrorCount}` });
+    } else {
+      currentContent = candidateContent;
+    }
+
+    // A single semantic review cannot prove that its own semantic ERROR was fixed.
+    // Typed repairs may improve the persisted content, but semantic blockers remain until a fresh review reruns.
+    const unresolvedSemanticIssues = data.issues;
+    const generatedChangeLog = appliedRepairs.map((repair) => ({
+      what: repair.operation,
+      why: repair.resolves.join(', ') || 'typed contract repair',
+      before: repair.targetId ?? '',
+      after: JSON.stringify(repair.arguments),
+    }));
+    accumulatedChangeLog.push(...data.changeLog, ...generatedChangeLog);
+    lastData = {
+      passes: false,
+      issues: unresolvedSemanticIssues,
+      repairs: appliedRepairs,
+      fixes: data.fixes,
+      fixedContent: currentContent,
+      changeLog: accumulatedChangeLog,
+    };
+    const postReviewIssues = mergeReviewIssues(
+      validatePlanContract(compilePlanContract(currentContent), lastReferenceEvidence, currentContent),
+      unresolvedSemanticIssues,
+    );
+    const errorCount = postReviewIssues.filter((issue) => issue.severity === 'ERROR').length;
+    const warningCount = postReviewIssues.filter((issue) => issue.severity === 'WARN').length;
+    lastData.passes = errorCount === 0;
+    reviewLog.push({ round, action: appliedRepairs.length > 0 ? 'semantic-repair' : 'semantic-review', errorCount,
+      message: `Semantic review completed; ${appliedRepairs.length} typed repairs applied, ${errorCount} ERROR remain` });
+    sendProgress('analyzing', `Semantic review completed: ${errorCount} ERROR, ${warningCount} WARN`, round,
+      { errorCount, warningCount });
+    sendProgress('complete', errorCount === 0 ? 'Review passed' : 'Review blocked', round,
+      { errorCount, warningCount });
+
+    let finalCompilation = compilePlanContract(currentContent);
+    let finalContract = withContractReviewMetadata(finalCompilation.contract, {
+      referenceSnapshotId: reviewReferenceSnapshotId,
+      rulesetVersion: REVIEW_RULESET_VERSION,
+    });
+    currentContent = renderCanonicalContractSummary(currentContent, finalContract);
+    finalCompilation = compilePlanContract(currentContent);
+    finalContract = withContractReviewMetadata(finalCompilation.contract, {
+      referenceSnapshotId: reviewReferenceSnapshotId,
+      rulesetVersion: REVIEW_RULESET_VERSION,
+    });
+    currentContent = upsertPlanContractBlock(currentContent, finalContract);
+    const finalDeterministicIssues = validatePlanContract(
+      compilePlanContract(currentContent), lastReferenceEvidence, currentContent);
+    const consistencyIssues = validateNarrativeContractConsistency(currentContent, finalContract);
+    const finalIssues = mergeReviewIssues([...finalDeterministicIssues, ...consistencyIssues], lastData.issues);
+    const finalErrorCount = finalIssues.filter((issue) => issue.severity === 'ERROR').length;
+    const finalWarningCount = finalIssues.filter((issue) => issue.severity === 'WARN').length;
+    const finalPasses = finalErrorCount === 0;
+    const finalStatus = finalPasses
+      ? finalWarningCount > 0 ? 'PASSED_WITH_WARNINGS' : 'PASSED'
+      : 'BLOCKED';
+    const audit = buildReviewAudit(reviewId, reviewStartedAt, reviewRoundEvidence);
+    const contractHash = hashPlanContract(finalContract);
+    if (normalizedSubjectDescriptor) {
+      subjectDescriptorHash = hashSubPlanDescriptor({ ...normalizedSubjectDescriptor,
+        contentHash: hashPlanContent(currentContent), contractHash });
+    }
+    await reviewStore.save({
+      reviewId, projectId, subjectId, stage: stage || 'master', status: finalStatus,
+      contentHash: hashPlanContent(currentContent), contractHash, subjectDescriptorHash, contract: finalContract,
+      referenceSnapshotId: reviewReferenceSnapshotId,
+      rulesetVersion: REVIEW_RULESET_VERSION, issues: finalIssues, audit,
+      progress: { phase: 'COMPLETE', message: finalPasses ? 'Review passed.' : 'Review blocked.',
+        lastHeartbeatAt: audit.completedAt, sequence: 1, errorCount: finalErrorCount, warningCount: finalWarningCount },
+      result: { finalStatus, passes: finalPasses, fixedContent: currentContent, reviewLog, changeLog: lastData.changeLog },
+      startedAt: reviewStartedAt, completedAt: audit.completedAt, updatedAt: audit.completedAt,
+    });
+    sendSSE({
+      type: 'done',
+      data: {
+        reviewId,
+        contractHash,
+        status: finalStatus,
+        passes: finalPasses,
+        issues: finalIssues,
+        fixedContent: currentContent,
+        reviewLog,
+        changeLog: lastData.changeLog,
+        audit,
+      },
+    });
     finishReviewLifetime();
     res.end();
   } catch (err) {
     finishReviewLifetime();
-    const msg = err instanceof Error ? err.message : String(err);
-    console.error('[/review-plan] LLM 调用失败:', msg);
-    sendSSE({ type: 'error', message: msg });
+    const abortMessage = reviewController.signal.aborted
+      ? (reviewController.signal.reason instanceof Error
+        ? reviewController.signal.reason.message : String(reviewController.signal.reason ?? 'Review request aborted'))
+      : '';
+    const userCancelled = /cancelled by user/i.test(abortMessage);
+    const requestTimedOut = /timed out/i.test(abortMessage);
+    const failureCode = userCancelled ? 'REVIEW_CANCELLED' : requestTimedOut ? 'REVIEW_TIMEOUT' : 'REVIEW_INFRA_ERROR';
+    const failureRule = userCancelled ? 'REVIEW-CANCELLED' : requestTimedOut ? 'REVIEW-TIMEOUT' : 'REVIEW-INFRA';
+    const msg = userCancelled ? 'Review was cancelled by the user.'
+      : requestTimedOut ? 'Review request timed out before a valid result was produced.'
+        : err instanceof Error ? err.message : String(err);
+    console.error('[/review-plan] review failed:', msg);
+    const audit = err instanceof ReviewInfrastructureError
+      ? err.audit
+      : buildReviewAudit(reviewId, reviewStartedAt, reviewRoundEvidence);
+    const failedCompilation = compilePlanContract(planContent || '');
+    if (normalizedSubjectDescriptor) {
+      subjectDescriptorHash = hashSubPlanDescriptor({ ...normalizedSubjectDescriptor,
+        contentHash: hashPlanContent(planContent || ''), contractHash: hashPlanContract(failedCompilation.contract) });
+    }
+    await reviewStore.save({
+      reviewId, projectId, subjectId, stage: stage || 'master', status: 'REVIEW_INFRA_ERROR',
+      contentHash: hashPlanContent(planContent || ''), contractHash: hashPlanContract(failedCompilation.contract),
+      subjectDescriptorHash, contract: failedCompilation.contract, rulesetVersion: REVIEW_RULESET_VERSION,
+      issues: [{ severity: 'ERROR', rule: failureRule, message: msg }], audit,
+      progress: { phase: 'COMPLETE', message: msg, lastHeartbeatAt: audit.completedAt, sequence: 1, errorCount: 1 },
+      startedAt: reviewStartedAt, completedAt: audit.completedAt, updatedAt: audit.completedAt,
+    }).catch((storeError) => console.error('[/review-plan] failed to persist review failure:', storeError));
+    sendSSE({ type: 'error', code: failureCode, message: msg, audit });
     if (!res.destroyed && !res.writableEnded) res.end();
   }
 });
@@ -463,7 +1023,7 @@ llmRouter.post('/complete-one-shot', async (req: Request, res: Response) => {
     const suggestParsed = safeJsonParse(suggestText) as
       | { suggestions?: unknown[]; reasoning?: string }
       | null;
-    const suggestions = Array.isArray(suggestParsed?.suggestions) ? suggestParsed.suggestions : [];
+    const suggestions = normalizeOneShotSuggestions(Array.isArray(suggestParsed?.suggestions) ? suggestParsed.suggestions : []);
     const reasoning = (suggestParsed?.reasoning as string) || '';
 
     // ── 第二步: 基于"原需求 + 已有模块 + 新推荐模块"展开需求 ──
@@ -475,7 +1035,7 @@ llmRouter.post('/complete-one-shot', async (req: Request, res: Response) => {
     const enrichPrompt = `你是产品经理 + BladeX 架构师。根据用户简短需求和已配置模块,生成一份完整业务需求描述。
 输出: 纯文本(非 markdown), 含:
 1. 业务领域简介(1-2 句)
-2. 业务字段清单(字段名/类型/必填/注释, 至少 6-10 个)
+2. 业务字段清单(每个字段必须独占一行, 格式严格为: fieldName / JavaType / 必填|非必填 / description, 至少 6-10 个)
 3. 业务状态机(如适用)
 4. 关键业务规则
 5. 是否需要 Excel/Feign 等辅助
@@ -506,7 +1066,30 @@ llmRouter.post('/complete-one-shot', async (req: Request, res: Response) => {
 // ==================== /split-plan (非流式 JSON) ====================
 
 llmRouter.post('/split-plan', async (req: Request, res: Response) => {
-  const { planContent } = req.body as { planContent: string };
+  const { planContent, reviewId, projectId, subjectId } = req.body as {
+    planContent: string; reviewId?: string; projectId?: string; subjectId?: string;
+  };
+
+  const reviewRecord = reviewId ? reviewStore.get(reviewId) : undefined;
+  if (!reviewRecord || !reviewStore.isCurrent(reviewId!)) {
+    res.status(428).json({ success: false, code: 'REVIEW_REQUIRED', error: 'A current persisted successful master-plan review is required before splitting' });
+    return;
+  }
+  if (!projectId?.trim() || !subjectId?.trim()
+    || reviewRecord.projectId !== projectId.trim() || reviewRecord.subjectId !== subjectId.trim()) {
+    res.status(428).json({ success: false, code: 'REVIEW_REQUIRED', error: 'Review evidence does not belong to the requested project and master plan' });
+    return;
+  }
+  if (reviewRecord.stage !== 'master' || (reviewRecord.status !== 'PASSED' && reviewRecord.status !== 'PASSED_WITH_WARNINGS')) {
+    res.status(422).json({ success: false, code: 'REVIEW_BLOCKED', error: `Review ${reviewId} is not a successful master-plan review` });
+    return;
+  }
+  const currentCompilationForReview = compilePlanContract(planContent);
+  if (reviewRecord.contentHash !== hashPlanContent(planContent)
+    || reviewRecord.contractHash !== hashPlanContract(currentCompilationForReview.contract)) {
+    res.status(412).json({ success: false, code: 'REVIEW_STALE', error: 'Plan content or canonical contract changed after review' });
+    return;
+  }
 
   if (!isLlmConfigured()) {
     res.json({ success: true, data: mockSplit(planContent) });
@@ -514,58 +1097,63 @@ llmRouter.post('/split-plan', async (req: Request, res: Response) => {
   }
 
   try {
-    const refSummary = await getReferenceAdaptationSummary();
-    const text = await callAnthropicJson(withReferenceSummary(buildSplitPlanSystemPrompt(), refSummary), `总方案:\n\n${planContent}`, { timeoutMs: LLM_LONG_REQUEST_TIMEOUT_MS });
-    const parsed = safeJsonParse(text);
-    const subPlans = Array.isArray(parsed?.subPlans) ? (parsed.subPlans as unknown[]) : [];
-    if (subPlans.length === 0) {
-      // LLM 偶尔返回不规范 JSON,降级到 Mock 防 UI 卡死
-      res.json({ success: true, data: mockSplit(planContent) });
+    const referenceEvidence = await getReferenceReviewEvidence(stripPlanContractBlock(planContent));
+    const refSummary = formatReferenceReviewEvidence(referenceEvidence);
+    const initialCompilation = compilePlanContract(planContent);
+    const canonicalPlanContent = upsertPlanContractBlock(planContent, initialCompilation.contract);
+    const canonicalCompilation = compilePlanContract(canonicalPlanContent);
+    const deterministicIssues = validatePlanContract(canonicalCompilation, referenceEvidence, canonicalPlanContent);
+    const blockingIssues = deterministicIssues.filter((issue) => issue.severity === 'ERROR');
+    if (blockingIssues.length > 0) {
+      res.status(422).json({
+        success: false,
+        code: 'SPLIT_BLOCKED',
+        error: `Plan has ${blockingIssues.length} deterministic ERROR and cannot be split`,
+        issues: blockingIssues,
+        referenceSnapshotId: referenceEvidence.search?.snapshotId,
+      });
       return;
     }
-    // 补齐字段
-    const normalized = subPlans.map((raw, i) => {
-      const sp = raw as Record<string, unknown>;
-      return {
-        id: typeof sp.id === 'string' ? sp.id : `sub_${i + 1}`,
-        masterPlanId: 'plan_1',
-        index: typeof sp.index === 'number' ? sp.index : i + 1,
-        title: typeof sp.title === 'string' ? sp.title : `子方案${i + 1}`,
-        planContent: typeof sp.planContent === 'string' ? sp.planContent : '',
-        prerequisites: Array.isArray(sp.prerequisites) ? sp.prerequisites : [],
-        // 拆分成功 = 全部子方案文本已生成, 统一标记 GENERATED。
-        // (原 i===0 仅标记首个, 导致列表里只有第一个状态 Tag 更新, 其余误显"待生成"。)
-        status: 'GENERATED',
-      };
-    });
 
-    // 关键校验: title 必须命中 Part B 的模块层关键字, 否则 parseAtomicTasks 会落到兜底 Code.java
-    // 命中率 < 50% 时降级到 Mock, 避免污染 Part B 生成
-    const validKeywords = [
-      'DDL', '数据库', '建表', 'sql',
-      'Entity', '实体',
-      'VO', '视图',
-      'Mapper',
-      'Service', '服务',
-      'Controller', '控制器', 'API',
-      'Wrapper', '包装',
-      'Excel', '导入导出',
-      'Feign', '远程',
-    ];
-    const titleHasKeyword = (t: string) => {
-      const lower = t.toLowerCase();
-      return validKeywords.some((k) => lower.includes(k.toLowerCase()));
-    };
-    const hitCount = normalized.filter((sp) => titleHasKeyword(sp.title)).length;
-    const hitRate = normalized.length === 0 ? 0 : hitCount / normalized.length;
-    if (hitRate < 0.5) {
-      console.warn(
-        `[/split-plan] LLM 拆分 title 命中率过低(${hitCount}/${normalized.length}=${(hitRate * 100).toFixed(0)}%), 降级到 Mock 模板. 实际 titles: ${normalized.map((s) => s.title).join(' / ')}`
-      );
-      res.json({ success: true, data: mockSplit(planContent) });
+    const text = await callAnthropicJson(
+      withReferenceSummary(buildSplitPlanSystemPrompt(), refSummary),
+      `Split this reviewed plan from its canonical plan-contract. Do not invent modules, identities or deliverables:\n\n${canonicalPlanContent}`,
+      { timeoutMs: LLM_LONG_REQUEST_TIMEOUT_MS });
+    const recovery = await parseSplitModelResponseWithRecovery(
+      text,
+      canonicalCompilation.contract,
+      (protocolError, malformedResponse) => callAnthropicJson(
+        withReferenceSummary(buildSplitSchemaRecoverySystemPrompt(), refSummary),
+        `Protocol error: ${protocolError}
+
+Canonical plan (authoritative):
+${canonicalPlanContent}
+
+Malformed split response:
+${malformedResponse}`,
+        { timeoutMs: LLM_LONG_REQUEST_TIMEOUT_MS, maxTokens: 8_000 },
+      ),
+      subjectId.trim(),
+    );
+    if (!recovery.parsed.ok) {
+      res.status(502).json({
+        success: false,
+        code: 'SPLIT_INFRA_ERROR',
+        error: recovery.parsed.error,
+        schemaRecoveryAttempted: recovery.schemaRecovered,
+        referenceSnapshotId: referenceEvidence.search?.snapshotId,
+      });
       return;
     }
-    res.json({ success: true, data: { subPlans: normalized } });
+    res.json({
+      success: true,
+      data: recovery.parsed.value,
+      schemaRecovered: recovery.schemaRecovered,
+      contractVersion: canonicalCompilation.contract.contractVersion,
+      referenceSnapshotId: referenceEvidence.search?.snapshotId,
+      reviewId,
+      contractHash: hashPlanContract(canonicalCompilation.contract),
+    });
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     console.error('[/split-plan] LLM 调用失败:', msg);
@@ -582,6 +1170,59 @@ function withReferenceSummary(basePrompt: string, refSummary: string | null): st
 }
 
 /** 按 ## 章节标题替换方案内容。标题没匹配上的 fix 跳过(不破坏原方案)。 */
+export function mergeReviewIssues(
+  deterministic: DeterministicPlanIssue[],
+  modelIssues: Array<{ severity: 'ERROR' | 'WARN'; rule: string; message: string }>,
+): Array<{ severity: 'ERROR' | 'WARN'; rule: string; message: string }> {
+  const merged = new Map<string, { severity: 'ERROR' | 'WARN'; rule: string; message: string }>();
+  for (const issue of [...deterministic, ...modelIssues]) {
+    const key = `${issue.rule}|${issue.message}`;
+    const existing = merged.get(key);
+    if (!existing || (existing.severity === 'WARN' && issue.severity === 'ERROR')) {
+      merged.set(key, { severity: issue.severity, rule: issue.rule, message: issue.message });
+    }
+  }
+  return Array.from(merged.values());
+}
+
+function filterAutomaticRepairOperations(
+  repairs: PlanRepairOperation[],
+  referenceEvidence: Awaited<ReturnType<typeof getReferenceReviewEvidence>>,
+  contract: ReturnType<typeof compilePlanContract>['contract'],
+): PlanRepairOperation[] {
+  const unsafe = new Set(['ADD_MODULE', 'MOVE_ENTITY', 'SPLIT_AGGREGATE', 'DECLARE_ARCHITECTURE_DECISION',
+    'RENAME_ENTITY', 'ADD_DELIVERABLE', 'CHANGE_STATE_OWNER', 'NORMALIZE_DELIVERABLE_TOPOLOGY']);
+  const decision = referenceEvidence.search?.decisions[0];
+  const stringArgument = (repair: PlanRepairOperation, name: string): string | undefined => {
+    const value = repair.arguments[name];
+    return typeof value === 'string' && value.trim() ? value.trim() : undefined;
+  };
+  return repairs.filter((repair) => {
+    if (unsafe.has(repair.operation)) return false;
+    if (repair.operation === 'ADD_INTEGRATION') {
+      const targetModule = stringArgument(repair, 'targetModule');
+      const sourceModule = stringArgument(repair, 'sourceModule');
+      const entrypoint = stringArgument(repair, 'entrypoint');
+      const evidenceClasses = decision?.evidenceSymbols.map((symbol) => symbol.slice(symbol.lastIndexOf('.') + 1)) ?? [];
+      return Boolean(decision && decision.decision !== 'ARCHITECTURE_DECISION_REQUIRED'
+        && decision.confidence >= 0.9 && decision.targetModule === targetModule
+        && (!sourceModule || sourceModule === contract.identity.moduleName)
+        && entrypoint && evidenceClasses.some((className) => entrypoint.startsWith(`${className}.`)));
+    }
+    if (repair.operation === 'ADD_REFERENCE_BINDING' || repair.operation === 'BIND_EXISTING_SYMBOL') {
+      const referenceSymbol = stringArgument(repair, 'referenceSymbol');
+      const targetModule = stringArgument(repair, 'targetModule');
+      const requestedDecision = stringArgument(repair, 'decision');
+      return Boolean(decision && (decision.decision === 'REUSE' || decision.decision === 'EXTEND')
+        && decision.confidence >= 0.9 && referenceSymbol
+        && decision.evidenceSymbols.includes(referenceSymbol)
+        && requestedDecision === decision.decision
+        && (!targetModule || targetModule === decision.targetModule));
+    }
+    return false;
+  });
+}
+
 function applyFixes(plan: string, fixes: { section: string; newContent: string }[]): { result: string; applied: number; skipped: number } {
   let result = plan;
   let applied = 0;
@@ -603,10 +1244,81 @@ function applyFixes(plan: string, fixes: { section: string; newContent: string }
   return { result, applied, skipped };
 }
 
-/** 调用 Anthropic Messages API(非流式),返回首个 text block */
+class ReviewInfrastructureError extends Error {
+  constructor(message: string, public readonly audit: ReviewAuditEvidence) {
+    super(message);
+    this.name = 'ReviewInfrastructureError';
+  }
+}
+
+function normalizeReviewSubjectDescriptor(
+  value: unknown,
+  planContent: string,
+  subjectId: string,
+): { ok: true; value: SubPlanDescriptorHashMaterial } | { ok: false; error: string } {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return { ok: false, error: 'A canonical sub-plan descriptor is required for sub-plan review.' };
+  }
+  const row = value as Record<string, unknown>;
+  const arrays = ['prerequisites', 'deliverableIds', 'referencedElementIds', 'inputTypes', 'outputTypes'] as const;
+  if (row.id !== subjectId || !Number.isInteger(row.index) || Number(row.index) < 1
+    || typeof row.title !== 'string' || !row.title.trim()
+    || typeof row.contractHash !== 'string' || !/^[a-f0-9]{64}$/.test(row.contractHash)
+    || arrays.some((key) => !Array.isArray(row[key])
+      || !(row[key] as unknown[]).every((item) => typeof item === 'string' && Boolean(item.trim())))) {
+    return { ok: false, error: 'Sub-plan descriptor fields are invalid or do not match the reviewed subject.' };
+  }
+  return {
+    ok: true,
+    value: {
+      id: subjectId,
+      index: Number(row.index),
+      title: row.title.trim(),
+      contentHash: hashPlanContent(planContent),
+      prerequisites: [...row.prerequisites as string[]],
+      deliverableIds: [...row.deliverableIds as string[]],
+      contractHash: row.contractHash,
+      referencedElementIds: [...row.referencedElementIds as string[]],
+      inputTypes: [...row.inputTypes as string[]],
+      outputTypes: [...row.outputTypes as string[]],
+    },
+  };
+}
+
+function buildReviewAudit(
+  reviewId: string,
+  startedAt: string,
+  rounds: ReviewRoundEvidence[],
+): ReviewAuditEvidence {
+  return {
+    reviewId,
+    rulesetVersion: REVIEW_RULESET_VERSION,
+    startedAt,
+    completedAt: new Date().toISOString(),
+    rounds: rounds.map((round) => ({ ...round })),
+  };
+}
+
+/** Emits periodic progress while a non-streaming upstream request is pending. */
+export async function awaitWithHeartbeat<T>(
+  operation: Promise<T>,
+  onHeartbeat: () => void,
+  intervalMs = REVIEW_HEARTBEAT_MS,
+): Promise<T> {
+  const timer = setInterval(onHeartbeat, intervalMs);
+  timer.unref?.();
+  try {
+    return await operation;
+  } finally {
+    clearInterval(timer);
+  }
+}
+
+/** Calls the non-streaming Anthropic Messages API and returns the first text block. */
 interface AnthropicCallOptions {
   timeoutMs?: number;
   signal?: AbortSignal;
+  maxTokens?: number;
 }
 
 async function callAnthropicJson(
@@ -630,7 +1342,7 @@ async function callAnthropicJson(
       headers: buildAuthHeaders(),
       body: JSON.stringify({
         model: cfg.model,
-        max_tokens: cfg.maxTokens,
+        max_tokens: options.maxTokens ?? cfg.maxTokens,
         system: systemPrompt,
         messages: [{ role: 'user', content: userPrompt }],
       }),
@@ -653,140 +1365,122 @@ async function callAnthropicJson(
 /** 流式调用 — Anthropic SSE → 转译为前端约定的 SSE 帧 */
 async function handleLiveGeneratePlan(req: Request, res: Response): Promise<void> {
   const { userInput, modules } = req.body as { userInput: string; modules?: ModuleSummary[] };
-
-  // 从模块配置提取强约束(表名/模块名/实体名/字段),作为权威默认值传给 LLM,
-  // 用户没在需求文本里写的, LLM 会从这些约束自动补全, 而不是自由发挥。
+  try {
+    assertSingleConfiguredEntity(modules || []);
+  } catch (error) {
+    res.status(409).json({ success: false, code: 'PLAN_INPUT_CONFLICT', error: error instanceof Error ? error.message : String(error) });
+    return;
+  }
   const constraints: string[] = [];
-  for (const m of modules || []) {
-    const cfg = (m.config ?? {}) as Record<string, unknown>;
-    if (m.type === 'ENTITY') {
-      if (cfg.tableName) constraints.push(`表名: ${cfg.tableName}`);
-      if (cfg.moduleName) constraints.push(`模块名: ${cfg.moduleName}`);
-      if (cfg.entityName) constraints.push(`实体名: ${cfg.entityName}`);
-      if (cfg.needExcel) constraints.push(`需要 Excel 导入导出`);
-      if (cfg.needVO) constraints.push(`需要 VO 类 (QVO/IVO/UVO/VO)`);
-      // 字段列表作为强约束传给 LLM
-      const fields = cfg.fields as Array<{ name: string; type: string; comment: string; nullable: boolean }> | undefined;
-      if (fields && fields.length > 0) {
-        constraints.push(`业务字段 (严格使用以下定义, 不要增减):`);
-        for (const f of fields) {
-          const nullInfo = f.nullable === false ? '非空' : '可空';
-          constraints.push(`  - ${f.name}: ${f.type} (${f.comment || '无注释'}, ${nullInfo})`);
-        }
+  for (const module of modules || []) {
+    const config = (module.config ?? {}) as Record<string, unknown>;
+    if (module.type === 'ENTITY') {
+      if (config.tableName) constraints.push(`tableName=${config.tableName}`);
+      if (config.moduleName) constraints.push(`moduleName=${config.moduleName}`);
+      if (config.entityName) constraints.push(`entityName=${config.entityName}`);
+      const fields = config.fields as Array<{ name: string; type: string; comment?: string; nullable?: boolean }> | undefined;
+      for (const field of fields || []) {
+        constraints.push(`field ${field.name}:${field.type}, required=${field.nullable === false}, description=${field.comment || ''}`);
       }
+      if (config.needVO) constraints.push('deliverable VO is required');
+      if (config.needExcel) constraints.push('deliverable EXCEL is required');
     }
-    if (m.type === 'API' && cfg.pathPrefix) {
-      constraints.push(`API 路径前缀: /${cfg.pathPrefix}`);
-    }
-    if (m.type === 'FEIGN' && cfg.targetService) {
-      constraints.push(`Feign 目标服务: ${cfg.targetService}`);
-    }
-    if (m.type === 'EXCEL' && cfg.entityName) {
-      constraints.push(`Excel 关联实体: ${cfg.entityName}`);
-    }
+    if (module.type === 'API' && config.pathPrefix) constraints.push(`API path prefix=/${config.pathPrefix}`);
+    if (module.type === 'FEIGN' && config.targetService) constraints.push(`Feign target service=${config.targetService}`);
   }
-  const constraintsBlock = constraints.length > 0
-    ? `\n\n## 强约束(必须采用, 不要替换)\n${constraints.map((c) => '- ' + c).join('\n')}`
-    : '';
-
   const moduleSummary = (modules || [])
-    .map((m, i) => `${i + 1}. [${m.type}] ${m.icon} ${m.name}  config=${JSON.stringify(m.config ?? {})}`)
-    .join('\n') || '(无)';
+    .map((module, index) => `${index + 1}. [${module.type}] ${module.name} config=${JSON.stringify(module.config ?? {})}`)
+    .join('\n') || '(none)';
+  const userPrompt = `Requirement:\n${(userInput || '').trim() || '(empty)'}\n\nConfigured modules:\n${moduleSummary}\n\nImmutable constraints:\n${constraints.join('\n') || '(none)'}`;
 
-  const trimmed = (userInput || '').trim();
-  const isShortRequirement = trimmed.length < 30;
-  const guidance = isShortRequirement
-    ? '\n\n## 推断指南\n用户需求较简短, 请根据业务领域常识合理推断字段集、状态机、辅助功能(Excel/Feign), 并在方案开头明示推断的实体名/模块名/表名/包路径。'
-    : '';
-
-  const userPrompt =
-    `## 用户需求\n${trimmed || '(未填写)'}` +
-    `\n\n## 已拖入的模块\n${moduleSummary}` +
-    constraintsBlock +
-    guidance +
-    `\n\n请生成完整的 BladeX 后端开发方案。`;
-
-  const cfg = getLlmConfig();
-  const base = cfg.baseUrl.replace(/\/+$/, '');
-
-  // 用于取消上游请求
   const controller = new AbortController();
-  const finishUpstreamLifetime = bindUpstreamAbort(
-    res,
-    controller,
-    LLM_LONG_REQUEST_TIMEOUT_MS,
-    (reason) => console.warn(`[/generate-plan] cancelled: ${reason}`),
-  );
-
-  let headersSent = false;
-  let upstream: globalThis.Response;
-  try {
-    const refSummary = await getReferenceAdaptationSummary();
-    upstream = await fetchWithTransientRetry(`${base}/v1/messages`, {
-      method: 'POST',
-      headers: { ...buildAuthHeaders(), accept: 'text/event-stream' },
-      body: JSON.stringify({
-        model: cfg.model,
-        max_tokens: cfg.maxTokens,
-        stream: true,
-        system: withReferenceSummary(buildGeneratePlanSystemPrompt(), refSummary),
-        messages: [{ role: 'user', content: userPrompt }],
-      }),
-      signal: controller.signal,
-    });
-  } catch (err) {
-    finishUpstreamLifetime();
-    const msg = err instanceof Error ? err.message : String(err);
-    if (!res.destroyed && !res.writableEnded) {
-      res.status(502).json({ success: false, error: `Anthropic network error: ${msg}` });
-    }
-    return;
-  }
-
-  if (!upstream.ok || !upstream.body) {
-    finishUpstreamLifetime();
-    const errText = await upstream.text().catch(() => '');
-    // 此时尚未写 SSE 头,直接 502 让前端能感知到错误
-    if (!res.destroyed && !res.writableEnded) {
-      res.status(502).json({
-        success: false,
-        error: `Anthropic ${upstream.status}: ${errText.slice(0, 300)}`,
-      });
-    }
-    return;
-  }
-
-  // 进入流式输出阶段
-  res.setHeader('Content-Type', 'text/event-stream');
-  res.setHeader('Cache-Control', 'no-cache');
-  res.setHeader('Connection', 'keep-alive');
-  res.setHeader('X-Accel-Buffering', 'no'); // 防止 nginx 缓冲
-  headersSent = true;
-  // 立即 flush headers 触发前端 reader
-  res.flushHeaders?.();
-
+  const finish = bindUpstreamAbort(res, controller, LLM_LONG_REQUEST_TIMEOUT_MS,
+    (reason) => console.warn(`[/generate-plan] cancelled: ${reason}`));
+  res.writeHead(200, {
+    'Content-Type': 'text/event-stream; charset=utf-8',
+    'Cache-Control': 'no-cache, no-transform',
+    'Connection': 'keep-alive',
+    'X-Accel-Buffering': 'no',
+  });
+  res.flushHeaders();
+  res.socket?.setNoDelay(true);
   const send = (data: object) => {
-    if (res.destroyed || res.writableEnded) return;
-    res.write(`data: ${JSON.stringify(data)}\n\n`);
+    if (!res.destroyed && !res.writableEnded) res.write(`data: ${JSON.stringify(data)}\n\n`);
   };
-
-  send({ type: 'progress', stage: 'analyzing', message: '正在分析需求结构...' });
-  send({ type: 'progress', stage: 'planning', message: '正在生成开发方案...' });
-
-  const reader = upstream.body.getReader();
+  send({ type: 'progress', stage: 'analyzing', message: '正在分析需求并加载参考项目证据...' });
 
   try {
-    const totalChars = await consumeAnthropicStream(reader, (chunk) => {
-      send({ type: 'content', chunk });
+    const referenceEvidence = await getReferenceReviewEvidence(userPrompt);
+    const referenceSummary = formatReferenceReviewEvidenceForGeneration(referenceEvidence);
+    const configuredDraft = compileConfiguredPlanDraft(userInput || '', modules || []);
+    if (configuredDraft) {
+      send({ type: 'progress', stage: 'planning', message: '正在根据已配置模块编译 Canonical Plan Contract v2...' });
+      const normalizedDraft = normalizePlanDraftAgainstRequirement(configuredDraft, userInput || '');
+      const referenceGrounded = groundPlanDraftWithReferenceEvidence(normalizedDraft, referenceEvidence);
+      const contract = applyReferenceGrounding(
+        compileStructuredPlanDraft(referenceGrounded.draft, referenceEvidence.search?.snapshotId),
+        referenceGrounded.grounding,
+      );
+      const markdown = renderStructuredPlan(referenceGrounded.draft, contract);
+      const compilation = compilePlanContract(markdown);
+      const structuralErrors = validatePlanContract(compilation, referenceEvidence, markdown)
+        .filter(isPlanDraftGenerationBlockingIssue);
+      if (structuralErrors.length > 0) {
+        throw new Error(`PLAN_DRAFT_VALIDATION_ERROR: ${structuralErrors.map((issue) => `${issue.rule}: ${issue.message}`).join('; ')}`);
+      }
+      for (let index = 0; index < markdown.length; index += 600) send({ type: 'content', chunk: markdown.slice(index, index + 600) });
+      send({ type: 'complete', tokensUsed: 0, contractHash: hashPlanContract(compilation.contract), deterministic: true });
+      return;
+    }
+    let waitingSeconds = 0;
+    const raw = await awaitWithHeartbeat(callAnthropicJson(
+      withReferenceSummary(buildGeneratePlanSystemPrompt(), referenceSummary),
+      userPrompt,
+      { timeoutMs: LLM_LONG_REQUEST_TIMEOUT_MS, signal: controller.signal, maxTokens: PLAN_DRAFT_MAX_TOKENS },
+    ), () => {
+      waitingSeconds += Math.round(REVIEW_HEARTBEAT_MS / 1000);
+      send({ type: 'progress', stage: 'planning', message: `方案生成中 (${waitingSeconds}s)...` });
     });
-    send({ type: 'complete', tokensUsed: totalChars });
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    console.error('[/generate-plan] stream read failed:', msg);
-    if (headersSent) send({ type: 'error', error: msg });
+    let parsed = parsePlanDraftResponse(raw);
+    if (!parsed.ok) {
+      send({ type: 'progress', stage: 'planning', message: '结构化草案不符合协议，正在执行一次 Schema 恢复...' });
+      const recovered = await callAnthropicJson(
+        withReferenceSummary(
+          `${buildGeneratePlanSystemPrompt()}\nRepair the malformed draft into the exact schema. Preserve every immutable constraint and business field from the original input.`,
+          referenceSummary,
+        ),
+        `Original generation input:\n${userPrompt}\n\nProtocol error: ${parsed.error}\n\nMalformed response:\n${raw}`,
+        { timeoutMs: LLM_LONG_REQUEST_TIMEOUT_MS, signal: controller.signal, maxTokens: PLAN_DRAFT_MAX_TOKENS },
+      );
+      parsed = parsePlanDraftResponse(recovered);
+    }
+    if (!parsed.ok) throw new Error(`PLAN_DRAFT_PROTOCOL_ERROR: ${parsed.error}`);
+
+    const normalizedDraft = normalizePlanDraftAgainstRequirement(parsed.value, userInput || '');
+    const referenceGrounded = groundPlanDraftWithReferenceEvidence(normalizedDraft, referenceEvidence);
+    const contract = applyReferenceGrounding(
+      compileStructuredPlanDraft(referenceGrounded.draft, referenceEvidence.search?.snapshotId),
+      referenceGrounded.grounding,
+    );
+    const markdown = renderStructuredPlan(referenceGrounded.draft, contract);
+    const compilation = compilePlanContract(markdown);
+    const issues = validatePlanContract(compilation, referenceEvidence, markdown);
+    const structuralErrors = issues.filter(isPlanDraftGenerationBlockingIssue);
+    if (structuralErrors.length > 0) {
+      throw new Error(`PLAN_DRAFT_VALIDATION_ERROR: ${structuralErrors.map((issue) => `${issue.rule}: ${issue.message}`).join('; ')}`);
+    }
+
+    send({ type: 'progress', stage: 'planning', message: '结构化契约已通过校验，正在渲染方案正文...' });
+    for (let index = 0; index < markdown.length; index += 600) {
+      send({ type: 'content', chunk: markdown.slice(index, index + 600) });
+    }
+    send({ type: 'complete', tokensUsed: raw.length, contractHash: hashPlanContract(compilation.contract) });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    console.error('[/generate-plan] failed:', message);
+    send({ type: 'error', error: message });
   } finally {
-    finishUpstreamLifetime();
-    try { await reader.cancel(); } catch { /* noop */ }
+    finish();
     if (!res.destroyed && !res.writableEnded) res.end();
   }
 }
@@ -805,101 +1499,98 @@ async function handleMockGeneratePlan(req: Request, res: Response): Promise<void
   let clientGone = false;
   req.on('close', () => { clientGone = true; });
 
-  const moduleList = (modules || []).map((m) => `${m.icon} ${m.name}`).join(', ');
+  const entityModule = (modules || []).find((module) => module.type === 'ENTITY');
+  const config = entityModule?.config && typeof entityModule.config === 'object' && !Array.isArray(entityModule.config)
+    ? entityModule.config as Record<string, unknown> : {};
+  const moduleName = typeof config.moduleName === 'string' && config.moduleName.trim()
+    ? config.moduleName.trim().toLowerCase().replace(/^blade-/, '').replace(/-api$/, '') : 'order';
+  const entityName = typeof config.entityName === 'string' && /^[A-Z][A-Za-z0-9]*$/.test(config.entityName.trim())
+    ? config.entityName.trim() : 'Order';
+  const tableName = typeof config.tableName === 'string' && config.tableName.trim()
+    ? config.tableName.trim() : `blade_${moduleName.replace(/-/g, '_')}`;
+  const configuredFields = Array.isArray(config.fields) ? config.fields.filter((field): field is Record<string, unknown> =>
+    typeof field === 'object' && field !== null && !Array.isArray(field)) : [];
+  const fields: PlanDraftV2['fields'] = configuredFields.length > 0
+    ? configuredFields.map((field, index) => ({
+      name: typeof field.name === 'string' && field.name.trim() ? field.name.trim() : `field${index + 1}`,
+      columnName: typeof field.columnName === 'string' && field.columnName.trim()
+        ? field.columnName.trim() : typeof field.name === 'string' ? field.name.replace(/([a-z0-9])([A-Z])/g, '$1_$2').toLowerCase() : `field_${index + 1}`,
+      javaType: typeof field.javaType === 'string' && field.javaType.trim() ? field.javaType.trim() : 'String',
+      required: field.required === true,
+      role: field.role === 'DERIVED' ? 'DERIVED' : 'PERSISTENT',
+      description: typeof field.description === 'string' && field.description.trim() ? field.description.trim() : 'Configured business field',
+    }))
+    : [
+      { name: `${moduleName.replace(/-([a-z])/g, (_, letter: string) => letter.toUpperCase())}No`, columnName: `${moduleName.replace(/-/g, '_')}_no`, javaType: 'String', required: true, role: 'PERSISTENT', description: 'Business number' },
+      { name: 'name', columnName: 'name', javaType: 'String', required: true, role: 'PERSISTENT', description: 'Business name' },
+      { name: 'status', columnName: 'status', javaType: 'Integer', required: true, role: 'PERSISTENT', description: 'Business status' },
+      { name: 'remark', columnName: 'remark', javaType: 'String', required: false, role: 'PERSISTENT', description: 'Remark' },
+    ];
+  const deliverables: PlanDraftV2['deliverables'] = [
+    { kind: 'DDL', moduleSide: 'DOC', action: 'CREATE' },
+    { kind: 'ENTITY', className: entityName, moduleSide: 'API', action: 'CREATE' },
+    { kind: 'VO', className: `${entityName}VO`, moduleSide: 'API', action: 'CREATE' },
+    { kind: 'MAPPER', className: `${entityName}Mapper`, moduleSide: 'IMPL', action: 'CREATE' },
+    { kind: 'SERVICE', className: `I${entityName}Service`, moduleSide: 'IMPL', action: 'CREATE' },
+    { kind: 'CONTROLLER', className: `${entityName}Controller`, moduleSide: 'IMPL', action: 'CREATE' },
+  ];
+  if (config.needFeign === true) deliverables.push({ kind: 'FEIGN', className: `I${entityName}Client`, moduleSide: 'API', action: 'CREATE' });
+  if (config.needExcel === true) deliverables.push({ kind: 'EXCEL', className: `${entityName}Excel`, moduleSide: 'IMPL', action: 'CREATE' });
 
-  const mockPlan = `# 开发方案
-
-## 1. 需求分析
-根据用户输入"${userInput || '(未输入)'}"${moduleList ? `及已拖入模块[${moduleList}]` : ''}，分析如下：
-
-## 2. 模块结构
-- **API模块**: \`blade-service-api/blade-order-api\`
-- **服务模块**: \`blade-service/blade-order\`
-
-## 3. 数据库设计
-\`\`\`sql
-CREATE TABLE blade_order (
-    id BIGINT PRIMARY KEY COMMENT '主键(雪花算法)',
-    order_no VARCHAR(50) NOT NULL COMMENT '订单编号',
-    customer_name VARCHAR(100) COMMENT '客户名称',
-    amount DECIMAL(18,2) COMMENT '金额',
-    status INT DEFAULT 1 COMMENT '状态',
-    remark VARCHAR(500) COMMENT '备注',
-    create_user BIGINT COMMENT '创建人',
-    create_time DATETIME COMMENT '创建时间',
-    update_user BIGINT COMMENT '修改人',
-    update_time DATETIME COMMENT '修改时间',
-    is_deleted INT DEFAULT 0 COMMENT '逻辑删除'
-) COMMENT '订单表';
-\`\`\`
-
-## 4. Entity定义
-- 类名: \`Order\`
-- 包路径: \`org.springblade.order.entity\`
-- 继承: \`BaseEntity\`
-- 注解: \`@Data @TableName("blade_order") @EqualsAndHashCode(callSuper = true)\`
-
-## 5. VO类型
-| 类型 | 类名 | 说明 |
-|------|------|------|
-| QVO | OrderQVO | 查询参数 |
-| IVO | OrderIVO | 新增参数 |
-| UVO | OrderUVO | 修改参数 |
-| VO | OrderVO | 输出视图 |
-
-## 6. Mapper接口
-\`OrderMapper extends BaseMapper<Order>\`
-
-## 7. Service层
-- 接口: \`IOrderService extends BaseService<Order>\`
-- 实现: \`OrderServiceImpl extends BaseServiceImpl<OrderMapper, Order>\`
-
-## 8. Controller端点
-| 方法 | 路径 | 说明 |
-|------|------|------|
-| GET | /order/detail | 详情 |
-| GET | /order/list | 分页列表 |
-| POST | /order/save | 新增 |
-| POST | /order/update | 修改 |
-| POST | /order/remove | 逻辑删除 |
-
-## 9. 实现顺序
-1. 数据库DDL → 2. Entity与VO → 3. Mapper → 4. Service → 5. Controller
-`;
-
-  const lines = mockPlan.split('\n');
+  const draft: PlanDraftV2 = {
+    identity: { moduleName, entityName, tableName, basePackage: `org.springblade.${moduleName.replace(/-/g, '')}` },
+    title: `${entityName} development plan`,
+    requirementSummary: `${userInput || 'Implement the configured business module'}${entityModule ? ` using module ${entityModule.name}` : ''}. Mock mode still emits the same structured canonical contract used by the live workflow.`,
+    fields,
+    states: fields.some((field) => field.name === 'status')
+      ? [{ name: 'businessState', values: ['DRAFT', 'ACTIVE'], transitions: [{ from: 'DRAFT', to: 'ACTIVE', trigger: 'activate' }], referenceField: 'status' }]
+      : [],
+    integrations: [{ type: 'API', sourceModule: moduleName, entrypoint: `${entityName}Controller.list` }],
+    deliverables,
+    architectureDecisions: [],
+  };
+  const contract = compileStructuredPlanDraft(draft);
+  const canonicalMockPlan = renderStructuredPlan(draft, contract);
+  const lines = canonicalMockPlan.split('\n');
 
   const send = (data: object) => {
     if (res.destroyed || res.writableEnded) return;
     res.write(`data: ${JSON.stringify(data)}\n\n`);
   };
 
-  send({ type: 'progress', stage: 'analyzing', message: '正在分析需求结构 (Mock)...' });
-  await sleep(400);
-  send({ type: 'progress', stage: 'planning', message: '正在生成开发方案 (Mock)...' });
-  await sleep(300);
+  send({ type: 'progress', stage: 'analyzing', message: '正在分析需求 (Mock)...' });
+  await sleep(100);
+  send({ type: 'progress', stage: 'planning', message: '正在编译 Canonical Plan Contract v2 (Mock)...' });
+  await sleep(100);
 
-  for (let i = 0; i < lines.length; i++) {
+  for (const line of lines) {
     if (clientGone) return;
-    send({ type: 'content', chunk: lines[i] + '\n' });
-    await sleep(15 + Math.random() * 25);
+    send({ type: 'content', chunk: `${line}\n` });
   }
 
-  await sleep(200);
-  send({ type: 'complete', tokensUsed: 3500 });
+  send({ type: 'complete', tokensUsed: 0 });
   res.end();
 }
 
-function mockSplit(_planContent: string) {
-  return {
-    subPlans: [
-      { id: 'sub_1', masterPlanId: 'plan_1', index: 1, title: '数据库DDL', planContent: '## 子方案1: 数据库DDL\n\n创建业务表 blade_order...', prerequisites: [], status: 'GENERATED' },
-      { id: 'sub_2', masterPlanId: 'plan_1', index: 2, title: 'Entity与VO类', planContent: '## 子方案2: Entity与VO\n\n创建 Order Entity 与 4 个 VO...', prerequisites: ['sub_1'], status: 'GENERATED' },
-      { id: 'sub_3', masterPlanId: 'plan_1', index: 3, title: 'Mapper与Service层', planContent: '## 子方案3: Mapper与Service\n\n实现数据访问和业务逻辑...', prerequisites: ['sub_2'], status: 'GENERATED' },
-      { id: 'sub_4', masterPlanId: 'plan_1', index: 4, title: 'Controller与Wrapper', planContent: '## 子方案4: Controller\n\n实现 5 个标准 CRUD REST 端点...', prerequisites: ['sub_3'], status: 'GENERATED' },
-      { id: 'sub_5', masterPlanId: 'plan_1', index: 5, title: 'Excel导入导出', planContent: '## 子方案5: Excel\n\n实现订单数据 Excel 导出...', prerequisites: ['sub_4'], status: 'GENERATED' },
-    ],
-  };
+function mockSplit(planContent: string) {
+  const contract = compilePlanContract(planContent).contract;
+  const orderedKinds = ['DDL', 'ENTITY', 'VO', 'MAPPER', 'SERVICE', 'CONTROLLER', 'FEIGN', 'EXCEL', 'CONFIG'];
+  const groups = orderedKinds.flatMap((kind) => {
+    const ids = contract.deliverables.filter((item) => item.kind === kind && item.action !== 'PROHIBIT').map((item) => item.id);
+    return ids.length > 0 ? [{ title: `${kind} implementation`, ids }] : [];
+  });
+  const response = parseSplitModelResponse(JSON.stringify({
+    subPlans: groups.map((item, index) => ({
+      id: `sub_${index + 1}`,
+      index: index + 1,
+      title: item.title,
+      planContent: `Implement canonical deliverables: ${item.ids.join(', ')}`,
+      prerequisites: index === 0 ? [] : [`sub_${index}`],
+      deliverableIds: item.ids,
+    })),
+  }), contract);
+  if (!response.ok) throw new Error(response.error);
+  return response.value;
 }
 
 function safeJsonParse(raw: string): Record<string, unknown> | null {

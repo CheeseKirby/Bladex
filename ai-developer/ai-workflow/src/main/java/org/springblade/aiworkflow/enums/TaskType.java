@@ -20,6 +20,7 @@ public enum TaskType {
     CUSTOM_MAPPER("CUSTOM_MAPPER", "自定义查询Mapper"),
     MAPPER_XML("MAPPER_XML", "Mapper XML 映射文件"),
     FEIGN_CLIENT("FEIGN_CLIENT", "Feign远程调用客户端"),
+    FEIGN_PROVIDER("FEIGN_PROVIDER", "Feign服务端实现"),
     EXCEL_IMPORT_EXPORT("EXCEL_IMPORT_EXPORT", "Excel导入导出"),
     NACOS_CONFIG("NACOS_CONFIG", "Nacos配置"),
     DDL_STATEMENT("DDL_STATEMENT", "数据库DDL"),

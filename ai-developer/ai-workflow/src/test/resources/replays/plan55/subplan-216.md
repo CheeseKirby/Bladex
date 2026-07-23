@@ -1,0 +1,2 @@
+实体名: SpecialPeriod, 模块名: specialperiod, 包路径: org.springblade.specialperiod, 表名: blade_special_period.
+创建 blade-specialperiod Service 模块骨架(包含 pom.xml, 启动类 SpecialPeriodApplication 使用 @BladeCloudApplication, bootstrap.yml 配置 Nacos namespace=blade_lxqt, application-dev.yml)。编写 SpecialPeriodMapper 接口及对应 XML，实现 selectPageList, selectEnabledByType, selectAllEnabled, selectStatByCondition 方法。编写 ISpecialPeriodService 接口及 SpecialPeriodServiceImpl 实现类，实现基础 CRUD、状态机(草稿/启用/停用)、互斥重叠校验(支持跨天时间窗)、时段匹配引擎、统计查询等核心业务逻辑。

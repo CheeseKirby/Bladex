@@ -1,6 +1,7 @@
 package org.springblade.aiworkflow.service.impl;
 
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
+import com.baomidou.mybatisplus.core.conditions.update.UpdateWrapper;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.extern.slf4j.Slf4j;
@@ -29,7 +30,9 @@ import org.springblade.aiworkflow.vo.GeneratedFileSummaryVO;
 import org.springblade.aiworkflow.vo.PlanReceiveRequest;
 import org.springblade.aiworkflow.vo.PlanReceiveResponse;
 import org.springblade.aiworkflow.vo.SubPlanDetailVO;
+import org.springblade.aiworkflow.validation.CanonicalJsonHasher;
 import org.springblade.aiworkflow.validation.PlanRequestValidator;
+import org.springframework.dao.DuplicateKeyException;
 import org.springframework.scheduling.annotation.Async;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -92,25 +95,24 @@ public class PlanExecutionServiceImpl implements IPlanExecutionService {
     @Transactional(rollbackFor = Exception.class)
     public PlanReceiveResponse receivePlan(PlanReceiveRequest request) {
         planRequestValidator.validate(request);
-        // M6: 幂等 - 同 projectId + 同 masterPlanContent 已存在且未 FAILED, 返回旧 receptionId
-        // (避免 Part A 超时重试产生重复 plan 并重复执行; 旧 FAILED 则允许新 plan 重来)
-        if (request.getProjectId() != null && request.getMasterPlan() != null
-                && request.getMasterPlan().getContent() != null) {
-            List<AiPlan> existing = planMapper.selectList(new LambdaQueryWrapper<AiPlan>()
-                    .eq(AiPlan::getProjectId, request.getProjectId())
-                    .eq(AiPlan::getMasterPlanContent, request.getMasterPlan().getContent())
-                    .ne(AiPlan::getStatus, PlanStatus.FAILED)
-                    .last("LIMIT 1"));
-            if (!existing.isEmpty()) {
-                AiPlan old = existing.get(0);
-                log.info("重复方案接收(同 projectId+content 且未 FAILED), 返回已有 receptionId: old={}, projectId={}",
-                        old.getReceptionId(), request.getProjectId());
-                PlanReceiveResponse response = new PlanReceiveResponse();
-                response.setReceptionId(old.getReceptionId());
-                response.setStatus(old.getStatus().name());
-                response.setSubPlanStatuses(new LinkedHashMap<>());
-                return response;
+        // Database-backed idempotency closes the check-then-insert race across processes.
+        // FAILED rows release their key lazily on the next retry; MySQL/H2 unique indexes permit multiple NULLs.
+        String idempotencyKey = CanonicalJsonHasher.idempotencyKey(request);
+        List<AiPlan> existingPlans = planMapper.selectList(new LambdaQueryWrapper<AiPlan>()
+                .eq(AiPlan::getIdempotencyKey, idempotencyKey)
+                .last("LIMIT 1"));
+        if (!existingPlans.isEmpty()) {
+            AiPlan existing = existingPlans.get(0);
+            if (existing.getStatus() != PlanStatus.FAILED) {
+                log.info("Duplicate plan intake resolved by idempotency key: receptionId={}, projectId={}",
+                        existing.getReceptionId(), request.getProjectId());
+                return existingResponse(existing);
             }
+            planMapper.update(null, new UpdateWrapper<AiPlan>()
+                    .eq("id", existing.getId())
+                    .eq("idempotency_key", idempotencyKey)
+                    .eq("status", PlanStatus.FAILED.name())
+                    .set("idempotency_key", null));
         }
 
         // 使用完整 UUID (32位 hex) 作为 receptionId,避免截断带来的冲突风险。
@@ -122,13 +124,24 @@ public class PlanExecutionServiceImpl implements IPlanExecutionService {
         plan.setProjectId(request.getProjectId());
         plan.setProjectName(request.getProjectName());
         plan.setReceptionId(receptionId);
+        plan.setIdempotencyKey(idempotencyKey);
         plan.setStatus(PlanStatus.RECEIVED);
         plan.setSourceService(request.getMetadata() != null ? request.getMetadata().getSourceService() : null);
-        GenerationIdentity generationIdentity = GenerationIdentityResolver.resolve(request);
+        GenerationIdentity generationIdentity = request.getCanonicalContract() != null
+                ? request.getCanonicalContract().generationIdentity()
+                : GenerationIdentityResolver.resolve(request);
         try {
             plan.setGenerationIdentityJson(objectMapper.writeValueAsString(generationIdentity));
+            if (request.getCanonicalContract() != null) {
+                plan.setCanonicalContractJson(objectMapper.writeValueAsString(request.getCanonicalContract()));
+            }
+            if (request.getReviewManifest() != null) {
+                plan.setReviewManifestJson(objectMapper.writeValueAsString(request.getReviewManifest()));
+            }
+            plan.setBundleHash(request.getBundleHash());
+            plan.setBundleSignature(request.getBundleSignature());
         } catch (JsonProcessingException e) {
-            throw new IllegalArgumentException("Unable to serialize generation identity", e);
+            throw new IllegalArgumentException("Unable to serialize canonical plan metadata", e);
         }
         plan.setCompileVerificationStatus("NOT_RUN");
         if (request.getMasterPlan() != null) {
@@ -137,7 +150,15 @@ public class PlanExecutionServiceImpl implements IPlanExecutionService {
         // 阶段2: 写入目标(空/非法→ISOLATED,安全默认)。决定后续写盘 root 与是否查重。
         plan.setWriteTarget(WriteTarget.parse(request.getWriteTarget()).getCode());
         plan.setCreateTime(LocalDateTime.now());
-        planMapper.insert(plan);
+        try {
+            planMapper.insert(plan);
+        } catch (DuplicateKeyException duplicate) {
+            AiPlan winner = planMapper.selectByIdempotencyKeyForUpdate(idempotencyKey);
+            if (winner == null) throw duplicate;
+            log.info("Concurrent duplicate plan intake resolved to winner: receptionId={}, projectId={}",
+                    winner.getReceptionId(), request.getProjectId());
+            return existingResponse(winner);
+        }
 
         // 保存子方案
         Map<String, String> subPlanStatuses = new LinkedHashMap<>();
@@ -163,6 +184,19 @@ public class PlanExecutionServiceImpl implements IPlanExecutionService {
                 } else {
                     subPlan.setPrerequisitesJson("[]");
                 }
+                try {
+                    subPlan.setDeliverableIdsJson(objectMapper.writeValueAsString(
+                            sp.getDeliverableIds() == null ? List.of() : sp.getDeliverableIds()));
+                    subPlan.setReferencedElementIdsJson(objectMapper.writeValueAsString(
+                            sp.getReferencedElementIds() == null ? List.of() : sp.getReferencedElementIds()));
+                    subPlan.setInputTypesJson(objectMapper.writeValueAsString(
+                            sp.getInputTypes() == null ? List.of() : sp.getInputTypes()));
+                    subPlan.setOutputTypesJson(objectMapper.writeValueAsString(
+                            sp.getOutputTypes() == null ? List.of() : sp.getOutputTypes()));
+                } catch (JsonProcessingException e) {
+                    throw new IllegalArgumentException("Unable to serialize canonical sub-plan metadata: " + sp.getId(), e);
+                }
+                subPlan.setContractHash(sp.getContractHash());
 
                 subPlanMapper.insert(subPlan);
                 subPlanStatuses.put(sp.getId(), SubPlanStatus.QUEUED.name());
@@ -176,6 +210,26 @@ public class PlanExecutionServiceImpl implements IPlanExecutionService {
         response.setSubPlanStatuses(subPlanStatuses);
 
         log.info("方案接收完成: receptionId={}, subPlanCount={}", receptionId, subPlanStatuses.size());
+        return response;
+    }
+
+    private PlanReceiveResponse existingResponse(AiPlan plan) {
+        PlanReceiveResponse response = new PlanReceiveResponse();
+        response.setReceptionId(plan.getReceptionId());
+        response.setStatus(plan.getStatus() == null ? PlanStatus.RECEIVED.name() : plan.getStatus().name());
+        Map<String, String> statuses = new LinkedHashMap<>();
+        if (plan.getId() != null) {
+            List<AiSubPlan> subPlans = subPlanMapper.selectByPlanId(plan.getId());
+            if (subPlans != null) {
+                for (AiSubPlan subPlan : subPlans) {
+                    String id = subPlan.getPartASubPlanId() == null
+                            ? String.valueOf(subPlan.getId()) : subPlan.getPartASubPlanId();
+                    statuses.put(id, subPlan.getStatus() == null
+                            ? SubPlanStatus.QUEUED.name() : subPlan.getStatus().name());
+                }
+            }
+        }
+        response.setSubPlanStatuses(statuses);
         return response;
     }
 
@@ -210,36 +264,54 @@ public class PlanExecutionServiceImpl implements IPlanExecutionService {
     @Override
     @Async("aiWorkflowExecutor")
     public void executeAsync(String receptionId) {
-        // 幂等保护: 同一 receptionId 进行中时,后续调用直接跳过,
-        // 避免控制器重复触发 / 客户端重试导致并发执行同一工作流。
         if (!inFlight.add(receptionId)) {
-            log.warn("工作流已在执行,跳过重复触发: receptionId={}", receptionId);
+            log.warn("Workflow is already executing in this process; duplicate trigger skipped: receptionId={}", receptionId);
             return;
         }
-        log.info("异步触发工作流执行: receptionId={}", receptionId);
-        // C3: REAL 模式对同一 targetProjectRoot 加进程级写锁, 串行化"查重+写盘"防并发覆盖真实项目
-        AiPlan plan = planMapper.selectOne(
-                new LambdaQueryWrapper<AiPlan>().eq(AiPlan::getReceptionId, receptionId));
+
         java.util.concurrent.locks.ReentrantLock writeLock = null;
-        if (plan != null && WriteTarget.parse(plan.getWriteTarget()).isReal()) {
-            writeLock = projectWriteLockManager.lockFor(properties.getTargetProjectRoot());
-            writeLock.lock();
-            log.info("REAL 模式已获取项目写锁: receptionId={}, root={}", receptionId, properties.getTargetProjectRoot());
-        }
+        boolean claimAcquired = false;
         try {
+            int claimed = planMapper.update(null, new UpdateWrapper<AiPlan>()
+                    .eq("reception_id", receptionId)
+                    .eq("status", PlanStatus.RECEIVED.name())
+                    .set("status", PlanStatus.EXECUTING.name())
+                    .set("update_time", LocalDateTime.now()));
+            if (claimed != 1) {
+                log.warn("Workflow execution claim was not acquired; duplicate or non-RECEIVED trigger skipped: receptionId={}",
+                        receptionId);
+                return;
+            }
+            claimAcquired = true;
+            log.info("Workflow execution claim acquired: receptionId={}", receptionId);
+
+            AiPlan plan = planMapper.selectOne(
+                    new LambdaQueryWrapper<AiPlan>().eq(AiPlan::getReceptionId, receptionId));
+            if (plan == null) {
+                throw new IllegalStateException("Claimed plan disappeared before execution: " + receptionId);
+            }
+            if (WriteTarget.parse(plan.getWriteTarget()).isReal()) {
+                if (projectWriteLockManager == null) {
+                    throw new IllegalStateException("Project write lock manager is unavailable for REAL execution");
+                }
+                writeLock = projectWriteLockManager.lockFor(properties.getTargetProjectRoot());
+                writeLock.lock();
+                log.info("REAL project write lock acquired: receptionId={}, root={}",
+                        receptionId, properties.getTargetProjectRoot());
+            }
             bladeXCodeAgent.executeWorkflow(receptionId);
-        } catch (Throwable t) {
-            // 优雅停机时工作线程被 interrupt,恢复中断标志让线程池感知(否则 catch Throwable 吞掉中断,
-            // 工作流不响应停机,可能超出 30s 窗口被强杀,留下 EXECUTING 残留)。
-            if (t instanceof InterruptedException) {
+        } catch (Throwable error) {
+            if (error instanceof InterruptedException) {
                 Thread.currentThread().interrupt();
             }
-            // catch Throwable (含 OOM/Assertion/未知异常),确保数据库状态收敛,
-            // 否则 EXECUTING 的子方案永远不会被标记 FAILED。
-            log.error("工作流执行异常: receptionId={}", receptionId, t);
-            markPlanFailed(receptionId, t.getMessage());
+            if (claimAcquired) {
+                log.error("Workflow execution failed after database claim: receptionId={}", receptionId, error);
+                markPlanFailed(receptionId, error.getMessage());
+            } else {
+                log.error("Workflow execution claim failed: receptionId={}", receptionId, error);
+            }
         } finally {
-            if (writeLock != null) writeLock.unlock();
+            if (writeLock != null && writeLock.isHeldByCurrentThread()) writeLock.unlock();
             inFlight.remove(receptionId);
         }
     }
@@ -365,7 +437,11 @@ public class PlanExecutionServiceImpl implements IPlanExecutionService {
         List<AiExecutionLog> allLogs = executionLogMapper.selectByPlanId(plan.getId());
         List<AiGeneratedFile> allFiles = generatedFileMapper.selectByPlanIdWithoutContent(plan.getId());
 
+        List<AiExecutionLog> planLogs = allLogs.stream()
+                .filter(logEntry -> logEntry.getSubPlanId() == null)
+                .toList();
         Map<Long, List<AiExecutionLog>> logsBySub = allLogs.stream()
+                .filter(logEntry -> logEntry.getSubPlanId() != null)
                 .collect(Collectors.groupingBy(AiExecutionLog::getSubPlanId, LinkedHashMap::new, Collectors.toList()));
         Map<Long, Long> fileCountBySub = allFiles.stream()
                 .collect(Collectors.groupingBy(AiGeneratedFile::getSubPlanId, Collectors.counting()));
@@ -388,17 +464,7 @@ public class PlanExecutionServiceImpl implements IPlanExecutionService {
             List<ExecutionTimelineVO.TimelineStep> steps = Optional.ofNullable(logsBySub.get(sp.getId()))
                     .orElseGet(Collections::emptyList)
                     .stream()
-                    .map(log -> {
-                        ExecutionTimelineVO.TimelineStep step = new ExecutionTimelineVO.TimelineStep();
-                        step.setId(log.getId());
-                        step.setStage(log.getStage());
-                        step.setStatus(log.getStatus());
-                        step.setAction(log.getAction());
-                        step.setFilePath(log.getFilePath());
-                        step.setReason(log.getActionReason());
-                        step.setCreateTime(log.getCreateTime());
-                        return step;
-                    })
+                    .map(this::toTimelineStep)
                     .collect(Collectors.toList());
             line.setSteps(steps);
             timelines.add(line);
@@ -435,7 +501,20 @@ public class PlanExecutionServiceImpl implements IPlanExecutionService {
             log.warn("Unable to deserialize generation quality metadata for receptionId={}: {}",
                     receptionId, e.getMessage());
         }
+        vo.setPlanSteps(planLogs.stream().map(this::toTimelineStep).toList());
         vo.setSubPlanTimelines(timelines);
         return vo;
+    }
+
+    private ExecutionTimelineVO.TimelineStep toTimelineStep(AiExecutionLog logEntry) {
+        ExecutionTimelineVO.TimelineStep step = new ExecutionTimelineVO.TimelineStep();
+        step.setId(logEntry.getId());
+        step.setStage(logEntry.getStage());
+        step.setStatus(logEntry.getStatus());
+        step.setAction(logEntry.getAction());
+        step.setFilePath(logEntry.getFilePath());
+        step.setReason(logEntry.getActionReason());
+        step.setCreateTime(logEntry.getCreateTime());
+        return step;
     }
 }

@@ -17,13 +17,23 @@ import ReferenceProjectModal from '../settings/ReferenceProjectModal';
 const { Header } = Layout;
 const { Text } = Typography;
 
+export interface ProjectOption {
+  id: string;
+  projectName: string;
+  status: string;
+  updatedAt?: string;
+}
+
 interface TopBarProps {
   onNewProject: () => void;
   onSave: () => void;
   onExport: () => void;
+  projects: ProjectOption[];
+  projectsLoading: boolean;
+  onSelectProject: (projectId: string) => void;
 }
 
-const TopBar: React.FC<TopBarProps> = ({ onNewProject, onSave, onExport }) => {
+const TopBar: React.FC<TopBarProps> = ({ onNewProject, onSave, onExport, projects, projectsLoading, onSelectProject }) => {
   const project = usePlanStore((s) => s.project);
   const isStreaming = usePlanStore((s) => s.isStreaming);
   const loadDemo = usePlanStore((s) => s.loadDemo);
@@ -78,16 +88,27 @@ const TopBar: React.FC<TopBarProps> = ({ onNewProject, onSave, onExport }) => {
             AI Designer
           </Text>
         </Space>
-        {project && (
-          <Select
-            value={project.id}
-            style={{ width: 220 }}
-            size="small"
-            placeholder="选择项目"
-          >
-            <Select.Option value={project.id}>{project.projectName}</Select.Option>
-          </Select>
-        )}
+        <Select
+          value={project?.id}
+          style={{ width: 260 }}
+          size="small"
+          placeholder={projectsLoading ? '\u6b63\u5728\u52a0\u8f7d\u9879\u76ee\u5217\u8868...' : '\u9009\u62e9\u5df2\u4fdd\u5b58\u9879\u76ee'}
+          loading={projectsLoading}
+          disabled={isStreaming}
+          onChange={onSelectProject}
+          showSearch
+          optionFilterProp="label"
+          options={[
+            ...(project && !projects.some((item) => item.id === project.id)
+              ? [{ value: project.id, label: `${project.projectName}\uFF08\u672a\u4fdd\u5b58\uFF09` }]
+              : []),
+            ...projects.map((item) => ({
+              value: item.id,
+              label: item.projectName,
+              title: item.updatedAt ? `${item.projectName} \u00b7 ${new Date(item.updatedAt).toLocaleString()}` : item.projectName,
+            })),
+          ]}
+        />
         {currentStatus && (
           <Badge
             status={currentStatus.color as 'default' | 'processing' | 'success'}

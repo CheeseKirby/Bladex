@@ -3,6 +3,7 @@ package org.springblade.aiworkflow.agent;
 import org.junit.jupiter.api.Test;
 import org.springblade.aiworkflow.enums.TaskType;
 
+import java.util.ArrayList;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -30,6 +31,26 @@ class GeneratedProjectValidatorTest {
         assertTrue(hasRule(issues, "PATH-PACKAGE-MISMATCH"));
         assertTrue(hasRule(issues, "DUPLICATE-FQCN"));
         assertTrue(hasRule(issues, "MODULE-IDENTITY-MISMATCH"));
+    }
+
+    @Test
+    void acceptsHyphenatedPhysicalModuleNamesBoundByCanonicalIdentity() {
+        GenerationIdentity identity = new GenerationIdentity(
+                "safetycontrol", "HotWorkUpgrade", "blade_hot_work_upgrade",
+                "org.springblade.safetycontrol", "blade-safety-control-api",
+                "blade-safety-control", "blade-safety-control");
+        GenerationContext aligned = new GenerationContext(identity, ReferenceFrameworkProfile.defaults());
+        GeneratedFile entity = GeneratedFile.create(TaskType.STANDARD_CRUD_ENTITY,
+                BladeXModuleLayout.entityPath(aligned, "HotWorkUpgrade"), """
+                package org.springblade.safetycontrol.pojo.entity;
+                public class HotWorkUpgrade {}
+                """);
+
+        List<GeneratedProjectValidator.Issue> issues = new GeneratedProjectValidator()
+                .validate(List.of(entity), List.of(), aligned, null);
+
+        assertTrue(issues.stream().noneMatch(issue -> "MODULE-IDENTITY-MISMATCH".equals(issue.rule())),
+                issues.toString());
     }
 
     @Test
@@ -283,6 +304,139 @@ class GeneratedProjectValidatorTest {
 
         assertTrue(issues.stream().noneMatch(issue -> issue.message().contains("checkPeriodNameUnique")), issues.toString());
     }
+    @Test
+    void canonicalContractRejectsAliasFieldsAndIncompleteInputModels() {
+        GenerationIdentity identity = GenerationIdentity.of(
+                "safeprod", "SpecialPeriod", "blade_special_period", "org.springblade.safeprod");
+        CanonicalDomainContract contract = new CanonicalDomainContract(identity, List.of(
+                new CanonicalDomainContract.DomainField("periodName", "period_name", "String", true,
+                        CanonicalDomainContract.FieldRole.PERSISTENT, java.util.Set.of(), "test"),
+                new CanonicalDomainContract.DomainField("periodType", "period_type", "Integer", true,
+                        CanonicalDomainContract.FieldRole.PERSISTENT, java.util.Set.of(), "test"),
+                new CanonicalDomainContract.DomainField("startDate", "start_date", "Date", true,
+                        CanonicalDomainContract.FieldRole.PERSISTENT, java.util.Set.of(), "test")
+        ), List.of(
+                new CanonicalDomainContract.DomainField("periodTypeDesc", null, "String", false,
+                        CanonicalDomainContract.FieldRole.DERIVED, java.util.Set.of(), "test")
+        ), List.of());
+        GenerationContext canonicalContext = new GenerationContext(identity, ReferenceFrameworkProfile.defaults(), contract);
+        List<GeneratedFile> files = List.of(
+                GeneratedFile.create(TaskType.DDL_STATEMENT, BladeXModuleLayout.ddlPath(canonicalContext), """
+                        CREATE TABLE `blade_special_period` (
+                          `id` BIGINT,
+                          `period_name` VARCHAR(64),
+                          `period_type_code` VARCHAR(16)
+                        ) ENGINE=InnoDB;
+                        """),
+                GeneratedFile.create(TaskType.STANDARD_CRUD_ENTITY,
+                        BladeXModuleLayout.entityPath(canonicalContext, "SpecialPeriod"), """
+                        package org.springblade.safeprod.pojo.entity;
+                        public class SpecialPeriod {
+                            private String periodName;
+                            private String periodTypeCode;
+                        }
+                        """),
+                GeneratedFile.create(TaskType.OTHER,
+                        BladeXModuleLayout.voPath(canonicalContext, "SpecialPeriod", "IVO"), """
+                        package org.springblade.safeprod.pojo.vo;
+                        public class SpecialPeriodIVO { private String periodName; }
+                        """),
+                GeneratedFile.create(TaskType.OTHER,
+                        BladeXModuleLayout.voPath(canonicalContext, "SpecialPeriod", "UVO"), """
+                        package org.springblade.safeprod.pojo.vo;
+                        public class SpecialPeriodUVO { private Long id; }
+                        """),
+                GeneratedFile.create(TaskType.OTHER,
+                        BladeXModuleLayout.voPath(canonicalContext, "SpecialPeriod", "VO"), """
+                        package org.springblade.safeprod.pojo.vo;
+                        public class SpecialPeriodVO extends SpecialPeriod { private Long id; private String periodName; private String inventedName; }
+                        """));
+
+        List<GeneratedProjectValidator.Issue> issues = new GeneratedProjectValidator()
+                .validate(files, List.of(), canonicalContext, null);
+
+        assertTrue(hasRule(issues, "CANONICAL-ENTITY-FIELD-MISSING"), issues.toString());
+        assertTrue(hasRule(issues, "CANONICAL-ENTITY-FIELD-UNEXPECTED"), issues.toString());
+        assertTrue(hasRule(issues, "CANONICAL-DDL-COLUMN-MISSING"), issues.toString());
+        assertTrue(hasRule(issues, "CANONICAL-INPUT-FIELD-MISSING"), issues.toString());
+        assertTrue(hasRule(issues, "CANONICAL-INPUT-VALIDATION-MISSING"), issues.toString());
+        assertTrue(hasRule(issues, "CANONICAL-UVO-INHERITANCE"), issues.toString());
+        assertTrue(hasRule(issues, "CANONICAL-VO-DERIVED-FIELD-MISSING"), issues.toString());
+        assertTrue(hasRule(issues, "CANONICAL-VO-FIELD-UNEXPECTED"), issues.toString());
+        assertTrue(hasRule(issues, "CANONICAL-VO-FIELD-SHADOW"), issues.toString());
+    }
+
+    @Test
+    void canonicalInputValidationRecognizesFieldAnnotations() {
+        GenerationIdentity identity = GenerationIdentity.of(
+                "visit", "Visit", "blade_visit", "org.springblade.visit");
+        CanonicalDomainContract contract = new CanonicalDomainContract(identity, List.of(
+                new CanonicalDomainContract.DomainField("name", "name", "String", true,
+                        CanonicalDomainContract.FieldRole.PERSISTENT, java.util.Set.of(), "test")
+        ), List.of(), List.of());
+        GenerationContext context = new GenerationContext(identity, ReferenceFrameworkProfile.defaults(), contract);
+        List<GeneratedFile> files = List.of(
+                GeneratedFile.create(TaskType.OTHER, BladeXModuleLayout.voPath(context, "Visit", "IVO"), """
+                        import javax.validation.constraints.NotBlank;
+                        class VisitIVO { @NotBlank private String name; }
+                        """),
+                GeneratedFile.create(TaskType.OTHER, BladeXModuleLayout.voPath(context, "Visit", "UVO"), """
+                        class VisitUVO extends VisitIVO { private Long id; }
+                        """));
+
+        List<GeneratedProjectValidator.Issue> issues = new GeneratedProjectValidator()
+                .validate(files, List.of(), context, null);
+        assertTrue(issues.stream().noneMatch(issue ->
+                "CANONICAL-INPUT-VALIDATION-MISSING".equals(issue.rule())), issues::toString);
+    }
+
+
+    @Test
+    void mapperBaseColumnsAndQvoReferencesMustCloseAgainstDdlAndQvo() {
+        GenerationContext context = new GenerationContext(
+                GenerationIdentity.of("safeprod", "SpecialPeriod", "blade_special_period", "org.springblade.safeprod"),
+                ReferenceFrameworkProfile.defaults());
+        List<GeneratedFile> files = new ArrayList<>(List.of(
+                GeneratedFile.create(TaskType.DDL_STATEMENT, BladeXModuleLayout.ddlPath(context), """
+                        CREATE TABLE blade_special_period (
+                          id BIGINT,
+                          period_name VARCHAR(64)
+                        ) ENGINE=InnoDB;
+                        """),
+                GeneratedFile.create(TaskType.STANDARD_CRUD_ENTITY,
+                        BladeXModuleLayout.entityPath(context, "SpecialPeriod"), """
+                        package org.springblade.safeprod.pojo.entity;
+                        public class SpecialPeriod { private String periodName; }
+                        """),
+                GeneratedFile.create(TaskType.OTHER,
+                        BladeXModuleLayout.voPath(context, "SpecialPeriod", "QVO"), """
+                        package org.springblade.safeprod.pojo.vo;
+                        public class SpecialPeriodQVO { private String periodName; }
+                        """),
+                GeneratedFile.create(TaskType.MAPPER_XML,
+                        BladeXModuleLayout.mapperXmlPath(context, "SpecialPeriod"), """
+                        <mapper namespace="org.springblade.safeprod.mapper.SpecialPeriodMapper">
+                          <resultMap id="base" type="org.springblade.safeprod.pojo.entity.SpecialPeriod">
+                            <id column="id" property="id"/>
+                            <result column="tenant_id" property="tenantId"/>
+                            <result column="period_name" property="periodName"/>
+                          </resultMap>
+                          <select id="list" resultMap="base">
+                            select id, tenant_id, period_name from blade_special_period
+                            <if test="qvo.status != null">and status = #{qvo.status}</if>
+                          </select>
+                        </mapper>
+                        """)));
+        files.addAll(BladeXModuleSkeleton.buildApiSide(context, false));
+        files.addAll(BladeXModuleSkeleton.buildImplSide(context));
+
+        List<GeneratedProjectValidator.Issue> issues = new GeneratedProjectValidator()
+                .validate(files, List.of(), context, null);
+
+        assertTrue(hasRule(issues, "MAPPER-DDL-COLUMN-MISSING"), issues.toString());
+        assertTrue(hasRule(issues, "MAPPER-PARAM-PROPERTY-MISSING"), issues.toString());
+    }
+
     private boolean hasRule(List<GeneratedProjectValidator.Issue> issues, String rule) {
         return issues.stream().anyMatch(issue -> rule.equals(issue.rule()));
     }

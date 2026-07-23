@@ -16,13 +16,17 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.security.MessageDigest;
 import java.time.LocalDateTime;
 import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.HashMap;
+import java.util.LinkedHashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
@@ -86,6 +90,13 @@ public class ReferenceProjectIndex {
         return rootPath;
     }
 
+    /** Returns whether a normalized relative path already exists in the configured reference project. */
+    public synchronized boolean pathExists(String relativePath) {
+        if (projectRoot == null || relativePath == null || relativePath.isBlank()) return false;
+        Path candidate = projectRoot.resolve(relativePath.replace('\\', '/')).normalize();
+        return candidate.startsWith(projectRoot) && Files.exists(candidate);
+    }
+
     /**
      * 触发扫描。
      *
@@ -115,6 +126,359 @@ public class ReferenceProjectIndex {
     public synchronized List<IndexedClassInfo> getCachedClasses() {
         return cachedFlat != null ? cachedFlat : List.of();
     }
+
+    /**
+     * Returns a bounded reference context for one business intent. Direct semantic matches are
+     * expanded through Java imports so the caller can see ownership and integration paths without
+     * downloading the complete source index.
+     */
+    public synchronized ReferenceSearchResult searchReference(String intent, int requestedTopK, int requestedRelationDepth) {
+        List<IndexedClassInfo> all = cachedFlat != null ? cachedFlat : List.of();
+        int topK = Math.max(1, Math.min(requestedTopK, 40));
+        int relationDepth = Math.max(0, Math.min(requestedRelationDepth, 3));
+        String normalizedIntent = intent == null ? "" : intent.trim();
+        Set<String> tokens = extractReferenceIntentTokens(normalizedIntent);
+
+        List<ScoredReference> scored = all.stream()
+                .map(info -> new ScoredReference(info, scoreReferenceIntent(info, tokens)))
+                .filter(candidate -> candidate.score() > 0)
+                .sorted(Comparator.comparingInt(ScoredReference::score).reversed()
+                        .thenComparing(candidate -> candidate.info().simpleName()))
+                .toList();
+
+        // Preserve semantic diversity. Rare intent tokens (for example riskdates/holiday) are seeded
+        // before broad tokens (task/date), preventing a large WorkOrder family from consuming Top-K.
+        List<String> tokensByRarity = tokens.stream()
+                .sorted(Comparator.comparingLong((String token) -> all.stream()
+                                .filter(info -> scoreReferenceToken(info, token) > 0).count())
+                        .thenComparing(Comparator.comparingInt(String::length).reversed())
+                        .thenComparing(token -> token))
+                .toList();
+        LinkedHashMap<String, ScoredReference> diverse = new LinkedHashMap<>();
+        for (String token : tokensByRarity) {
+            if (diverse.size() >= topK) break;
+            scored.stream()
+                    .filter(candidate -> scoreReferenceToken(candidate.info(), token) > 0)
+                    .max(Comparator.comparingInt((ScoredReference candidate) -> scoreReferenceToken(candidate.info(), token))
+                            .thenComparingInt(ScoredReference::score)
+                            .thenComparing(candidate -> candidate.info().simpleName(), Comparator.reverseOrder()))
+                    .ifPresent(candidate -> diverse.putIfAbsent(qualifiedName(candidate.info()), candidate));
+        }
+        for (ScoredReference candidate : scored) {
+            if (diverse.size() >= topK) break;
+            diverse.putIfAbsent(qualifiedName(candidate.info()), candidate);
+        }
+        List<ScoredReference> direct = diverse.values().stream()
+                .sorted(Comparator.comparingInt(ScoredReference::score).reversed()
+                        .thenComparing(candidate -> candidate.info().simpleName()))
+                .toList();
+
+        Map<String, IndexedClassInfo> byQualifiedName = all.stream().collect(Collectors.toMap(
+                this::qualifiedName,
+                info -> info,
+                (left, right) -> left,
+                LinkedHashMap::new));
+        Map<String, Integer> directScores = direct.stream().collect(Collectors.toMap(
+                candidate -> qualifiedName(candidate.info()), ScoredReference::score, Math::max, LinkedHashMap::new));
+        LinkedHashMap<String, IndexedClassInfo> selected = new LinkedHashMap<>();
+        for (ScoredReference candidate : direct) selected.put(qualifiedName(candidate.info()), candidate.info());
+
+        LinkedHashMap<String, ReferenceSearchResult.Relation> relations = new LinkedHashMap<>();
+        Set<String> frontier = new LinkedHashSet<>(selected.keySet());
+        int symbolLimit = Math.min(60, Math.max(topK, topK * 3));
+        for (int depth = 0; depth < relationDepth && !frontier.isEmpty() && selected.size() < symbolLimit; depth++) {
+            Set<String> next = new LinkedHashSet<>();
+            for (IndexedClassInfo source : all) {
+                String sourceName = qualifiedName(source);
+                for (String importedName : source.imports()) {
+                    IndexedClassInfo target = byQualifiedName.get(importedName);
+                    if (target == null) continue;
+                    String targetName = qualifiedName(target);
+                    if (!frontier.contains(sourceName) && !frontier.contains(targetName)) continue;
+                    addReferenceRelation(relations, source, target, importedName);
+                    if (selected.size() < symbolLimit && !selected.containsKey(sourceName)) {
+                        selected.put(sourceName, source);
+                        next.add(sourceName);
+                    }
+                    if (selected.size() < symbolLimit && !selected.containsKey(targetName)) {
+                        selected.put(targetName, target);
+                        next.add(targetName);
+                    }
+                }
+            }
+            frontier = next;
+        }
+
+        for (IndexedClassInfo info : selected.values()) {
+            if (info.tableName() == null || info.tableName().isBlank()) continue;
+            String key = qualifiedName(info) + "->table:" + info.tableName();
+            relations.putIfAbsent(key, new ReferenceSearchResult.Relation(
+                    qualifiedName(info), info.tableName(), "ENTITY_TABLE", info.relativePath()));
+        }
+
+        List<ReferenceSearchResult.Symbol> symbols = selected.entrySet().stream()
+                .map(entry -> toReferenceSymbol(entry.getValue(), directScores.getOrDefault(entry.getKey(), 0),
+                        !directScores.containsKey(entry.getKey())))
+                .toList();
+        List<ReferenceSearchResult.Anomaly> anomalies = referenceAnomalies(selected.values());
+        List<ReferenceSearchResult.AccessDecision> decisions = buildAccessDecisions(
+                normalizedIntent, tokens, direct, anomalies);
+
+        return new ReferenceSearchResult(
+                buildReferenceSnapshotId(all),
+                normalizedIntent,
+                symbols,
+                relations.values().stream()
+                        .sorted(Comparator.comparingInt(this::referenceRelationPriority)
+                                .thenComparing(ReferenceSearchResult.Relation::source)
+                                .thenComparing(ReferenceSearchResult.Relation::target))
+                        .limit(120).toList(),
+                anomalies,
+                decisions);
+    }
+
+    private ReferenceSearchResult.Symbol toReferenceSymbol(IndexedClassInfo info, int score, boolean relationExpanded) {
+        return new ReferenceSearchResult.Symbol(
+                score, relationExpanded, info.simpleName(), info.packageName(), info.type().name(), info.module(),
+                info.side(), info.mavenModulePath(), info.relativePath(), info.tableName(),
+                info.publicMethodSignatures().stream().limit(20).toList(),
+                info.fields().entrySet().stream().limit(30).collect(Collectors.toMap(
+                        Map.Entry::getKey, Map.Entry::getValue, (left, right) -> left, LinkedHashMap::new)));
+    }
+
+    private void addReferenceRelation(
+            Map<String, ReferenceSearchResult.Relation> relations,
+            IndexedClassInfo source,
+            IndexedClassInfo target,
+            String evidence) {
+        String sourceName = qualifiedName(source);
+        String targetName = qualifiedName(target);
+        String type = relationType(source.type(), target.type());
+        relations.putIfAbsent(sourceName + "->" + targetName,
+                new ReferenceSearchResult.Relation(sourceName, targetName, type, evidence));
+    }
+
+    private int referenceRelationPriority(ReferenceSearchResult.Relation relation) {
+        return switch (relation.type()) {
+            case "ENTITY_TABLE" -> 0;
+            case "CONTROLLER_SERVICE", "SERVICE_IMPLEMENTATION", "SERVICE_MAPPER", "MAPPER_ENTITY" -> 1;
+            case "FEIGN_PROVIDER", "FEIGN_DTO" -> 2;
+            default -> 3;
+        };
+    }
+
+    private String relationType(ClassType source, ClassType target) {
+        if (source == ClassType.CONTROLLER && (target == ClassType.SERVICE || target == ClassType.SERVICE_IMPL)) {
+            return "CONTROLLER_SERVICE";
+        }
+        if (source == ClassType.SERVICE_IMPL && target == ClassType.SERVICE) return "SERVICE_IMPLEMENTATION";
+        if ((source == ClassType.SERVICE || source == ClassType.SERVICE_IMPL) && target == ClassType.MAPPER) {
+            return "SERVICE_MAPPER";
+        }
+        if (source == ClassType.MAPPER && target == ClassType.ENTITY) return "MAPPER_ENTITY";
+        if (source == ClassType.FEIGN && target == ClassType.VO) return "FEIGN_DTO";
+        if (source == ClassType.CONTROLLER && target == ClassType.FEIGN) return "FEIGN_PROVIDER";
+        return "JAVA_IMPORT";
+    }
+
+    private List<ReferenceSearchResult.Anomaly> referenceAnomalies(Iterable<IndexedClassInfo> selected) {
+        List<ReferenceSearchResult.Anomaly> anomalies = new ArrayList<>();
+        collectDanglingModuleAnomalies("blade-service/pom.xml", "blade-service", anomalies);
+        collectDanglingModuleAnomalies("blade-service-api/pom.xml", "blade-service-api", anomalies);
+
+        Map<String, Set<String>> tableOwners = new HashMap<>();
+        for (IndexedClassInfo info : selected) {
+            if (info.tableName() == null || info.tableName().isBlank()) continue;
+            tableOwners.computeIfAbsent(info.tableName().toLowerCase(Locale.ROOT), ignored -> new LinkedHashSet<>())
+                    .add(info.module());
+        }
+        tableOwners.forEach((table, modules) -> {
+            if (modules.size() > 1) {
+                anomalies.add(new ReferenceSearchResult.Anomaly(
+                        "REF-DUPLICATE-CAPABILITY", "WARN",
+                        "Table " + table + " is represented in multiple modules: " + String.join(", ", modules),
+                        table));
+            }
+        });
+        return List.copyOf(anomalies);
+    }
+
+    private void collectDanglingModuleAnomalies(
+            String parentPomPath,
+            String parentDir,
+            List<ReferenceSearchResult.Anomaly> anomalies) {
+        String pom = readSourceContent(parentPomPath);
+        if (pom == null) return;
+        java.util.regex.Matcher matcher = java.util.regex.Pattern.compile("<module>([^<]+)</module>").matcher(pom);
+        while (matcher.find()) {
+            String child = matcher.group(1).trim();
+            Path childDirectory = projectRoot.resolve(parentDir).resolve(child).normalize();
+            if (!isWithinRoot(childDirectory, projectRoot) || Files.isDirectory(childDirectory)) continue;
+            anomalies.add(new ReferenceSearchResult.Anomaly(
+                    "REF-DANGLING-MODULE", "ERROR",
+                    parentDir + "/" + child + " is declared but the directory is missing",
+                    parentPomPath));
+        }
+    }
+
+    private List<ReferenceSearchResult.AccessDecision> buildAccessDecisions(
+            String intent,
+            Set<String> tokens,
+            List<ScoredReference> direct,
+            List<ReferenceSearchResult.Anomaly> anomalies) {
+        List<ScoredReference> ownershipCandidates = direct.stream()
+                .filter(candidate -> isOwnershipMatch(candidate.info(), tokens))
+                .toList();
+        if (ownershipCandidates.isEmpty()) {
+            return List.of(new ReferenceSearchResult.AccessDecision(
+                    intent, "NEW", null, 0.35,
+                    "No identity, table or module-level business match was found in the scanned reference snapshot.", List.of()));
+        }
+
+        Map<String, Integer> moduleScores = new LinkedHashMap<>();
+        for (ScoredReference candidate : ownershipCandidates) {
+            String module = candidate.info().module() == null ? "(unknown)" : candidate.info().module();
+            moduleScores.merge(module, candidate.score(), Integer::sum);
+        }
+        List<Map.Entry<String, Integer>> rankedModules = moduleScores.entrySet().stream()
+                .sorted(Map.Entry.<String, Integer>comparingByValue().reversed())
+                .toList();
+        String targetModule = rankedModules.get(0).getKey();
+        int bestModuleScore = rankedModules.get(0).getValue();
+        boolean competingOwners = rankedModules.size() > 1
+                && rankedModules.get(1).getValue() >= Math.max(1, (int) Math.floor(bestModuleScore * 0.85));
+        boolean relevantDanglingModule = anomalies.stream()
+                .filter(anomaly -> "REF-DANGLING-MODULE".equals(anomaly.code()))
+                .map(anomaly -> anomaly.message().toLowerCase(Locale.ROOT))
+                .anyMatch(message -> tokens.stream().anyMatch(message::contains));
+
+        String decision;
+        String reason;
+        if (competingOwners || relevantDanglingModule) {
+            decision = "ARCHITECTURE_DECISION_REQUIRED";
+            reason = competingOwners
+                    ? "Multiple reference modules have comparable evidence and ownership must be decided explicitly."
+                    : "A matching module is declared by Maven but missing on disk; its historical status must be resolved first.";
+        } else if (ownershipCandidates.get(0).score() >= 40) {
+            decision = "REUSE";
+            reason = "The reference project already contains a strongly matching symbol; bind the plan to it unless replacement is justified.";
+        } else {
+            decision = "EXTEND";
+            reason = "Related capability exists in the target module, but the requested behavior is not an exact symbol match.";
+        }
+        double confidence = Math.min(0.97, 0.50 + (ownershipCandidates.get(0).score() / 120.0));
+        List<String> evidence = ownershipCandidates.stream().limit(6).map(candidate -> qualifiedName(candidate.info())).toList();
+        return List.of(new ReferenceSearchResult.AccessDecision(
+                intent, decision, targetModule, Math.round(confidence * 100.0) / 100.0, reason, evidence));
+    }
+
+    private Set<String> extractReferenceIntentTokens(String value) {
+        Set<String> tokens = new LinkedHashSet<>();
+        String expanded = value.replaceAll("([a-z0-9])([A-Z])", "$1 $2").replaceAll("[_/.-]+", " ");
+        java.util.regex.Matcher matcher = java.util.regex.Pattern.compile("[A-Za-z][A-Za-z0-9]{2,}").matcher(expanded);
+        while (matcher.find()) {
+            String token = matcher.group().toLowerCase(Locale.ROOT);
+            if (!REFERENCE_STOP_WORDS.contains(token)) tokens.add(token);
+        }
+        String lower = value.toLowerCase(Locale.ROOT);
+        REFERENCE_INTENT_ALIASES.forEach((phrase, aliases) -> {
+            if (lower.contains(phrase)) tokens.addAll(aliases);
+        });
+        return tokens.stream().limit(48).collect(Collectors.toCollection(LinkedHashSet::new));
+    }
+
+    private int scoreReferenceIntent(IndexedClassInfo info, Set<String> tokens) {
+        if (tokens.isEmpty()) return 0;
+        int score = tokens.stream().mapToInt(token -> scoreReferenceToken(info, token)).sum();
+        if (score > 0 && Set.of(ClassType.ENTITY, ClassType.SERVICE, ClassType.CONTROLLER, ClassType.FEIGN)
+                .contains(info.type())) score += 2;
+        return score;
+    }
+
+    private boolean isOwnershipMatch(IndexedClassInfo info, Set<String> tokens) {
+        String name = safeLower(info.simpleName());
+        String module = safeLower(info.module());
+        String table = safeLower(info.tableName());
+        for (String token : tokens) {
+            if (token.length() < 4) continue;
+            if (name.equals(token) || name.contains(token)
+                    || table.equals(token) || table.contains(token)
+                    || module.equals(token) || module.contains(token)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private int scoreReferenceToken(IndexedClassInfo info, String token) {
+        String name = safeLower(info.simpleName());
+        String module = safeLower(info.module());
+        String table = safeLower(info.tableName());
+        String packageName = safeLower(info.packageName());
+        String path = safeLower(info.relativePath());
+        String fields = info.fields().entrySet().stream()
+                .map(entry -> entry.getKey() + " " + entry.getValue()).collect(Collectors.joining(" ")).toLowerCase(Locale.ROOT);
+        String methods = String.join(" ", info.publicMethodSignatures()).toLowerCase(Locale.ROOT);
+        int score = 0;
+        if (name.equals(token)) score += 40;
+        else if (name.contains(token)) score += 18;
+        if (table.equals(token)) score += 35;
+        else if (table.contains(token)) score += 14;
+        if (module.equals(token)) score += 25;
+        else if (module.contains(token)) score += 10;
+        if (fields.contains(token)) score += 8;
+        if (methods.contains(token)) score += 6;
+        if (packageName.contains(token)) score += 4;
+        if (path.contains(token)) score += 3;
+        return score;
+    }
+
+    private String safeLower(String value) {
+        return value == null ? "" : value.toLowerCase(Locale.ROOT);
+    }
+
+    private String qualifiedName(IndexedClassInfo info) {
+        return info.packageName() == null || info.packageName().isBlank()
+                ? info.simpleName() : info.packageName() + "." + info.simpleName();
+    }
+
+    private String buildReferenceSnapshotId(List<IndexedClassInfo> all) {
+        try {
+            MessageDigest digest = MessageDigest.getInstance("SHA-256");
+            digest.update((rootPath == null ? "" : rootPath).getBytes(StandardCharsets.UTF_8));
+            all.stream().sorted(Comparator.comparing(IndexedClassInfo::relativePath)).forEach(info -> {
+                String signature = info.relativePath() + "|" + info.simpleName() + "|" + info.type()
+                        + "|" + info.tableName() + "|" + info.fields() + "|" + info.publicMethodSignatures();
+                digest.update(signature.getBytes(StandardCharsets.UTF_8));
+            });
+            return "ref-" + java.util.HexFormat.of().formatHex(digest.digest()).substring(0, 20);
+        } catch (Exception impossible) {
+            throw new IllegalStateException("SHA-256 is unavailable", impossible);
+        }
+    }
+
+    private record ScoredReference(IndexedClassInfo info, int score) {}
+
+    private static final Set<String> REFERENCE_STOP_WORDS = Set.of(
+            "blade", "bladex", "springblade", "java", "swagger", "nacos", "namespace",
+            "service", "controller", "entity", "mapper", "wrapper", "module", "package",
+            "string", "integer", "boolean", "true", "false", "null", "plan", "backend",
+            "api", "impl", "project", "reference", "existing", "required", "requirement",
+            "field", "fields", "status", "state", "user", "name", "phone", "date", "time",
+            "type", "purpose", "crud", "standalone", "external", "integration", "index",
+            "unique", "xml", "src", "main", "parent", "generate", "generated", "create");
+
+    private static final Map<String, List<String>> REFERENCE_INTENT_ALIASES = Map.ofEntries(
+            Map.entry("\u52a8\u706b", List.of("hotwork", "workorder", "task")),
+            Map.entry("\u4f5c\u4e1a\u7968", List.of("workorder", "workticket", "task")),
+            Map.entry("\u7279\u6b8a\u65f6\u6bb5", List.of("specialperiod", "period", "riskdates")),
+            Map.entry("\u8282\u5047\u65e5", List.of("holiday", "riskdates", "date")),
+            Map.entry("\u516c\u4f11\u65e5", List.of("holiday", "riskdates", "date")),
+            Map.entry("\u591c\u95f4", List.of("night", "period", "time")),
+            Map.entry("\u5ba1\u6279", List.of("flow", "examint", "node")),
+            Map.entry("\u5de5\u4f5c\u6d41", List.of("flow", "node")),
+            Map.entry("\u5bfc\u5165", List.of("excel", "import")),
+            Map.entry("\u5bfc\u51fa", List.of("excel", "export")));
 
 
     /** Returns a structured profile derived from reference source, poms and configuration. */
@@ -608,6 +972,7 @@ public class ReferenceProjectIndex {
         if (!serviceModules.isEmpty()) {
             sb.append("- 现有 Service 模块: ").append(String.join(", ", serviceModules)).append("\n");
         }
+        extractDeclaredModuleHealth(sb);
 
         // 3. 包结构示例(取第一个 service 模块的 org.springblade.{module} 包层次)
         if (!serviceModules.isEmpty()) {
@@ -630,6 +995,30 @@ public class ReferenceProjectIndex {
     }
 
     /** 列出 blade-{parentDir} 下的子模块目录名(排除父目录自身) */
+    private void extractDeclaredModuleHealth(StringBuilder sb) {
+        List<String> warnings = new ArrayList<>();
+        collectDanglingModules("blade-service/pom.xml", "blade-service", warnings);
+        collectDanglingModules("blade-service-api/pom.xml", "blade-service-api", warnings);
+        if (warnings.isEmpty()) return;
+        sb.append("[reference structure health]\n");
+        for (String warning : warnings) {
+            sb.append("- REF-DANGLING-MODULE: " ).append(warning).append("\n");
+        }
+    }
+
+    private void collectDanglingModules(String parentPomPath, String parentDir, List<String> warnings) {
+        String pom = readSourceContent(parentPomPath);
+        if (pom == null) return;
+        java.util.regex.Matcher matcher = java.util.regex.Pattern
+                .compile("<module>([^<]+)</module>").matcher(pom);
+        while (matcher.find()) {
+            String child = matcher.group(1).trim();
+            Path childDirectory = projectRoot.resolve(parentDir).resolve(child).normalize();
+            if (!isWithinRoot(childDirectory, projectRoot) || Files.isDirectory(childDirectory)) continue;
+            warnings.add(parentDir + "/" + child + " is declared in " + parentPomPath + " but the directory is missing");
+        }
+    }
+
     private List<String> listChildModules(String parentDir, String suffix) {
         List<String> modules = new ArrayList<>();
         Path dir = projectRoot.resolve(parentDir);

@@ -1,4 +1,4 @@
-﻿# AI Workflow 一键部署脚本(Windows / PowerShell)
+# AI Workflow 一键部署脚本(Windows / PowerShell)
 #
 # 用法:
 #   1. 解压本压缩包到任意目录(例如 D:\workspace\houduan\)
@@ -51,6 +51,14 @@ function Read-Secret($prompt) {
     $ptr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($sec)
     try { return [Runtime.InteropServices.Marshal]::PtrToStringBSTR($ptr) }
     finally { [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($ptr) }
+}
+
+function New-RandomHexSecret([int]$ByteCount = 32) {
+    $bytes = New-Object byte[] $ByteCount
+    $rng = [System.Security.Cryptography.RandomNumberGenerator]::Create()
+    try { $rng.GetBytes($bytes) }
+    finally { $rng.Dispose() }
+    return (($bytes | ForEach-Object { $_.ToString("x2") }) -join "")
 }
 
 # ─── 1. 依赖检查 ──────────────────────────────────────────
@@ -117,6 +125,7 @@ if ([string]::IsNullOrWhiteSpace($llmBaseUrl)) { $llmBaseUrl = "https://ark.cn-b
 
 $llmModel = Read-Host "LLM 模型名 [默认 glm-5.1]"
 if ([string]::IsNullOrWhiteSpace($llmModel)) { $llmModel = "glm-5.1" }
+$planBundleSigningSecret = New-RandomHexSecret 32
 
 # ─── 4. 写 .env ───────────────────────────────────────────
 Info "Step 4/6: 生成 .env(凭证文件,不要提交版本控制)"
@@ -145,6 +154,7 @@ FRONTEND_ORIGIN=http://localhost:3005
 # BFF 转发到 Part B(ai-workflow)的地址(默认 8111)
 AI_WORKFLOW_HOST=127.0.0.1
 PART_B_URL=http://localhost:8111
+PLAN_BUNDLE_SIGNING_SECRET=$planBundleSigningSecret
 PART_A_CALLBACK_URL=http://localhost:3004/api/transmission/status-update
 BFF_JSON_LIMIT=2mb
 BFF_LLM_RATE_LIMIT=30

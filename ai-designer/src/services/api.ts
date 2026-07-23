@@ -145,16 +145,41 @@ export function generatePlanStream(
   };
 }
 
-/** Review request: client budget is slightly longer than the BFF 10-minute total budget. */
-export async function reviewPlan(planContent: string, stage: 'master' | 'subplan') {
-  const res = await api.post('/llm/review-plan', { planContent, stage }, { timeout: 960_000 });
-  return res.data;
+/** Structured split failure; deterministic blockers retain their rule evidence. */
+export class SplitPlanError extends Error {
+  constructor(
+    message: string,
+    public readonly code: string,
+    public readonly issues: Array<{ severity: 'ERROR' | 'WARN'; rule: string; message: string }> = [],
+  ) {
+    super(message);
+    this.name = 'SplitPlanError';
+  }
 }
 
-/** 拆分子方案 */
-export async function splitPlan(planContent: string, signal?: AbortSignal) {
-  const res = await api.post('/llm/split-plan', { planContent }, { timeout: 960_000, signal });
-  return res.data;
+/** Split sub-plans without hiding deterministic or schema failures. */
+export async function splitPlan(planContent: string, reviewId: string, projectId: string, subjectId: string, signal?: AbortSignal) {
+  try {
+    const res = await api.post('/llm/split-plan', { planContent, reviewId, projectId, subjectId }, { timeout: 960_000, signal });
+    return res.data;
+  } catch (error) {
+    if (axios.isAxiosError(error) && error.response?.data && typeof error.response.data === 'object') {
+      const payload = error.response.data as Record<string, unknown>;
+      const issues = Array.isArray(payload.issues)
+        ? payload.issues.filter((issue): issue is { severity: 'ERROR' | 'WARN'; rule: string; message: string } =>
+          typeof issue === 'object' && issue !== null
+          && ((issue as Record<string, unknown>).severity === 'ERROR' || (issue as Record<string, unknown>).severity === 'WARN')
+          && typeof (issue as Record<string, unknown>).rule === 'string'
+          && typeof (issue as Record<string, unknown>).message === 'string')
+        : [];
+      throw new SplitPlanError(
+        typeof payload.error === 'string' ? payload.error : error.message,
+        typeof payload.code === 'string' ? payload.code : 'SPLIT_INFRA_ERROR',
+        issues,
+      );
+    }
+    throw error;
+  }
 }
 
 // === 阶段二: 双向补齐 API ===

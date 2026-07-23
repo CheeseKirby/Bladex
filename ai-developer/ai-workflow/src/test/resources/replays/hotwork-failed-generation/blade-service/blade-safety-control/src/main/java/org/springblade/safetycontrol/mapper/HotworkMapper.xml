@@ -1,0 +1,143 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="org.springblade.safetycontrol.mapper.HotworkMapper">
+
+    <!-- Entity resultMap: Hotwork -->
+    <resultMap id="hotworkResultMap" type="org.springblade.safetycontrol.entity.Hotwork">
+        <id column="id" property="id"/>
+        <result column="create_user" property="createUser"/>
+        <result column="create_time" property="createTime"/>
+        <result column="update_user" property="updateUser"/>
+        <result column="update_time" property="updateTime"/>
+        <result column="status" property="status"/>
+        <result column="is_deleted" property="isDeleted"/>
+        <result column="tenant_id" property="tenantId"/>
+        <result column="hotwork_id" property="hotworkId"/>
+        <result column="apply_code" property="applyCode"/>
+        <result column="apply_time" property="applyTime"/>
+        <result column="hotwork_level" property="hotworkLevel"/>
+        <result column="work_content" property="workContent"/>
+        <result column="is_special_period" property="isSpecialPeriod"/>
+        <result column="upgrade_flag" property="upgradeFlag"/>
+        <result column="period_name" property="periodName"/>
+        <result column="period_type" property="periodType"/>
+        <result column="start_time" property="startTime"/>
+        <result column="end_time" property="endTime"/>
+    </resultMap>
+
+    <!-- VO resultMap: HotworkVO -->
+    <resultMap id="hotworkVOResultMap" type="org.springblade.safetycontrol.vo.HotworkVO">
+        <id column="id" property="id"/>
+        <result column="create_user" property="createUser"/>
+        <result column="create_time" property="createTime"/>
+        <result column="update_user" property="updateUser"/>
+        <result column="update_time" property="updateTime"/>
+        <result column="status" property="status"/>
+        <result column="is_deleted" property="isDeleted"/>
+        <result column="tenant_id" property="tenantId"/>
+        <result column="hotwork_id" property="hotworkId"/>
+        <result column="apply_code" property="applyCode"/>
+        <result column="apply_time" property="applyTime"/>
+        <result column="hotwork_level" property="hotworkLevel"/>
+        <result column="work_content" property="workContent"/>
+        <result column="is_special_period" property="isSpecialPeriod"/>
+        <result column="upgrade_flag" property="upgradeFlag"/>
+        <result column="period_name" property="periodName"/>
+        <result column="period_type" property="periodType"/>
+        <result column="start_time" property="startTime"/>
+        <result column="end_time" property="endTime"/>
+    </resultMap>
+
+    <!-- 表所有列 -->
+    <sql id="baseColumnList">
+        id, create_user, create_time, update_user, update_time, status, is_deleted, tenant_id,
+        hotwork_id, apply_code, apply_time, hotwork_level, work_content,
+        is_special_period, upgrade_flag, period_name, period_type, start_time, end_time
+    </sql>
+
+    <!-- 根据 ID 查询 -->
+    <select id="selectById" resultMap="hotworkResultMap">
+        SELECT <include refid="baseColumnList"/>
+        FROM blade_hotwork
+        WHERE id = #{id} AND is_deleted = 0
+    </select>
+
+    <!-- 分页查询 -->
+    <select id="selectPage" resultMap="hotworkVOResultMap">
+        SELECT <include refid="baseColumnList"/>
+        FROM blade_hotwork
+        WHERE is_deleted = 0
+        <if test="qvo.applyCode != null and qvo.applyCode != ''">
+            AND apply_code LIKE CONCAT('%', #{qvo.applyCode}, '%')
+        </if>
+        <if test="qvo.hotworkLevel != null">
+            AND hotwork_level = #{qvo.hotworkLevel}
+        </if>
+        <if test="qvo.isSpecialPeriod != null">
+            AND is_special_period = #{qvo.isSpecialPeriod}
+        </if>
+        <if test="qvo.periodType != null">
+            AND period_type = #{qvo.periodType}
+        </if>
+        <if test="qvo.startTime != null">
+            AND start_time &gt;= #{qvo.startTime}
+        </if>
+        <if test="qvo.endTime != null">
+            AND end_time &lt;= #{qvo.endTime}
+        </if>
+        ORDER BY create_time DESC
+    </select>
+
+    <!-- 列表查询 -->
+    <select id="selectList" resultMap="hotworkVOResultMap">
+        SELECT <include refid="baseColumnList"/>
+        FROM blade_hotwork
+        WHERE is_deleted = 0
+        <if test="qvo.applyCode != null and qvo.applyCode != ''">
+            AND apply_code LIKE CONCAT('%', #{qvo.applyCode}, '%')
+        </if>
+        <if test="qvo.hotworkLevel != null">
+            AND hotwork_level = #{qvo.hotworkLevel}
+        </if>
+        <if test="qvo.isSpecialPeriod != null">
+            AND is_special_period = #{qvo.isSpecialPeriod}
+        </if>
+        <if test="qvo.periodType != null">
+            AND period_type = #{qvo.periodType}
+        </if>
+        <if test="qvo.startTime != null">
+            AND start_time &gt;= #{qvo.startTime}
+        </if>
+        <if test="qvo.endTime != null">
+            AND end_time &lt;= #{qvo.endTime}
+        </if>
+        ORDER BY create_time DESC
+    </select>
+
+    <!-- 导出查询 -->
+    <select id="exportHotwork" resultMap="hotworkVOResultMap">
+        SELECT <include refid="baseColumnList"/>
+        FROM blade_hotwork
+        WHERE is_deleted = 0
+        <if test="qvo.applyCode != null and qvo.applyCode != ''">
+            AND apply_code LIKE CONCAT('%', #{qvo.applyCode}, '%')
+        </if>
+        <if test="qvo.hotworkLevel != null">
+            AND hotwork_level = #{qvo.hotworkLevel}
+        </if>
+        <if test="qvo.isSpecialPeriod != null">
+            AND is_special_period = #{qvo.isSpecialPeriod}
+        </if>
+        <if test="qvo.periodType != null">
+            AND period_type = #{qvo.periodType}
+        </if>
+        <if test="qvo.startTime != null">
+            AND start_time &gt;= #{qvo.startTime}
+        </if>
+        <if test="qvo.endTime != null">
+            AND end_time &lt;= #{qvo.endTime}
+        </if>
+        ORDER BY create_time DESC
+    </select>
+
+</mapper>

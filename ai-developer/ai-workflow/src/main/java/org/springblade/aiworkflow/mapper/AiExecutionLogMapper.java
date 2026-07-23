@@ -26,11 +26,11 @@ public interface AiExecutionLogMapper extends BaseMapper<AiExecutionLog> {
      * 按方案ID(plan_id)查询所有子方案的执行日志(用于时间线展示)。
      * 排除 llm_prompt/llm_response 大字段。
      */
-    @Select("SELECT l.id, l.sub_plan_id, l.stage, l.file_path, l.action, l.action_reason, " +
+    @Select("SELECT l.id, l.plan_id, l.sub_plan_id, l.stage, l.file_path, l.action, l.action_reason, " +
             "l.validation_result, l.status, l.create_time, l.update_time, l.is_deleted " +
             "FROM ai_workflow_execution_log l " +
-            "JOIN ai_workflow_sub_plan sp ON sp.id = l.sub_plan_id " +
-            "WHERE sp.plan_id = #{planId} AND l.is_deleted = 0 " +
+            "LEFT JOIN ai_workflow_sub_plan sp ON sp.id = l.sub_plan_id " +
+            "WHERE (l.plan_id = #{planId} OR sp.plan_id = #{planId}) AND l.is_deleted = 0 " +
             "ORDER BY l.create_time ASC, l.id ASC")
     List<AiExecutionLog> selectByPlanId(@Param("planId") Long planId);
 }

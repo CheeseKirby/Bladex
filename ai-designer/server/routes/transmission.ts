@@ -9,7 +9,10 @@
 
 import { Router, Request, Response } from 'express';
 import { requireBffAdmin } from '../security/adminGuard';
+import { compilePlanContract, hashPlanBundle, hashPlanContent, hashPlanContract, hashSubPlanDescriptor, stripPlanContractBlock } from '../llm/planContract';
+import { signPlanBundle } from '../llm/bundleSignature';
 import { invalidateReferenceSummaryCache } from '../services/referenceSummary';
+import { reviewStore } from '../services/reviewStore';
 
 export const transmissionRouter = Router();
 transmissionRouter.use((req, res, next) => {
@@ -71,14 +74,296 @@ async function proxy<T>(path: string, opts: FetchOpts = {}): Promise<{ ok: true;
 }
 
 /** 发送方案到 Part B */
+type PlanBundlePreparation =
+  | { ok: true; value: Record<string, unknown> }
+  | { ok: false; status: number; code: string; message: string };
+
+export function prepareV2PlanBundle(
+  value: unknown,
+  signingSecret = resolveBundleSigningSecret(),
+): PlanBundlePreparation {
+  if (!isRecord(value) || !isRecord(value.masterPlan) || !Array.isArray(value.subPlans)
+    || !isRecord(value.reviewManifest)) {
+    return { ok: false, status: 400, code: 'INVALID_PLAN_BUNDLE', message: 'Plan bundle is missing masterPlan, subPlans or reviewManifest.' };
+  }
+  const projectId = stringValue(value.projectId);
+  const masterPlanId = stringValue(value.masterPlan.id);
+  const masterPlanVersion = Number(value.masterPlan.version);
+  if (!projectId || !masterPlanId || !Number.isInteger(masterPlanVersion) || masterPlanVersion < 1) {
+    return { ok: false, status: 400, code: 'INVALID_PLAN_BUNDLE', message: 'projectId, masterPlan.id and a positive masterPlan.version are required.' };
+  }
+  const requestedWriteTarget = stringValue(value.writeTarget);
+  if (requestedWriteTarget && requestedWriteTarget !== 'ISOLATED' && requestedWriteTarget !== 'REAL') {
+    return { ok: false, status: 400, code: 'INVALID_WRITE_TARGET', message: 'writeTarget must be ISOLATED or REAL.' };
+  }
+  const writeTarget: 'ISOLATED' | 'REAL' = requestedWriteTarget === 'REAL' ? 'REAL' : 'ISOLATED';
+  const masterReviewId = stringValue(value.reviewManifest.masterReviewId);
+  if (!masterReviewId) return { ok: false, status: 428, code: 'REVIEW_REQUIRED', message: 'Master review ID is required.' };
+  const masterReview = reviewStore.get(masterReviewId);
+  if (!masterReview || !reviewStore.isCurrent(masterReviewId) || masterReview.stage !== 'master'
+    || masterReview.projectId !== projectId || masterReview.subjectId !== masterPlanId
+    || (masterReview.status !== 'PASSED' && masterReview.status !== 'PASSED_WITH_WARNINGS')) {
+    return { ok: false, status: 428, code: 'REVIEW_REQUIRED', message: 'Master review is missing, belongs to another subject, or is not successful.' };
+  }
+  const masterContent = nonBlankText(value.masterPlan.content);
+  if (!masterContent || hashPlanContent(masterContent) !== masterReview.contentHash) {
+    return { ok: false, status: 412, code: 'REVIEW_STALE', message: 'Master plan changed after review.' };
+  }
+  const masterCompilation = compilePlanContract(masterContent);
+  if (hashPlanContract(masterCompilation.contract) !== masterReview.contractHash) {
+    return { ok: false, status: 412, code: 'CONTRACT_STALE', message: 'Master canonical contract changed after review.' };
+  }
+
+  if (masterReview.contract.contractVersion !== '2.0' || masterReview.contract.sourceMode !== 'STRUCTURED') {
+    return { ok: false, status: 422, code: 'STRUCTURED_CONTRACT_REQUIRED',
+      message: 'Updated Part A transmission requires a STRUCTURED Canonical Plan Contract v2.' };
+  }
+
+  const reviewRows = Array.isArray(value.reviewManifest.subPlanReviews)
+    ? value.reviewManifest.subPlanReviews.filter(isRecord) : [];
+  const reviewIds = new Map<string, string | undefined>();
+  for (const row of reviewRows) {
+    const reviewedSubPlanId = stringValue(row.subPlanId);
+    if (!reviewedSubPlanId || reviewIds.has(reviewedSubPlanId)) {
+      return { ok: false, status: 400, code: 'INVALID_REVIEW_MANIFEST', message: 'Sub-plan review entries must have unique non-empty subject IDs.' };
+    }
+    reviewIds.set(reviewedSubPlanId, stringValue(row.reviewId));
+  }
+  const owners = new Map<string, string>();
+  const seenSubPlanIds = new Set<string>();
+  const seenIndexes = new Set<number>();
+  const normalizedSubPlans: Record<string, unknown>[] = [];
+  for (const candidate of value.subPlans) {
+    if (!isRecord(candidate)) return { ok: false, status: 400, code: 'INVALID_SUBPLAN', message: 'Sub-plan entry is invalid.' };
+    const subPlanId = stringValue(candidate.id);
+    const reviewId = subPlanId ? reviewIds.get(subPlanId) : undefined;
+    const reviewedContent = nonBlankText(candidate.content);
+    const title = stringValue(candidate.title);
+    const index = Number(candidate.index);
+    if (!subPlanId || !reviewId || !reviewedContent) {
+      return { ok: false, status: 428, code: 'REVIEW_REQUIRED', message: `Sub-plan ${subPlanId || '(unknown)'} has no successful review manifest.` };
+    }
+    if (!title || !Number.isInteger(index) || index < 1 || !isStringArray(candidate.prerequisites)) {
+      return { ok: false, status: 400, code: 'INVALID_SUBPLAN', message: `Sub-plan ${subPlanId} must have a title, positive index and prerequisite array.` };
+    }
+    if (!seenIndexes.add(index)) {
+      return { ok: false, status: 400, code: 'DUPLICATE_SUBPLAN_INDEX', message: `Sub-plan index ${index} appears more than once.` };
+    }
+    const prerequisites = candidate.prerequisites.map((item) => item.trim());
+    if (prerequisites.some((item) => !item) || new Set(prerequisites).size !== prerequisites.length) {
+      return { ok: false, status: 400, code: 'INVALID_SUBPLAN_DEPENDENCY', message: `Sub-plan ${subPlanId} has blank or duplicate prerequisites.` };
+    }
+    if (!seenSubPlanIds.add(subPlanId)) {
+      return { ok: false, status: 400, code: 'DUPLICATE_SUBPLAN', message: `Sub-plan ${subPlanId} appears more than once.` };
+    }
+    const record = reviewStore.get(reviewId);
+    if (!record || !reviewStore.isCurrent(reviewId) || record.stage !== 'subplan' || record.projectId !== projectId || record.subjectId !== subPlanId
+      || (record.status !== 'PASSED' && record.status !== 'PASSED_WITH_WARNINGS')) {
+      return { ok: false, status: 428, code: 'REVIEW_REQUIRED', message: `Sub-plan ${subPlanId} review is missing or not successful.` };
+    }
+    if (record.contentHash !== hashPlanContent(reviewedContent)) {
+      return { ok: false, status: 412, code: 'REVIEW_STALE', message: `Sub-plan ${subPlanId} changed after review.` };
+    }
+    if (record.contractHash !== masterReview.contractHash) {
+      return { ok: false, status: 412, code: 'CONTRACT_MISMATCH', message: `Sub-plan ${subPlanId} uses a different canonical contract.` };
+    }
+    if (record.rulesetVersion !== masterReview.rulesetVersion
+      || record.referenceSnapshotId !== masterReview.referenceSnapshotId) {
+      return { ok: false, status: 412, code: 'REVIEW_CONTEXT_MISMATCH',
+        message: `Sub-plan ${subPlanId} was not reviewed with the same ruleset and reference snapshot as the master plan.` };
+    }
+    const currentSubCompilation = compilePlanContract(reviewedContent);
+    if (currentSubCompilation.source !== 'EMBEDDED'
+      || hashPlanContract(currentSubCompilation.contract) !== masterReview.contractHash) {
+      return { ok: false, status: 412, code: 'CONTRACT_STALE',
+        message: `Sub-plan ${subPlanId} embedded contract changed after review.` };
+    }
+    if (stringValue(candidate.contractHash) !== masterReview.contractHash) {
+      return { ok: false, status: 412, code: 'CONTRACT_STALE',
+        message: `Sub-plan ${subPlanId} contractHash changed after review.` };
+    }
+    const content = stripPlanContractBlock(reviewedContent);
+    if (!isNonBlankStringArray(candidate.deliverableIds)) {
+      return { ok: false, status: 422, code: 'DELIVERABLE_MAPPING_REQUIRED', message: `Sub-plan ${subPlanId} deliverable IDs must be a non-empty string array.` };
+    }
+    const deliverableIds = candidate.deliverableIds;
+    if (deliverableIds.length === 0) {
+      return { ok: false, status: 422, code: 'DELIVERABLE_MAPPING_REQUIRED', message: `Sub-plan ${subPlanId} has no deliverable IDs.` };
+    }
+    if (new Set(deliverableIds).size !== deliverableIds.length) {
+      return { ok: false, status: 422, code: 'DUPLICATE_DELIVERABLE_OWNER', message: `Sub-plan ${subPlanId} assigns the same deliverable more than once.` };
+    }
+    for (const deliverableId of deliverableIds) {
+      const deliverable = masterReview.contract.deliverables.find((item) => item.id === deliverableId);
+      if (!deliverable) {
+        return { ok: false, status: 422, code: 'UNKNOWN_DELIVERABLE', message: `Sub-plan ${subPlanId} references unknown deliverable ${deliverableId}.` };
+      }
+      if (deliverable.action === 'PROHIBIT') {
+        return { ok: false, status: 422, code: 'PROHIBITED_DELIVERABLE_ASSIGNED', message: `Sub-plan ${subPlanId} assigns prohibited deliverable ${deliverableId}.` };
+      }
+      const owner = owners.get(deliverableId);
+      if (owner && owner !== subPlanId) {
+        return { ok: false, status: 422, code: 'DUPLICATE_DELIVERABLE_OWNER', message: `Deliverable ${deliverableId} is owned by both ${owner} and ${subPlanId}.` };
+      }
+      owners.set(deliverableId, subPlanId);
+    }
+    const referencedElementIds = stringArrayOrEmpty(candidate.referencedElementIds);
+    const inputTypes = stringArrayOrEmpty(candidate.inputTypes);
+    const outputTypes = stringArrayOrEmpty(candidate.outputTypes);
+    const descriptorHash = hashSubPlanDescriptor({
+      id: subPlanId, index, title, contentHash: hashPlanContent(content), prerequisites, deliverableIds,
+      contractHash: masterReview.contractHash, referencedElementIds, inputTypes, outputTypes,
+    });
+    if (!record.subjectDescriptorHash || record.subjectDescriptorHash !== descriptorHash) {
+      return { ok: false, status: 412, code: 'REVIEW_STALE',
+        message: `Sub-plan ${subPlanId} descriptor or dependency graph changed after review.` };
+    }
+    normalizedSubPlans.push({
+      ...candidate, id: subPlanId, index, title, content, prerequisites,
+      contractHash: masterReview.contractHash, deliverableIds, referencedElementIds, inputTypes, outputTypes,
+    });
+  }
+  const normalizedIds = new Set(normalizedSubPlans.map((subPlan) => String(subPlan.id)));
+  for (const subPlan of normalizedSubPlans) {
+    for (const prerequisite of subPlan.prerequisites as string[]) {
+      if (prerequisite === subPlan.id || !normalizedIds.has(prerequisite)) {
+        return { ok: false, status: 400, code: 'INVALID_SUBPLAN_DEPENDENCY',
+          message: `Sub-plan ${String(subPlan.id)} has a self or unknown prerequisite ${prerequisite}.` };
+      }
+    }
+  }
+  if (hasSubPlanDependencyCycle(normalizedSubPlans)) {
+    return { ok: false, status: 400, code: 'INVALID_SUBPLAN_DEPENDENCY', message: 'Sub-plan prerequisites contain a cycle.' };
+  }
+  const requiredIds = masterReview.contract.deliverables
+    .filter((item) => item.kind !== 'OTHER' && item.action !== 'PROHIBIT').map((item) => item.id);
+  const missing = requiredIds.filter((id) => !owners.has(id));
+  if (missing.length > 0) {
+    return { ok: false, status: 422, code: 'DELIVERABLE_COVERAGE_INCOMPLETE', message: `Missing deliverables: ${missing.join(', ')}` };
+  }
+
+  if (reviewIds.size !== normalizedSubPlans.length) {
+    return { ok: false, status: 400, code: 'INVALID_REVIEW_MANIFEST', message: 'Review manifest contains subjects outside the transmitted sub-plan set.' };
+  }
+  const reviewManifest = {
+    masterReviewId,
+    masterContentHash: masterReview.contentHash,
+    contractHash: masterReview.contractHash,
+    rulesetVersion: masterReview.rulesetVersion,
+    referenceSnapshotId: masterReview.referenceSnapshotId,
+    subPlanReviews: normalizedSubPlans.map((subPlan) => ({
+      subPlanId: String(subPlan.id),
+      reviewId: reviewIds.get(String(subPlan.id))!,
+      contentHash: hashPlanContent(String(subPlan.content)),
+    })),
+  };
+  const generationIdentity = { ...masterReview.contract.identity };
+  const bundleMaterial = {
+    projectId,
+    writeTarget,
+    generationIdentity,
+    masterPlan: { id: masterPlanId, version: masterPlanVersion, contentHash: masterReview.contentHash },
+    contractHash: masterReview.contractHash,
+    subPlans: normalizedSubPlans.map((subPlan) => ({
+      id: String(subPlan.id),
+      index: Number(subPlan.index),
+      title: String(subPlan.title),
+      contentHash: hashPlanContent(String(subPlan.content)),
+      prerequisites: subPlan.prerequisites as string[],
+      deliverableIds: subPlan.deliverableIds as string[],
+      contractHash: String(subPlan.contractHash),
+      referencedElementIds: subPlan.referencedElementIds as string[],
+      inputTypes: subPlan.inputTypes as string[],
+      outputTypes: subPlan.outputTypes as string[],
+    })),
+  };
+  const bundleHash = hashPlanBundle(bundleMaterial);
+  if (!signingSecret.trim()) {
+    return {
+      ok: false, status: 503, code: 'BUNDLE_SIGNING_UNAVAILABLE',
+      message: 'PLAN_BUNDLE_SIGNING_SECRET must be configured before a reviewed v2 bundle can be transmitted.',
+    };
+  }
+  const bundleSignature = signPlanBundle(bundleHash, reviewManifest, signingSecret);
+  return {
+    ok: true,
+    value: {
+      ...value,
+      projectId,
+      writeTarget,
+      generationIdentity,
+      masterPlan: { ...value.masterPlan, id: masterPlanId, version: masterPlanVersion, content: masterContent },
+      subPlans: normalizedSubPlans,
+      canonicalContract: masterReview.contract,
+      reviewManifest,
+      bundleHash,
+      bundleSignature,
+    },
+  };
+}
+
+function resolveBundleSigningSecret(): string {
+  return process.env.PLAN_BUNDLE_SIGNING_SECRET
+    || process.env.AI_WORKFLOW_BUNDLE_SIGNING_SECRET
+    || '';
+}
+
+function stringValue(value: unknown): string | undefined {
+  return typeof value === 'string' && value.trim() ? value.trim() : undefined;
+}
+
+function nonBlankText(value: unknown): string | undefined {
+  return typeof value === 'string' && value.trim() ? value : undefined;
+}
+
+function isStringArray(value: unknown): value is string[] {
+  return Array.isArray(value) && value.every((item) => typeof item === 'string');
+}
+
+function stringArrayOrEmpty(value: unknown): string[] {
+  return isStringArray(value) ? value.map((item) => item.trim()).filter(Boolean) : [];
+}
+
+function hasSubPlanDependencyCycle(subPlans: Record<string, unknown>[]): boolean {
+  const prerequisites = new Map(subPlans.map((subPlan) => [
+    String(subPlan.id), subPlan.prerequisites as string[],
+  ]));
+  const visiting = new Set<string>();
+  const visited = new Set<string>();
+  const visit = (id: string): boolean => {
+    if (visiting.has(id)) return true;
+    if (visited.has(id)) return false;
+    visiting.add(id);
+    for (const dependency of prerequisites.get(id) ?? []) if (visit(dependency)) return true;
+    visiting.delete(id);
+    visited.add(id);
+    return false;
+  };
+  return Array.from(prerequisites.keys()).some(visit);
+}
+
+function isNonBlankStringArray(value: unknown): value is string[] {
+  return Array.isArray(value) && value.length > 0
+    && value.every((item) => typeof item === 'string' && Boolean(item.trim()));
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
 transmissionRouter.post('/send', async (req: Request, res: Response) => {
-  const planData = req.body;
+  const prepared = prepareV2PlanBundle(req.body);
+  if (!prepared.ok) {
+    res.status(prepared.status).json({ code: prepared.status, success: false, error: prepared.code, msg: prepared.message });
+    return;
+  }
+  const planData = prepared.value;
 
   // Mock 模式: 显式通过 BFF_MOCK_PART_B=true 启用 — 避免生产环境因 PART_B_URL 漏配静默走 Mock
   if (USE_MOCK) {
     const receptionId = `rec_${Date.now()}`;
     const subPlanStatuses: Record<string, string> = {};
-    (planData.subPlans || []).forEach((sp: { id: string }) => {
+    (Array.isArray(planData.subPlans) ? planData.subPlans : []).forEach((sp) => {
       subPlanStatuses[sp.id] = 'QUEUED';
     });
 

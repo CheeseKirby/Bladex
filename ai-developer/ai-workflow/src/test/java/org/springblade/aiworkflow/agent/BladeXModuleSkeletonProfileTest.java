@@ -2,8 +2,10 @@ package org.springblade.aiworkflow.agent;
 
 import org.junit.jupiter.api.Test;
 
+import java.util.List;
 import java.util.Map;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -34,5 +36,26 @@ class BladeXModuleSkeletonProfileTest {
         assertTrue(bootstrap.contains("namespace: blade_lxqt"));
         assertTrue(BladeXModuleLayout.entityPath(context, "SpecialPeriod").contains("/entity/SpecialPeriod.java"));
         assertTrue(BladeXModuleLayout.voPath(context, "SpecialPeriod", "IVO").contains("/vo/ivo/SpecialPeriodIVO.java"));
+    }
+
+    @Test
+    void existingReferenceModuleSkeletonIsNotRegenerated() {
+        GenerationContext context = new GenerationContext(
+                new GenerationIdentity("safetycontrol", "HotWorkUpgrade", "blade_hot_work_upgrade",
+                        "org.springblade.safetycontrol", "blade-safety-control-api", "blade-safety-control",
+                        "blade-safety-control"),
+                ReferenceFrameworkProfile.defaults());
+        List<GeneratedFile> businessFiles = List.of(
+                GeneratedFile.create(org.springblade.aiworkflow.enums.TaskType.STANDARD_CRUD_ENTITY,
+                        BladeXModuleLayout.entityPath(context, "HotWorkUpgrade"), "class HotWorkUpgrade {}"),
+                GeneratedFile.create(org.springblade.aiworkflow.enums.TaskType.STANDARD_CRUD_CONTROLLER,
+                        BladeXModuleLayout.controllerPath(context, "HotWorkUpgrade"), "class HotWorkUpgradeController {}"));
+
+        List<GeneratedFile> skeleton = BladeXModuleSkeleton.ensureFor(
+                businessFiles, new java.util.HashSet<>(), context,
+                path -> path.endsWith("pom.xml") || path.endsWith("Application.java")
+                        || path.endsWith("bootstrap.yml") || path.endsWith("application-dev.yml"));
+
+        assertEquals(List.of(), skeleton);
     }
 }

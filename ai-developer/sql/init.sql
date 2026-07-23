@@ -55,6 +55,16 @@ CALL add_column_if_missing('ai_workflow_plan', 'generation_identity_json',
     "JSON NULL COMMENT 'Canonical generation identity JSON'");
 CALL add_column_if_missing('ai_workflow_plan', 'reference_profile_json',
     "JSON NULL COMMENT 'Reference framework profile JSON'");
+CALL add_column_if_missing('ai_workflow_plan', 'canonical_contract_json',
+    "JSON NULL COMMENT 'Canonical Plan Contract v2 JSON'");
+CALL add_column_if_missing('ai_workflow_plan', 'review_manifest_json',
+    "JSON NULL COMMENT 'Persisted review manifest JSON'");
+CALL add_column_if_missing('ai_workflow_plan', 'bundle_hash',
+    "VARCHAR(64) NULL COMMENT 'Reviewed bundle SHA-256'");
+CALL add_column_if_missing('ai_workflow_plan', 'bundle_signature',
+    "VARCHAR(64) NULL COMMENT 'Trusted Part A bundle HMAC-SHA256'");
+CALL add_column_if_missing('ai_workflow_plan', 'idempotency_key',
+    "VARCHAR(64) NULL COMMENT 'Unique active intake idempotency key'");
 CALL add_column_if_missing('ai_workflow_plan', 'output_directory',
     "VARCHAR(500) NULL COMMENT 'Per-reception isolated output directory'");
 CALL add_column_if_missing('ai_workflow_plan', 'compile_verification_status',
@@ -78,6 +88,11 @@ CREATE TABLE IF NOT EXISTS ai_workflow_sub_plan (
     title VARCHAR(200) COMMENT '标题',
     plan_content MEDIUMTEXT COMMENT '子方案内容(Markdown)',
     prerequisites_json JSON COMMENT '前置依赖子方案ID列表',
+    deliverable_ids_json JSON COMMENT 'Canonical deliverable IDs',
+    contract_hash VARCHAR(64) COMMENT 'Canonical contract hash',
+    referenced_element_ids_json JSON COMMENT 'Referenced contract element IDs',
+    input_types_json JSON COMMENT 'Required business types',
+    output_types_json JSON COMMENT 'Provided business types',
     status VARCHAR(30) DEFAULT 'QUEUED'
         COMMENT '状态: QUEUED/EXECUTING/COMPLETED/COMPLETED_WITH_ERRORS/FAILED',
     error_message TEXT COMMENT '失败原因',
@@ -89,6 +104,26 @@ CREATE TABLE IF NOT EXISTS ai_workflow_sub_plan (
     is_deleted INT DEFAULT 0 COMMENT '逻辑删除'
 ) COMMENT 'AI工作流-子方案执行记录';
 
+DROP PROCEDURE IF EXISTS add_column_if_missing;
+DELIMITER $$
+CREATE PROCEDURE add_column_if_missing(
+    IN tbl VARCHAR(64), IN col VARCHAR(64), IN col_def VARCHAR(500)
+)
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS
+        WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = tbl AND COLUMN_NAME = col) THEN
+        SET @sql = CONCAT('ALTER TABLE `', tbl, '` ADD COLUMN `', col, '` ', col_def);
+        PREPARE stmt FROM @sql; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+    END IF;
+END$$
+DELIMITER ;
+CALL add_column_if_missing('ai_workflow_sub_plan', 'deliverable_ids_json', "JSON NULL COMMENT 'Canonical deliverable IDs'");
+CALL add_column_if_missing('ai_workflow_sub_plan', 'contract_hash', "VARCHAR(64) NULL COMMENT 'Canonical contract hash'");
+CALL add_column_if_missing('ai_workflow_sub_plan', 'referenced_element_ids_json', "JSON NULL COMMENT 'Referenced contract element IDs'");
+CALL add_column_if_missing('ai_workflow_sub_plan', 'input_types_json', "JSON NULL COMMENT 'Required business types'");
+CALL add_column_if_missing('ai_workflow_sub_plan', 'output_types_json', "JSON NULL COMMENT 'Provided business types'");
+DROP PROCEDURE IF EXISTS add_column_if_missing;
+
 -- H3: widen status columns after both tables exist; safe to run repeatedly.
 ALTER TABLE ai_workflow_plan MODIFY COLUMN status VARCHAR(30) DEFAULT 'RECEIVED' COMMENT 'Status: RECEIVED/EXECUTING/COMPLETED/COMPLETED_WITH_ERRORS/FAILED';
 ALTER TABLE ai_workflow_sub_plan MODIFY COLUMN status VARCHAR(30) DEFAULT 'QUEUED' COMMENT 'Status: QUEUED/EXECUTING/COMPLETED/COMPLETED_WITH_ERRORS/FAILED';
@@ -98,6 +133,7 @@ ALTER TABLE ai_workflow_sub_plan MODIFY COLUMN status VARCHAR(30) DEFAULT 'QUEUE
 -- -----------------------------------------------------------
 CREATE TABLE IF NOT EXISTS ai_workflow_execution_log (
     id BIGINT AUTO_INCREMENT PRIMARY KEY COMMENT '主键',
+    plan_id BIGINT COMMENT 'Associated plan ID for plan-level events',
     sub_plan_id BIGINT COMMENT '关联子方案ID',
     stage VARCHAR(50)
         COMMENT '阶段: CHANGE_EVALUATION/CODE_GENERATION/VALIDATION/BUILD_VERIFY/SELF_REVIEW',
@@ -113,6 +149,23 @@ CREATE TABLE IF NOT EXISTS ai_workflow_execution_log (
     update_time DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '修改时间',
     is_deleted INT DEFAULT 0 COMMENT '逻辑删除'
 ) COMMENT 'AI工作流-执行日志';
+
+DROP PROCEDURE IF EXISTS add_column_if_missing;
+DELIMITER $$
+CREATE PROCEDURE add_column_if_missing(
+    IN tbl VARCHAR(64), IN col VARCHAR(64), IN col_def VARCHAR(500)
+)
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS
+        WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = tbl AND COLUMN_NAME = col) THEN
+        SET @sql = CONCAT('ALTER TABLE `', tbl, '` ADD COLUMN `', col, '` ', col_def);
+        PREPARE stmt FROM @sql; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+    END IF;
+END$$
+DELIMITER ;
+CALL add_column_if_missing('ai_workflow_execution_log', 'plan_id',
+    "BIGINT NULL COMMENT 'Associated plan ID for plan-level events'");
+DROP PROCEDURE IF EXISTS add_column_if_missing;
 
 -- -----------------------------------------------------------
 -- 4. 生成的代码文件（供 Part A 拉取查看）
@@ -162,9 +215,36 @@ DELIMITER ;
 CALL add_index_if_missing('ai_workflow_plan',          'idx_plan_status',           'status');
 CALL add_index_if_missing('ai_workflow_plan',          'idx_plan_project_id',       'project_id');
 CALL add_index_if_missing('ai_workflow_plan',          'idx_plan_reception_id',     'reception_id');
+
+DROP PROCEDURE IF EXISTS add_unique_index_if_missing;
+DELIMITER //
+CREATE PROCEDURE add_unique_index_if_missing(
+    IN p_table VARCHAR(64),
+    IN p_index VARCHAR(64),
+    IN p_cols VARCHAR(255)
+)
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM information_schema.STATISTICS
+        WHERE table_schema = DATABASE()
+          AND table_name = p_table
+          AND index_name = p_index
+    ) THEN
+        SET @sql = CONCAT('CREATE UNIQUE INDEX ', p_index, ' ON ', p_table, '(', p_cols, ')');
+        PREPARE stmt FROM @sql;
+        EXECUTE stmt;
+        DEALLOCATE PREPARE stmt;
+    END IF;
+END//
+DELIMITER ;
+
+CALL add_unique_index_if_missing('ai_workflow_plan', 'uk_plan_idempotency_key', 'idempotency_key');
+DROP PROCEDURE IF EXISTS add_unique_index_if_missing;
+
 CALL add_index_if_missing('ai_workflow_sub_plan',      'idx_sub_plan_plan_id',      'plan_id');
 CALL add_index_if_missing('ai_workflow_sub_plan',      'idx_sub_plan_status',       'status');
 CALL add_index_if_missing('ai_workflow_sub_plan',      'idx_sub_plan_part_a_id',    'part_a_sub_plan_id');
+CALL add_index_if_missing('ai_workflow_execution_log','idx_exec_log_plan_id',      'plan_id');
 CALL add_index_if_missing('ai_workflow_execution_log','idx_exec_log_sub_plan_id',  'sub_plan_id');
 CALL add_index_if_missing('ai_workflow_execution_log','idx_exec_log_status',         'status');
 CALL add_index_if_missing('ai_workflow_generated_file','idx_gen_file_plan_id',      'plan_id');

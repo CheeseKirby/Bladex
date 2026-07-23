@@ -5,6 +5,7 @@ import org.springblade.aiworkflow.enums.TaskType;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Set;
+import java.util.function.Predicate;
 
 /** Builds the API/service module skeleton from the detected reference profile. */
 public final class BladeXModuleSkeleton {
@@ -14,6 +15,12 @@ public final class BladeXModuleSkeleton {
 
     public static List<GeneratedFile> ensureFor(
             List<GeneratedFile> existing, Set<String> ensuredSkeletonKeys, GenerationContext context) {
+        return ensureFor(existing, ensuredSkeletonKeys, context, ignored -> false);
+    }
+
+    public static List<GeneratedFile> ensureFor(
+            List<GeneratedFile> existing, Set<String> ensuredSkeletonKeys, GenerationContext context,
+            Predicate<String> referencePathExists) {
         boolean hasApi = existing.stream().anyMatch(f -> "API".equals(BladeXModuleLayout.sideOfPath(f.getFilePath())));
         boolean hasImpl = existing.stream().anyMatch(f -> "IMPL".equals(BladeXModuleLayout.sideOfPath(f.getFilePath())));
         boolean hasExcel = existing.stream().anyMatch(f -> f.getFilePath() != null
@@ -21,8 +28,16 @@ public final class BladeXModuleSkeleton {
                 || f.getFilePath().contains("/excel/")));
         List<GeneratedFile> result = new ArrayList<>();
         String module = context.identity().moduleName();
-        if (hasApi && ensuredSkeletonKeys.add(module + ":API")) result.addAll(buildApiSide(context, hasExcel));
-        if (hasImpl && ensuredSkeletonKeys.add(module + ":IMPL")) result.addAll(buildImplSide(context));
+        if (hasApi && ensuredSkeletonKeys.add(module + ":API")) {
+            buildApiSide(context, hasExcel).stream()
+                    .filter(file -> !referencePathExists.test(file.getFilePath()))
+                    .forEach(result::add);
+        }
+        if (hasImpl && ensuredSkeletonKeys.add(module + ":IMPL")) {
+            buildImplSide(context).stream()
+                    .filter(file -> !referencePathExists.test(file.getFilePath()))
+                    .forEach(result::add);
+        }
         return result;
     }
 

@@ -36,6 +36,9 @@ class PlanReceiveRequestValidationTest {
         PlanReceiveRequest request = new PlanReceiveRequest();
         request.setProjectId("project");
         request.setProjectName("Project");
+        PlanReceiveRequest.MetadataVO metadata = new PlanReceiveRequest.MetadataVO();
+        metadata.setSourceService("legacy-replay");
+        request.setMetadata(metadata);
         PlanReceiveRequest.MasterPlanVO master = new PlanReceiveRequest.MasterPlanVO();
         master.setId("master-1");
         master.setVersion(1);

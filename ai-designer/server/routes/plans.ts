@@ -1,46 +1,53 @@
 /**
  * 方案管理路由
  *
- * 方案 CRUD 操作。当前使用内存存储（开发阶段）。
- * 生产环境应替换为 MySQL 持久化。
+ * 方案 CRUD 操作。设计态数据由本地原子 JSON 存储持久化，避免 BFF 重启后方案丢失。
  */
 
-import { Router, Request, Response } from 'express';
+import { Router, type NextFunction, type Request, type Response } from 'express';
 import { requireBffAdmin } from '../security/adminGuard';
+import { ProjectStore, projectStore } from '../services/projectStore';
 
-export const plansRouter = Router();
-plansRouter.use(requireBffAdmin);
+export function createPlansRouter(store: ProjectStore = projectStore): Router {
+  const router = Router();
+  router.use(requireBffAdmin);
 
-// 内存存储
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-const projectsStore: Map<string, Record<string, unknown>> = new Map();
+  /** 保存项目 */
+  router.post('/save', async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      if (!req.body?.id) {
+        res.status(400).json({ error: '缺少项目ID' });
+        return;
+      }
+      const saved = await store.save(req.body);
+      res.json({ success: true, id: saved.id, updatedAt: saved.updatedAt });
+    } catch (error) {
+      next(error);
+    }
+  });
 
-/** 保存项目 */
-plansRouter.post('/save', (req: Request, res: Response) => {
-  const project = req.body;
-  if (!project?.id) {
-    return res.status(400).json({ error: '缺少项目ID' });
-  }
-  projectsStore.set(project.id, { ...project, updatedAt: new Date().toISOString() });
-  res.json({ success: true, id: project.id });
-});
+  /** 加载项目 */
+  router.get('/:id', (req: Request, res: Response) => {
+    const project = store.get(req.params.id);
+    if (!project) {
+      res.status(404).json({ error: '项目不存在' });
+      return;
+    }
+    res.json({ success: true, data: project });
+  });
 
-/** 加载项目 */
-plansRouter.get('/:id', (req: Request, res: Response) => {
-  const project = projectsStore.get(req.params.id);
-  if (!project) {
-    return res.status(404).json({ error: '项目不存在' });
-  }
-  res.json({ success: true, data: project });
-});
+  /** 列出所有项目 */
+  router.get('/', (_req: Request, res: Response) => {
+    const list = store.list().map((project) => ({
+      id: project.id,
+      projectName: project.projectName,
+      status: project.status,
+      updatedAt: project.updatedAt,
+    }));
+    res.json({ success: true, data: list });
+  });
 
-/** 列出所有项目 */
-plansRouter.get('/', (_req: Request, res: Response) => {
-  const list = Array.from(projectsStore.values()).map((p) => ({
-    id: p.id,
-    projectName: p.projectName,
-    status: p.status,
-    updatedAt: p.updatedAt,
-  }));
-  res.json({ success: true, data: list });
-});
+  return router;
+}
+
+export const plansRouter = createPlansRouter();

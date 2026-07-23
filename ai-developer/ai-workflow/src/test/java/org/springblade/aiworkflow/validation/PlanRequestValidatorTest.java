@@ -10,7 +10,7 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 
 class PlanRequestValidatorTest {
 
-    private final PlanRequestValidator validator = new PlanRequestValidator();
+    private final PlanRequestValidator validator = new PlanRequestValidator("", true);
 
     @Test
     void validDependencyGraphPasses() {

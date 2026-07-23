@@ -1,0 +1,2 @@
+实体名: SpecialPeriod, 模块名: specialperiod, 包路径: org.springblade.specialperiod, 表名: blade_special_period.
+在 blade-specialperiod-api 模块中定义 ISpecialPeriodClient 接口，使用 @FeignClient(value = "blade-specialperiod") 注解，声明 matchPeriod 方法供动火作业服务远程调用。在 blade-specialperiod Service 模块中编写 SpecialPeriodClient 类实现 ISpecialPeriodClient 接口，作为 Feign Fallback 容错降级处理，当调用失败时返回默认未命中结果(isSpecialPeriod=0)，确保动火作业主流程不被阻塞。

@@ -61,4 +61,38 @@ class FileWriteExecutorTest {
         assertTrue(Files.exists(written), "文件应已写入");
         assertEquals("content", Files.readString(written));
     }
+    @Test
+    void preparedWriteRollsBackEveryPromotedFileAfterFinalGateFailure() throws Exception {
+        FileWriteExecutor executor = new FileWriteExecutor(tempDir.toString());
+        Path existing = tempDir.resolve("Existing.java");
+        Files.writeString(existing, "old");
+
+        FileWriteExecutor.PreparedWrite prepared = executor.prepareTransactionalWrite(List.of(
+                new FileWriteTask("Existing.java", "new", "MODIFY"),
+                new FileWriteTask("Created.java", "created", "CREATE")
+        ), tempDir.toString());
+
+        assertTrue(prepared.apply().isSuccess());
+        assertEquals("new", Files.readString(existing));
+        assertTrue(Files.exists(tempDir.resolve("Created.java")));
+
+        WriteResult rollback = prepared.rollback();
+        assertTrue(rollback.isSuccess(), rollback.getErrorMessage());
+        assertEquals("old", Files.readString(existing));
+        assertFalse(Files.exists(tempDir.resolve("Created.java")));
+    }
+
+    @Test
+    void committedPreparedWriteCannotBeRolledBack() throws Exception {
+        FileWriteExecutor executor = new FileWriteExecutor(tempDir.toString());
+        FileWriteExecutor.PreparedWrite prepared = executor.prepareTransactionalWrite(
+                List.of(new FileWriteTask("Committed.java", "content", "CREATE")), tempDir.toString());
+
+        assertTrue(prepared.apply().isSuccess());
+        prepared.commit();
+
+        assertFalse(prepared.rollback().isSuccess());
+        assertEquals("content", Files.readString(tempDir.resolve("Committed.java")));
+    }
+
 }

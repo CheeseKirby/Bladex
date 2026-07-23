@@ -8,6 +8,7 @@ import jakarta.validation.constraints.NotEmpty;
 import jakarta.validation.constraints.NotNull;
 import jakarta.validation.constraints.Size;
 import lombok.Data;
+import org.springblade.aiworkflow.agent.CanonicalPlanContractV2;
 
 import java.util.List;
 
@@ -43,6 +44,22 @@ public class PlanReceiveRequest {
     @Valid
     @Schema(description = "Canonical generation identity shared by every sub-plan")
     private GenerationIdentityVO generationIdentity;
+
+    @Valid
+    @Schema(description = "Canonical Plan Contract v2; required for the v2 workflow")
+    private CanonicalPlanContractV2 canonicalContract;
+
+    @Valid
+    @Schema(description = "Persisted review evidence manifest")
+    private ReviewManifestVO reviewManifest;
+
+    @Size(max = 64)
+    @Schema(description = "SHA-256 hash of the complete reviewed bundle")
+    private String bundleHash;
+
+    @Size(max = 64)
+    @Schema(description = "HMAC-SHA256 credential issued by trusted Part A")
+    private String bundleSignature;
 
     /** Empty values default to ISOLATED. REAL writes require administrator authorization. */
     @Schema(description = "Write target: ISOLATED or REAL", defaultValue = "ISOLATED")
@@ -84,6 +101,21 @@ public class PlanReceiveRequest {
 
         @Size(max = 50, message = "A sub-plan must not have more than 50 prerequisites")
         private List<@NotBlank @Size(max = 100) String> prerequisites;
+
+        @Size(max = 50)
+        private List<@NotBlank @Size(max = 150) String> deliverableIds;
+
+        @Size(max = 64)
+        private String contractHash;
+
+        @Size(max = 200)
+        private List<@NotBlank @Size(max = 150) String> referencedElementIds;
+
+        @Size(max = 100)
+        private List<@NotBlank @Size(max = 150) String> inputTypes;
+
+        @Size(max = 100)
+        private List<@NotBlank @Size(max = 150) String> outputTypes;
     }
 
     @Data
@@ -113,6 +145,35 @@ public class PlanReceiveRequest {
         private String serviceModuleName;
         @Size(max = 100)
         private String serviceName;
+    }
+
+    @Data
+    @Schema(description = "Review manifest")
+    public static class ReviewManifestVO {
+        @Size(max = 100)
+        private String masterReviewId;
+        @Size(max = 64)
+        private String masterContentHash;
+        @Size(max = 64)
+        private String contractHash;
+        @Size(max = 100)
+        private String rulesetVersion;
+        @Size(max = 100)
+        private String referenceSnapshotId;
+        @Valid
+        @Size(max = 50)
+        private List<SubPlanReviewVO> subPlanReviews;
+    }
+
+    @Data
+    @Schema(description = "Sub-plan review evidence")
+    public static class SubPlanReviewVO {
+        @Size(max = 100)
+        private String subPlanId;
+        @Size(max = 100)
+        private String reviewId;
+        @Size(max = 64)
+        private String contentHash;
     }
 
 }

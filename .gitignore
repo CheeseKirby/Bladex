@@ -9,6 +9,7 @@
 # ─── Node / 前端 ──────────────────────────────────────
 node_modules/
 dist/
+coverage/
 .vite/
 *.local
 
@@ -23,7 +24,10 @@ target/
 
 # ─── 工作流生成产物(运行时生成,不进版本控制)──────────
 ai-generated-modules/
+output/
 _compile-check/
+.verification/
+.playwright-cli/
 
 # ─── BladeX 参考项目(不纳入本仓库)─────────────────────
 blade_hgsjy/

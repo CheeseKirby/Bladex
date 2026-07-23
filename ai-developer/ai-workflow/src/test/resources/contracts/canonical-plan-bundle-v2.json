@@ -1,0 +1,40 @@
+{
+  "projectId": "fixture-project",
+  "masterPlan": {
+    "id": "master-1",
+    "version": 1,
+    "contentHash": "4a2b5e7b6afd3d2c170c9517ded62d415551e5dde54be078b0ddf5bde6dd31c4"
+  },
+  "contractHash": "b7c30f97794bf1b3808931686949963e929a60655bcb8a8b4272df9b80374f81",
+  "subPlans": [
+    {
+      "id": "sub-1",
+      "index": 1,
+      "title": "All canonical deliverables",
+      "contentHash": "5e23096cc7497fea0c4282d4187d838ff0e8604ad0c7b84b29f9e98fbb019752",
+      "prerequisites": [],
+      "deliverableIds": [
+        "deliverable.controller.6",
+        "deliverable.ddl.1",
+        "deliverable.entity.2",
+        "deliverable.mapper.4",
+        "deliverable.service.5",
+        "deliverable.vo.3"
+      ],
+      "contractHash": "b7c30f97794bf1b3808931686949963e929a60655bcb8a8b4272df9b80374f81",
+      "referencedElementIds": [],
+      "inputTypes": [],
+      "outputTypes": []
+    }
+  ],
+  "writeTarget": "ISOLATED",
+  "generationIdentity": {
+    "moduleName": "ticket",
+    "entityName": "Ticket",
+    "tableName": "blade_ticket",
+    "basePackage": "org.springblade.ticket",
+    "apiModuleName": "blade-ticket-api",
+    "serviceModuleName": "blade-ticket",
+    "serviceName": "blade-ticket"
+  }
+}

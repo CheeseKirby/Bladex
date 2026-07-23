@@ -1,0 +1,2 @@
+实体名: SpecialPeriod, 模块名: specialperiod, 包路径: org.springblade.specialperiod, 表名: blade_special_period.
+编写并执行特殊时段配置表的 DDL 建表语句。表必须包含字段：id, period_name, period_type, start_date, end_date, start_time, end_time, upgrade_level, is_enable, remark 以及 BladeX 标准审计字段(create_user, create_time, update_user, update_time, status, is_deleted)。需建立 uk_period_name(period_name, is_deleted) 唯一索引，以及 period_type, is_enable, status, start_date, end_date 等业务索引。同时声明动火作业主表(blade_hotwork)的 ALTER 语句，增加 is_special_period 字段及索引，供动火作业模块执行。

@@ -1,4 +1,4 @@
-﻿param(
+param(
     [switch]$CheckOnly
 )
 
@@ -42,6 +42,65 @@ function Import-DotEnv([string]$Path) {
         }
         [Environment]::SetEnvironmentVariable($name, $value, "Process")
     }
+}
+
+function New-RandomHexSecret([int]$ByteCount = 32) {
+    $bytes = New-Object byte[] $ByteCount
+    $rng = [System.Security.Cryptography.RandomNumberGenerator]::Create()
+    try {
+        $rng.GetBytes($bytes)
+    }
+    finally {
+        $rng.Dispose()
+    }
+    return (($bytes | ForEach-Object { $_.ToString("x2") }) -join "")
+}
+
+function Set-DotEnvValue([string]$Path, [string]$Name, [string]$Value) {
+    $existing = if (Test-Path -LiteralPath $Path) {
+        [System.IO.File]::ReadAllText($Path)
+    } else {
+        ""
+    }
+    $lines = [System.Text.RegularExpressions.Regex]::Split($existing, "\r?\n")
+    $updatedLines = New-Object System.Collections.Generic.List[string]
+    $matched = $false
+    $pattern = "^\s*" + [System.Text.RegularExpressions.Regex]::Escape($Name) + "\s*="
+    foreach ($line in $lines) {
+        if ($line -match $pattern) {
+            if (-not $matched) {
+                $updatedLines.Add($Name + "=" + $Value)
+                $matched = $true
+            }
+            continue
+        }
+        $updatedLines.Add($line)
+    }
+    if (-not $matched) {
+        while ($updatedLines.Count -gt 0 -and [string]::IsNullOrEmpty($updatedLines[$updatedLines.Count - 1])) {
+            $updatedLines.RemoveAt($updatedLines.Count - 1)
+        }
+        $updatedLines.Add($Name + "=" + $Value)
+    }
+    $updated = ($updatedLines -join "`r`n").TrimEnd("`r", "`n") + "`r`n"
+    $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+    [System.IO.File]::WriteAllText($Path, $updated, $utf8NoBom)
+}
+
+function Ensure-PlanBundleSigningSecret([string]$Path) {
+    $primary = if ($null -eq $env:PLAN_BUNDLE_SIGNING_SECRET) { "" } else { $env:PLAN_BUNDLE_SIGNING_SECRET.Trim() }
+    $compatibility = if ($null -eq $env:AI_WORKFLOW_BUNDLE_SIGNING_SECRET) { "" } else { $env:AI_WORKFLOW_BUNDLE_SIGNING_SECRET.Trim() }
+    $knownPlaceholder = "replace-with-a-random-64-character-hex-secret"
+    if (-not [string]::IsNullOrWhiteSpace($primary) -and $primary -ne $knownPlaceholder) { return }
+    if (-not [string]::IsNullOrWhiteSpace($compatibility)) {
+        [Environment]::SetEnvironmentVariable("PLAN_BUNDLE_SIGNING_SECRET", $compatibility, "Process")
+        return
+    }
+
+    $generated = New-RandomHexSecret 32
+    Set-DotEnvValue $Path "PLAN_BUNDLE_SIGNING_SECRET" $generated
+    [Environment]::SetEnvironmentVariable("PLAN_BUNDLE_SIGNING_SECRET", $generated, "Process")
+    Write-Host "  [OK] Generated and persisted the shared Part A/Part B bundle signing secret." -ForegroundColor Green
 }
 
 function Assert-Command([string]$Name, [string]$InstallHint) {
@@ -185,17 +244,70 @@ function Ensure-Database([string]$HostName, [int]$Port, [string]$User, [string]$
     }
 }
 
-function Stop-PortListener([int]$Port, [string]$ServiceName) {
-    $connections = @(Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue)
-    if ($connections.Count -eq 0) { return }
-    foreach ($connection in $connections) {
-        $process = Get-Process -Id $connection.OwningProcess -ErrorAction SilentlyContinue
-        if ($process) {
-            Write-Host "  停止旧的 $ServiceName 进程 $($process.Name) (PID $($process.Id), port $Port)" -ForegroundColor Yellow
-            & (Get-Command ('Stop-' + 'Process')) -Id $process.Id -Force -ErrorAction Stop
+function Get-PortListenerPids([int]$Port) {
+    # netstat is intentionally used instead of Get-NetTCPConnection here. On some Windows hosts
+    # Get-NetTCPConnection can block for a long time or transiently miss a listener during startup.
+    $seen = @{}
+    foreach ($line in @(& netstat -ano 2>$null)) {
+        if ($line -match "^\s*TCP\s+\S+:$Port\s+\S+\s+LISTENING\s+(\d+)\s*$") {
+            $listenerPid = [int]$Matches[1]
+            if (-not $seen.ContainsKey($listenerPid)) {
+                $seen[$listenerPid] = $true
+                Write-Output $listenerPid
+            }
         }
     }
-    Start-Sleep -Seconds 1
+}
+
+function Stop-PortListener([int]$Port, [string]$ServiceName) {
+    $listenerPids = @(Get-PortListenerPids $Port)
+    foreach ($listenerPid in $listenerPids) {
+        $process = Get-Process -Id $listenerPid -ErrorAction SilentlyContinue
+        if ($process) {
+            Write-Host "  Stop old $ServiceName process $($process.Name) (PID $($process.Id), port $Port)" -ForegroundColor Yellow
+            Stop-Process -Id $process.Id -Force -ErrorAction Stop
+        }
+    }
+
+    $deadline = (Get-Date).AddSeconds(15)
+    do {
+        $remaining = @(Get-PortListenerPids $Port)
+        if ($remaining.Count -eq 0) { return }
+        Start-Sleep -Milliseconds 500
+    } while ((Get-Date) -lt $deadline)
+
+    Stop-WithError "$ServiceName old listener did not stop on port $Port (PID: $($remaining -join ', '))."
+}
+
+function Initialize-ReferenceProject([string]$ReferenceRoot) {
+    if ([string]::IsNullOrWhiteSpace($ReferenceRoot)) {
+        Write-Host "  [WARN] REFERENCE_PROJECT_ROOT is empty; reference indexing is skipped." -ForegroundColor Yellow
+        return
+    }
+    $resolvedRoot = [System.IO.Path]::GetFullPath($ReferenceRoot)
+    if (-not (Test-Path -LiteralPath $resolvedRoot -PathType Container)) {
+        Stop-WithError "Reference project directory does not exist: $resolvedRoot"
+    }
+    $headers = @{}
+    if (-not [string]::IsNullOrWhiteSpace($env:AI_WORKFLOW_ADMIN_TOKEN)) {
+        $headers["X-Admin-Token"] = $env:AI_WORKFLOW_ADMIN_TOKEN
+    }
+    $json = @{ path = $resolvedRoot } | ConvertTo-Json -Compress
+    try {
+        $response = Invoke-RestMethod -Method Post `
+            -Uri "http://127.0.0.1:8111/api/project/reference" `
+            -Headers $headers `
+            -ContentType "application/json; charset=utf-8" `
+            -Body ([System.Text.Encoding]::UTF8.GetBytes($json)) `
+            -TimeoutSec 180
+        if ($response.success -ne $true -or $response.data.ready -ne $true) {
+            Stop-WithError "Part B did not report the reference project as ready: $resolvedRoot"
+        }
+        Write-Host "  [OK] Reference project ready: $resolvedRoot ($($response.data.indexedClasses) classes)" -ForegroundColor Green
+    }
+    catch {
+        Stop-WithError "Reference project initialization failed: $($_.Exception.Message)"
+    }
 }
 
 function Start-ServiceWindow([string]$Title, [string]$WorkingDirectory, [string]$Command) {
@@ -207,6 +319,7 @@ function Start-ServiceWindow([string]$Title, [string]$WorkingDirectory, [string]
 }
 Write-Step "加载配置并检查运行环境"
 Import-DotEnv $EnvPath
+Ensure-PlanBundleSigningSecret $EnvPath
 Assert-Command "java" "请安装 JDK 17 并加入 PATH。"
 Assert-Command "mvn" "请安装 Maven 3.8+ 并加入 PATH。"
 Assert-Command "node" "请安装 Node.js 18+ 并加入 PATH。"
@@ -220,6 +333,10 @@ if (-not [int]::TryParse($dbPortText, [ref]$dbPort) -or $dbPort -lt 1 -or $dbPor
 }
 $dbUser = if ($env:DB_USERNAME) { $env:DB_USERNAME } else { "root" }
 $dbPassword = if ($null -ne $env:DB_PASSWORD) { $env:DB_PASSWORD } else { "" }
+$referenceRoot = if ($null -ne $env:REFERENCE_PROJECT_ROOT) { $env:REFERENCE_PROJECT_ROOT.Trim() } else { "" }
+if ($referenceRoot -and -not (Test-Path -LiteralPath ([System.IO.Path]::GetFullPath($referenceRoot)) -PathType Container)) {
+    Stop-WithError "REFERENCE_PROJECT_ROOT does not exist: $referenceRoot"
+}
 
 Write-Step "确保 MySQL 和数据库 schema 可用"
 Ensure-Database $dbHost $dbPort $dbUser $dbPassword
@@ -236,9 +353,11 @@ Stop-PortListener 3005 "前端"
 Write-Step "启动 Part B"
 Start-ServiceWindow "ai-workflow (8111)" (Join-Path $Root "ai-developer") `
     "mvn spring-boot:run -pl ai-workflow -Dspring-boot.run.profiles=dev"
-if (-not (Wait-Http "Part B" "http://127.0.0.1:8111/actuator/health" 180)) {
+if (-not (Wait-Http "Part B" "http://127.0.0.1:8111/actuator/health/readiness" 180)) {
     Stop-WithError "Part B 启动超时，请检查 ai-workflow 窗口中的错误日志。"
 }
+
+Initialize-ReferenceProject $referenceRoot
 
 Write-Step "启动 BFF"
 Start-ServiceWindow "ai-designer BFF (3004)" (Join-Path $Root "ai-designer") "npm.cmd run server"

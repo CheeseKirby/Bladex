@@ -41,6 +41,9 @@ public class AiPlan implements Serializable {
     @Schema(description = "接收编号")
     private String receptionId;
 
+    @Schema(description = "Active request idempotency key")
+    private String idempotencyKey;
+
     @Schema(description = "状态: RECEIVED/EXECUTING/COMPLETED/FAILED")
     private PlanStatus status;
 
@@ -52,6 +55,18 @@ public class AiPlan implements Serializable {
 
     @Schema(description = "Reference framework profile JSON")
     private String referenceProfileJson;
+
+    @Schema(description = "Canonical Plan Contract v2 JSON")
+    private String canonicalContractJson;
+
+    @Schema(description = "Persisted review manifest JSON")
+    private String reviewManifestJson;
+
+    @Schema(description = "Reviewed bundle SHA-256")
+    private String bundleHash;
+
+    @Schema(description = "Trusted Part A bundle HMAC-SHA256")
+    private String bundleSignature;
 
     @Schema(description = "Per-reception isolated output directory")
     private String outputDirectory;

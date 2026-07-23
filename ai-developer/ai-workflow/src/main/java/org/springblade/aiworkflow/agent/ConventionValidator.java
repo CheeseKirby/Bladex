@@ -133,7 +133,7 @@ public class ConventionValidator {
             case STANDARD_CRUD_ENTITY -> validateEntity(file.getContent(), issues);
             case STANDARD_CRUD_CONTROLLER -> validateController(file.getContent(), issues);
             case STANDARD_CRUD_SERVICE, COMPLEX_BUSINESS_SERVICE -> validateService(file.getContent(), issues);
-            case FEIGN_CLIENT -> validateFeign(file.getContent(), issues);
+            case FEIGN_CLIENT, FEIGN_PROVIDER -> validateFeign(file.getContent(), issues);
             case CUSTOM_MAPPER -> validateMapper(file.getContent(), issues);
             case MAPPER_XML -> validateMapperXml(file.getContent(), issues);
             case EXCEL_IMPORT_EXPORT -> validateExcel(file.getContent(), issues);

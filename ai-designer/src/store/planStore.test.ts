@@ -87,6 +87,11 @@ describe('createProject', () => {
     assert.equal(s.partBOverallStatus, null);
     assert.deepEqual(s.generatedFiles, []);
   });
+  test('submitted requirement is retained in the project summary', () => {
+    usePlanStore.getState().createProject('visitor appointment');
+    usePlanStore.getState().setRawRequirements('standalone visitor appointment CRUD');
+    assert.equal(usePlanStore.getState().project?.rawRequirements, 'standalone visitor appointment CRUD');
+  });
 });
 
 describe('模块画布与项目双向同步', () => {
@@ -179,13 +184,15 @@ describe('removeSubPlanDependency', () => {
 
   test('剔除指定依赖边,保留其他依赖', () => {
     seedProjectWithSubPlans([
-      makeSubPlan({ id: 'target', prerequisites: ['src-1', 'src-2'] }),
+      makeSubPlan({ id: 'target', prerequisites: ['src-1', 'src-2'], status: 'REVIEWED', reviewId: 'review-old' }),
     ]);
 
     usePlanStore.getState().removeSubPlanDependency('src-1', 'target');
 
     const target = usePlanStore.getState().project!.subPlans.find((sp) => sp.id === 'target');
     assert.deepEqual(target!.prerequisites, ['src-2']);
+    assert.equal(target!.status, 'GENERATED');
+    assert.equal(target!.reviewId, undefined);
   });
 });
 
@@ -274,6 +281,69 @@ describe('loadDemo 占位符替换', () => {
     assert.equal(subPlans[1].prerequisites[0], subPlans[0].id, '__SUBPLAN_0__ 应映射到第一个子方案的 id');
   });
 });
+
+
+describe('hydrateProject', () => {
+  beforeEach(() => resetStore());
+
+  test('restores persisted project, canvas modules and derivable Part B state', () => {
+    const module = makeModule();
+    const project = {
+      id: 'persisted-project',
+      projectName: 'persisted project',
+      modules: [module],
+      status: 'TRANSMITTED' as const,
+      subPlans: [makeSubPlan({
+        id: 'sp-restored',
+        status: 'TRANSMITTED',
+        transmissionRef: 'rx-1',
+        partBStatus: 'COMPLETED',
+      })],
+    };
+
+    usePlanStore.getState().hydrateProject(project);
+
+    const state = usePlanStore.getState();
+    assert.equal(state.project?.id, 'persisted-project');
+    assert.deepEqual(state.canvasModules, [module]);
+    assert.equal(state.receptionId, 'rx-1');
+    assert.equal(state.partBStatuses['sp-restored'], 'COMPLETED');
+    assert.equal(state.partBOverallStatus, 'COMPLETED');
+  });
+
+  test('restored failed sub-plan takes precedence over queued or completed states', () => {
+    const project: import('../types/plan').Project = {
+      id: 'persisted-failed-project',
+      projectName: 'persisted project',
+      modules: [],
+      status: 'TRANSMITTED',
+      subPlans: [
+        makeSubPlan({ id: 'sp-failed', transmissionRef: 'rx-failed', partBStatus: 'FAILED' }),
+        makeSubPlan({ id: 'sp-queued', transmissionRef: 'rx-failed', partBStatus: 'QUEUED' }),
+      ],
+    };
+
+    usePlanStore.getState().hydrateProject(project);
+
+    assert.equal(usePlanStore.getState().partBOverallStatus, 'FAILED');
+  });
+
+  test('clones the API payload so store updates do not mutate the caller object', () => {
+    const project: import('../types/plan').Project = {
+      id: 'persisted-project',
+      projectName: 'persisted project',
+      modules: [makeModule()],
+      status: 'DRAFT',
+      subPlans: [],
+    };
+
+    usePlanStore.getState().hydrateProject(project);
+    usePlanStore.getState().setRawRequirements('new requirement');
+
+    assert.equal(project.rawRequirements, undefined);
+  });
+});
+
 
 describe('resetProject', () => {
   beforeEach(() => resetStore());
@@ -369,4 +439,20 @@ describe('子方案审查结果', () => {
 
     assert.equal(usePlanStore.getState().project!.status, 'SUBPLANS_REVIEWED');
   });
+  test('blocked review keeps repaired draft without a transferable credential', () => {
+    seedProjectWithSubPlans([makeSubPlan({ id: 'sp-1', status: 'REVIEWED', reviewId: 'old-review' })]);
+
+    usePlanStore.getState().setSubPlanReviewDraft('sp-1', 'repaired draft', [
+      { what: 'state owner', why: 'deterministic repair', before: 'old', after: 'new' },
+    ]);
+
+    const state = usePlanStore.getState();
+    const sp = state.project!.subPlans[0];
+    assert.equal(sp.reviewedContent, 'repaired draft');
+    assert.equal(sp.status, 'GENERATED');
+    assert.equal(sp.reviewId, undefined);
+    assert.equal(sp.reviewAudit, undefined);
+    assert.equal(state.project!.status, 'SUBPLANS_GENERATED');
+  });
+
 });

@@ -60,7 +60,12 @@ public class BladeXCodeAgent {
     /** 跨文件契约校验器 — 无状态工具, 直接持有实例 */
     private final CrossFileValidator crossFileValidator = new CrossFileValidator();
     private final GeneratedProjectValidator generatedProjectValidator = new GeneratedProjectValidator();
+    private final GeneratedSourceGate generatedSourceGate = new GeneratedSourceGate();
     private final ProjectQualityRepairer projectQualityRepairer;
+    private final PlanArtifactCompiler planArtifactCompiler = new PlanArtifactCompiler();
+    private final CanonicalDomainContractCompiler domainContractCompiler = new CanonicalDomainContractCompiler();
+    private final ReferenceArtifactBinder referenceArtifactBinder = new ReferenceArtifactBinder();
+    private final PlanArtifactTaskValidator planArtifactTaskValidator = new PlanArtifactTaskValidator();
 
     /** 拓扑排序器(H8 拆出)- 子方案 DAG 排序 + 依赖解析 */
     private final TopologySorter topologySorter;
@@ -133,19 +138,46 @@ public class BladeXCodeAgent {
         GenerationIdentity generationIdentity = GenerationIdentityResolver.resolve(plan, subPlans, objectMapper);
         ReferenceFrameworkProfile frameworkProfile = referenceProjectIndex != null
                 ? referenceProjectIndex.getFrameworkProfile() : ReferenceFrameworkProfile.defaults();
-        GenerationContext generationContext = new GenerationContext(generationIdentity, frameworkProfile);
+        CanonicalPlanContractV2 wireContract = null;
+        if (plan.getCanonicalContractJson() != null && !plan.getCanonicalContractJson().isBlank()) {
+            try {
+                wireContract = objectMapper.readValue(plan.getCanonicalContractJson(), CanonicalPlanContractV2.class);
+            } catch (JsonProcessingException error) {
+                throw new IllegalStateException("Unable to deserialize canonicalContract v2", error);
+            }
+        }
+        CanonicalDomainContractCompiler.Compilation domainCompilation;
+        if (wireContract != null) {
+            List<PlanCompilationIssue> contractIssues = wireContract.validateStructure().stream()
+                    .map(message -> PlanCompilationIssue.error(null, "CANONICAL-CONTRACT-V2", "canonicalContract", message))
+                    .toList();
+            domainCompilation = new CanonicalDomainContractCompiler.Compilation(
+                    wireContract.toDomainContract(), contractIssues);
+        } else {
+            domainCompilation = domainContractCompiler.compile(plan, subPlans, generationIdentity);
+        }
+        GenerationContext generationContext = new GenerationContext(
+                generationIdentity, frameworkProfile, domainCompilation.contract(), wireContract);
         try {
             plan.setGenerationIdentityJson(objectMapper.writeValueAsString(generationIdentity));
             plan.setReferenceProfileJson(objectMapper.writeValueAsString(frameworkProfile));
         } catch (JsonProcessingException e) {
             throw new IllegalStateException("Unable to persist generation context", e);
         }
-        plan.setOutputDirectory(WriteTarget.parse(plan.getWriteTarget()).isReal()
-                ? properties.getTargetProjectRoot()
+        boolean realWrite = WriteTarget.parse(plan.getWriteTarget()).isReal();
+        plan.setOutputDirectory(realWrite
+                ? Paths.get(properties.getOutputRoot(), receptionId, "real-staging").toString()
                 : Paths.get(properties.getOutputRoot(), receptionId).toString());
         plan.setCompileVerificationStatus("NOT_RUN");
         planMapper.updateById(plan);
-        log.info("Generation context locked: identity={}, profile={}", generationIdentity, frameworkProfile.describeForPrompt());
+        log.info("Generation context locked: identity={}, profile={}, domainFields={}",
+                generationIdentity, frameworkProfile.describeForPrompt(),
+                generationContext.domainContract().persistentNames());
+        logPlanExecution(plan, "DOMAIN_CONTRACT_COMPILE", "", domainCompilation.issues().stream()
+                        .anyMatch(issue -> "ERROR".equalsIgnoreCase(issue.severity())) ? "FAILED" : "SUCCESS",
+                "Compiled " + generationContext.domainContract().persistentFields().size()
+                        + " persistent fields and " + generationContext.domainContract().derivedFields().size()
+                        + " derived fields", generationContext.domainContract().describeForPrompt());
 
         // 2. 构建DAG并验证无环
         List<AiSubPlan> executionOrder = topologySorter.buildExecutionOrder(subPlans);
@@ -161,27 +193,52 @@ public class BladeXCodeAgent {
         //    无依赖关系的并列子方案继续执行,让 Part A 拿到尽可能多的部分结果。
         Map<Long, List<AtomicTask>> plannedTasks = new LinkedHashMap<>();
         List<ExpectedDeliverable> expectedDeliverables = new ArrayList<>();
+        List<PlanCompilationIssue> planCompilationIssues = new ArrayList<>(domainCompilation.issues());
+        List<PlannedArtifact> plannedArtifacts = new ArrayList<>();
+        List<AtomicTask> acceptedPlanTasks = new ArrayList<>();
         PlannedTaskRegistry taskRegistry = new PlannedTaskRegistry();
         for (AiSubPlan plannedSubPlan : executionOrder) {
-            List<AtomicTask> parsedTasks = parseAtomicTasks(plannedSubPlan, generationContext);
+            SubPlanTaskCompilation compilation = parseAtomicTasks(plannedSubPlan, generationContext);
+            planCompilationIssues.addAll(compilation.issues());
+            plannedArtifacts.addAll(compilation.artifacts());
             List<AtomicTask> acceptedTasks = new ArrayList<>();
-            for (AtomicTask task : parsedTasks) {
+            for (AtomicTask task : compilation.tasks()) {
                 task.setSourceSubPlanId(plannedSubPlan.getId());
                 PlannedTaskRegistry.Registration registration = taskRegistry.claim(plannedSubPlan.getId(), task);
                 if (!registration.accepted()) {
                     PlannedTaskRegistry.Claim owner = registration.owner();
-                    String reason = "rule=" + registration.rule() + ", ownerSubPlanId=" + owner.subPlanId()
-                            + ", ownerPath=" + owner.targetPath();
-                    log.warn("Plan task skipped because its target is already owned: subPlanId={}, path={}, {}",
+                    String ownerDetail = owner == null ? "none"
+                            : "ownerSubPlanId=" + owner.subPlanId() + ", ownerPath=" + owner.targetPath();
+                    String reason = "rule=" + registration.rule() + ", " + ownerDetail;
+                    planCompilationIssues.add(PlanCompilationIssue.error(plannedSubPlan.getId(),
+                            registration.rule(), task.getTargetPath(), reason));
+                    log.warn("Plan task conflict: subPlanId={}, path={}, {}",
                             plannedSubPlan.getId(), task.getTargetPath(), reason);
-                    logExecution(plannedSubPlan.getId(), "PLAN_TASK_DEDUP", task.getTargetPath(),
-                            "SKIPPED", reason, null);
+                    logExecution(plannedSubPlan.getId(), "PLAN_TASK_CONFLICT", task.getTargetPath(),
+                            "FAILED", reason, null);
                     continue;
                 }
-                acceptedTasks.add(task);
-                expectedDeliverables.add(ExpectedDeliverable.from(plannedSubPlan.getId(), task));
+                if (registration.merged()) {
+                    PlannedTaskRegistry.Claim owner = registration.owner();
+                    String reason = "Merged reviewed contribution into ownerSubPlanId=" + owner.subPlanId()
+                            + ", contributors=" + owner.contributorSubPlanIds();
+                    log.info("Plan task contribution merged: subPlanId={}, path={}, {}",
+                            plannedSubPlan.getId(), task.getTargetPath(), reason);
+                    logExecution(plannedSubPlan.getId(), "PLAN_TASK_MERGE", task.getTargetPath(),
+                            "MERGED", reason, null);
+                    continue;
+                }
+                AtomicTask canonicalTask = registration.canonicalTask();
+                acceptedTasks.add(canonicalTask);
+                acceptedPlanTasks.add(canonicalTask);
+                expectedDeliverables.add(ExpectedDeliverable.from(plannedSubPlan.getId(), canonicalTask));
             }
             plannedTasks.put(plannedSubPlan.getId(), acceptedTasks);
+        }
+        planCompilationIssues.addAll(planArtifactTaskValidator.validate(plannedArtifacts, acceptedPlanTasks));
+        for (PlanCompilationIssue issue : planCompilationIssues) {
+            logExecution(issue.subPlanId(), "PLAN_COMPILATION", issue.filePath(), "FAILED",
+                    issue.rule() + ": " + issue.message(), null);
         }
 
         boolean expectsApi = expectedDeliverables.stream()
@@ -189,25 +246,40 @@ public class BladeXCodeAgent {
         boolean expectsImpl = expectedDeliverables.stream()
                 .anyMatch(item -> "IMPL".equals(BladeXModuleLayout.sideOfPath(item.targetPath())));
         if (expectsApi) {
-            expectedDeliverables.add(new ExpectedDeliverable(null, TaskType.OTHER,
-                    BladeXModuleLayout.apiPomPath(generationContext), generationIdentity.entityName(),
-                    generationIdentity.moduleName(), true));
-            if (referenceProjectIndex != null && referenceProjectIndex.readSourceContent("blade-service-api/pom.xml") != null) {
+            String apiPomPath = BladeXModuleLayout.apiPomPath(generationContext);
+            if (referenceProjectIndex == null || !referenceProjectIndex.pathExists(apiPomPath)) {
                 expectedDeliverables.add(new ExpectedDeliverable(null, TaskType.OTHER,
-                        "blade-service-api/pom.xml", generationIdentity.entityName(), generationIdentity.moduleName(), true));
+                        apiPomPath, generationIdentity.entityName(), generationIdentity.moduleName(), true));
+                if (referenceProjectIndex != null
+                        && referenceProjectIndex.readSourceContent("blade-service-api/pom.xml") != null) {
+                    expectedDeliverables.add(new ExpectedDeliverable(null, TaskType.OTHER,
+                            "blade-service-api/pom.xml", generationIdentity.entityName(), generationIdentity.moduleName(), true));
+                }
             }
         }
         if (expectsImpl) {
+            boolean existingServiceModule = referenceProjectIndex != null
+                    && referenceProjectIndex.pathExists(BladeXModuleLayout.implPomPath(generationContext));
             for (String path : List.of(BladeXModuleLayout.implPomPath(generationContext),
                     BladeXModuleLayout.applicationPath(generationContext),
                     BladeXModuleLayout.bootstrapPath(generationContext), BladeXModuleLayout.appDevPath(generationContext))) {
-                expectedDeliverables.add(new ExpectedDeliverable(null, TaskType.OTHER, path,
-                        generationIdentity.entityName(), generationIdentity.moduleName(), true));
+                if (referenceProjectIndex == null || !referenceProjectIndex.pathExists(path)) {
+                    expectedDeliverables.add(new ExpectedDeliverable(null, TaskType.OTHER, path,
+                            generationIdentity.entityName(), generationIdentity.moduleName(), true));
+                }
             }
-            if (referenceProjectIndex != null && referenceProjectIndex.readSourceContent("blade-service/pom.xml") != null) {
+            if (!existingServiceModule && referenceProjectIndex != null
+                    && referenceProjectIndex.readSourceContent("blade-service/pom.xml") != null) {
                 expectedDeliverables.add(new ExpectedDeliverable(null, TaskType.OTHER,
                         "blade-service/pom.xml", generationIdentity.entityName(), generationIdentity.moduleName(), true));
             }
+        }
+
+        PlanPreflightGate.Result preflight = PlanPreflightGate.evaluate(planCompilationIssues);
+        if (preflight.blocking()) {
+            failPlanPreflight(plan, executionOrder, expectedDeliverables, acceptedPlanTasks,
+                    planCompilationIssues, preflight);
+            return;
         }
 
         boolean allSuccess = true;
@@ -260,8 +332,13 @@ public class BladeXCodeAgent {
         // 3.6 Strict project-quality repair loop. Deterministic fixes run first; Mapper/Controller errors are
         //     regenerated with the complete relevant project contract, persisted, and revalidated before status.
         List<AtomicTask> allPlannedTasks = plannedTasks.values().stream().flatMap(Collection::stream).toList();
-        List<GeneratedProjectValidator.Issue> projectIssues = repairPlanWideProjectQuality(
-                plan, expectedDeliverables, generationContext, allPlannedTasks);
+        List<GeneratedProjectValidator.Issue> projectIssues = new ArrayList<>(repairPlanWideProjectQuality(
+                plan, expectedDeliverables, generationContext, allPlannedTasks));
+        projectIssues.addAll(planCompilationIssues.stream().map(PlanCompilationIssue::toProjectIssue).toList());
+        List<GeneratedFile> finalGeneratedFiles = generatedFileStore.loadPlanFiles(plan);
+        appendUniqueProjectIssues(projectIssues, generatedSourceGate.validate(finalGeneratedFiles));
+        markCompilationIssueSubPlans(executionOrder, planCompilationIssues);
+        markProjectIssueSubPlans(executionOrder, projectIssues, expectedDeliverables);
 
         // 3.6b Final cross-file validation runs after project-quality repair so status reflects persisted files.
         Optional<List<CrossFileValidator.ContractIssue>> finalContractValidation = validatePlanWideContracts(plan);
@@ -282,11 +359,11 @@ public class BladeXCodeAgent {
             } catch (JsonProcessingException e) {
                 report = projectIssues.toString();
             }
-            logExecution(null, "PROJECT_QUALITY_VALIDATION", "",
+            logPlanExecution(plan, "PROJECT_QUALITY_VALIDATION", "",
                     projectQualityErrorCount > 0 ? "FAILED" : "SUCCESS",
                     "Project quality validation: " + projectQualityErrorCount + " ERROR / " + projectIssues.size() + " issues", report);
         } else {
-            logExecution(null, "PROJECT_QUALITY_VALIDATION", "", "SUCCESS",
+            logPlanExecution(plan, "PROJECT_QUALITY_VALIDATION", "", "SUCCESS",
                     "Project quality validation passed", null);
         }
 
@@ -296,34 +373,109 @@ public class BladeXCodeAgent {
             reconcileRepairedSubPlanStatuses(executionOrder);
         }
 
-        // 4. 更新最终状态 - 有 FAILED -> FAILED；最终契约/编译仍有 ERROR -> COMPLETED_WITH_ERRORS；否则 COMPLETED。
-        // 3.7 C1: REAL 模式编译验证(真实项目有平台 jar 可编译;ISOLATED 跳过-隔离区缺平台 jar)。
-        //        编译失败标 COMPLETED_WITH_ERRORS(代码已写盘,不回滚-留人工处理)。
+        // Dependency-independent source validation always runs before a REAL project can be modified.
+        boolean sourceGateFailed = projectIssues.stream()
+                .anyMatch(issue -> issue.isError() && GeneratedSourceGate.isSourceGateRule(issue.rule()));
+        boolean hasSubPlanErrors = executionOrder.stream()
+                .anyMatch(sp -> sp.getStatus() == SubPlanStatus.COMPLETED_WITH_ERRORS);
+        boolean qualityGateFailed = !allSuccess || hasSubPlanErrors
+                || finalContractErrorCount + projectQualityErrorCount > 0;
         boolean compileFailed = false;
-        if (WriteTarget.parse(plan.getWriteTarget()).isReal()) {
-            compileFailed = !runCompileVerification(plan);
-            plan.setCompileVerificationStatus(compileFailed ? "FAILED" : "PASSED");
+        boolean verificationFailed = sourceGateFailed || qualityGateFailed;
+        if (sourceGateFailed) {
+            plan.setCompileVerificationStatus("FAILED_SOURCE_GATE");
+            logPlanExecution(plan, "SOURCE_GATE", "", "FAILED",
+                    "Generated source failed dependency-independent syntax or XML validation", null);
+        } else if (WriteTarget.parse(plan.getWriteTarget()).isReal()) {
+            logPlanExecution(plan, "SOURCE_GATE", "", "SUCCESS",
+                    "Generated source passed dependency-independent validation", null);
+            if (qualityGateFailed) {
+                plan.setCompileVerificationStatus("BLOCKED_QUALITY_GATE");
+                logPlanExecution(plan, "REAL_PROMOTION", "", "SKIPPED",
+                        "REAL project was not modified because final deterministic quality gates did not pass", null);
+            } else {
+                compileFailed = !promoteAndCompileRealPlan(plan, finalGeneratedFiles);
+                verificationFailed = compileFailed;
+            }
         } else {
-            plan.setCompileVerificationStatus("SKIPPED_DEPENDENCIES_UNAVAILABLE");
-            logExecution(null, "COMPILE_VERIFICATION", "", "SKIPPED",
-                    "Compile verification was not run because private reference dependencies are unavailable", null);
+            plan.setCompileVerificationStatus("PASSED_SOURCE_GATE_DEPENDENCIES_UNVERIFIED");
+            logPlanExecution(plan, "SOURCE_GATE", "", "SUCCESS",
+                    "Generated source passed syntax/XML validation; private reference dependencies were not compiled", null);
         }
 
         plan.setQualityErrorCount(Math.toIntExact(finalContractErrorCount + projectQualityErrorCount));
         plan.setQualityWarningCount(Math.toIntExact(finalContractWarningCount + projectQualityWarningCount));
 
-        boolean hasSubPlanErrors = executionOrder.stream()
-                .anyMatch(sp -> sp.getStatus() == SubPlanStatus.COMPLETED_WITH_ERRORS);
         plan.setStatus(determineFinalPlanStatus(
-                allSuccess, hasSubPlanErrors, finalContractErrorCount + projectQualityErrorCount, compileFailed));
-        GenerationReportWriter.write(plan, generatedFileStore.loadPlanFiles(plan), expectedDeliverables,
-                allPlannedTasks, projectIssues, objectMapper);
+                allSuccess, hasSubPlanErrors, finalContractErrorCount + projectQualityErrorCount, verificationFailed));
+        GenerationReportWriter.write(plan, finalGeneratedFiles, expectedDeliverables,
+                allPlannedTasks, projectIssues, finalContractValidation.orElse(List.of()), objectMapper);
         planMapper.updateById(plan);
 
         // 5. 回调Part A
         statusNotifier.notifyPlan(plan, executionOrder);
 
         log.info("工作流执行完成: receptionId={}, status={}", receptionId, plan.getStatus());
+    }
+
+    private void failPlanPreflight(AiPlan plan, List<AiSubPlan> executionOrder,
+                                   List<ExpectedDeliverable> expectedDeliverables,
+                                   List<AtomicTask> acceptedPlanTasks,
+                                   List<PlanCompilationIssue> compilationIssues,
+                                   PlanPreflightGate.Result preflight) {
+        Set<Long> affected = new LinkedHashSet<>(preflight.affectedSubPlanIds());
+        String summary = preflight.errors().stream()
+                .map(issue -> issue.rule() + ": " + issue.message())
+                .distinct().limit(8).reduce((left, right) -> left + " | " + right)
+                .orElse("Plan preflight failed");
+        LocalDateTime completedAt = LocalDateTime.now();
+        for (AiSubPlan subPlan : executionOrder) {
+            if (affected.contains(subPlan.getId())) {
+                subPlan.setStatus(SubPlanStatus.FAILED);
+                subPlan.setErrorMessage(summary);
+            } else {
+                subPlan.setStatus(SubPlanStatus.SKIPPED);
+                subPlan.setErrorMessage("Plan preflight failed before generation; no files were generated");
+            }
+            subPlan.setCompletedAt(completedAt);
+            subPlanMapper.updateById(subPlan);
+            statusNotifier.notifySubPlan(subPlan);
+        }
+
+        long errorCount = compilationIssues.stream()
+                .filter(issue -> "ERROR".equalsIgnoreCase(issue.severity())).count();
+        long warningCount = compilationIssues.size() - errorCount;
+        plan.setQualityErrorCount(Math.toIntExact(errorCount));
+        plan.setQualityWarningCount(Math.toIntExact(warningCount));
+        plan.setCompileVerificationStatus("NOT_RUN_PLAN_COMPILATION_FAILED");
+        plan.setStatus(PlanStatus.FAILED);
+        List<GeneratedProjectValidator.Issue> issues = compilationIssues.stream()
+                .map(PlanCompilationIssue::toProjectIssue).toList();
+        GenerationReportWriter.write(plan, List.of(), expectedDeliverables, acceptedPlanTasks, issues, objectMapper);
+        planMapper.updateById(plan);
+        statusNotifier.notifyPlan(plan, executionOrder);
+        log.error("Plan preflight blocked generation: planId={}, errors={}, summary={}",
+                plan.getId(), errorCount, summary);
+    }
+
+    private void appendUniqueProjectIssues(List<GeneratedProjectValidator.Issue> target,
+                                           List<GeneratedProjectValidator.Issue> additions) {
+        Set<String> fingerprints = new LinkedHashSet<>();
+        for (GeneratedProjectValidator.Issue issue : target) {
+            fingerprints.add(projectIssueFingerprint(issue));
+        }
+        for (GeneratedProjectValidator.Issue issue : additions == null
+                ? List.<GeneratedProjectValidator.Issue>of() : additions) {
+            if (fingerprints.add(projectIssueFingerprint(issue))) target.add(issue);
+        }
+    }
+
+    private String projectIssueFingerprint(GeneratedProjectValidator.Issue issue) {
+        return issue.rule() + "|" + normalizeIssuePath(issue.filePath()) + "|" + issue.message();
+    }
+
+    private String normalizeIssuePath(String path) {
+        return path == null ? "" : path.replace('\\', '/');
     }
 
     static PlanStatus determineFinalPlanStatus(boolean allSuccess,
@@ -343,6 +495,63 @@ public class BladeXCodeAgent {
      * plan 级修复闭环消除。若最终全局校验已无 ERROR，就应把这些子方案恢复为 COMPLETED，
      * 并补一条时间线记录说明错误已被自动修复。
      */
+    void markCompilationIssueSubPlans(List<AiSubPlan> executionOrder,
+                                          List<PlanCompilationIssue> compilationIssues) {
+        Map<Long, List<PlanCompilationIssue>> errorsBySubPlan = new LinkedHashMap<>();
+        for (PlanCompilationIssue issue : compilationIssues == null ? List.<PlanCompilationIssue>of() : compilationIssues) {
+            if (issue.subPlanId() == null || !"ERROR".equalsIgnoreCase(issue.severity())) continue;
+            errorsBySubPlan.computeIfAbsent(issue.subPlanId(), ignored -> new ArrayList<>()).add(issue);
+        }
+        if (errorsBySubPlan.isEmpty()) return;
+
+        for (AiSubPlan subPlan : executionOrder == null ? List.<AiSubPlan>of() : executionOrder) {
+            List<PlanCompilationIssue> errors = errorsBySubPlan.get(subPlan.getId());
+            if (errors == null || errors.isEmpty()) continue;
+            if (subPlan.getStatus() == SubPlanStatus.FAILED || subPlan.getStatus() == SubPlanStatus.SKIPPED) continue;
+            String summary = errors.stream()
+                    .map(issue -> issue.rule() + ": " + issue.message())
+                    .distinct().limit(5).reduce((left, right) -> left + " | " + right).orElse("Plan compilation failed");
+            subPlan.setStatus(SubPlanStatus.COMPLETED_WITH_ERRORS);
+            subPlan.setErrorMessage(summary);
+            if (subPlan.getCompletedAt() == null) subPlan.setCompletedAt(LocalDateTime.now());
+            subPlanMapper.updateById(subPlan);
+            statusNotifier.notifySubPlan(subPlan);
+        }
+    }
+
+    void markProjectIssueSubPlans(List<AiSubPlan> executionOrder,
+                                  List<GeneratedProjectValidator.Issue> projectIssues,
+                                  List<ExpectedDeliverable> expectedDeliverables) {
+        Map<String, Long> ownerByPath = new LinkedHashMap<>();
+        for (ExpectedDeliverable deliverable : expectedDeliverables == null
+                ? List.<ExpectedDeliverable>of() : expectedDeliverables) {
+            if (deliverable.targetPath() != null && deliverable.subPlanId() != null) {
+                ownerByPath.putIfAbsent(normalizeIssuePath(deliverable.targetPath()), deliverable.subPlanId());
+            }
+        }
+        Map<Long, List<GeneratedProjectValidator.Issue>> errorsBySubPlan = new LinkedHashMap<>();
+        for (GeneratedProjectValidator.Issue issue : projectIssues == null
+                ? List.<GeneratedProjectValidator.Issue>of() : projectIssues) {
+            if (!issue.isError() || issue.filePath() == null) continue;
+            Long owner = ownerByPath.get(normalizeIssuePath(issue.filePath()));
+            if (owner != null) errorsBySubPlan.computeIfAbsent(owner, ignored -> new ArrayList<>()).add(issue);
+        }
+        if (errorsBySubPlan.isEmpty()) return;
+        for (AiSubPlan subPlan : executionOrder == null ? List.<AiSubPlan>of() : executionOrder) {
+            List<GeneratedProjectValidator.Issue> errors = errorsBySubPlan.get(subPlan.getId());
+            if (errors == null || errors.isEmpty()) continue;
+            if (subPlan.getStatus() == SubPlanStatus.FAILED || subPlan.getStatus() == SubPlanStatus.SKIPPED) continue;
+            String summary = errors.stream().map(issue -> issue.rule() + ": " + issue.message())
+                    .distinct().limit(5).reduce((left, right) -> left + " | " + right)
+                    .orElse("Project quality validation failed");
+            subPlan.setStatus(SubPlanStatus.COMPLETED_WITH_ERRORS);
+            subPlan.setErrorMessage(summary);
+            if (subPlan.getCompletedAt() == null) subPlan.setCompletedAt(LocalDateTime.now());
+            subPlanMapper.updateById(subPlan);
+            statusNotifier.notifySubPlan(subPlan);
+        }
+    }
+
     void reconcileRepairedSubPlanStatuses(List<AiSubPlan> executionOrder) {
         for (AiSubPlan subPlan : executionOrder) {
             if (subPlan.getStatus() != SubPlanStatus.COMPLETED_WITH_ERRORS) continue;
@@ -355,16 +564,14 @@ public class BladeXCodeAgent {
         }
     }
 
-    /** C1: REAL 模式编译验证 - 从 DB 拉全 plan 文件,推受影响 BladeX 模块,跑 mvn compile。
-     *  返回 true=通过/跳过, false=编译失败。失败记 execution_log;异常不阻断(视为通过,避免编译环境问题让 plan 失败)。 */
+    /** REAL compile verification. Any verifier infrastructure exception fails closed. */
     private boolean runCompileVerification(AiPlan plan) {
         try {
             List<AiGeneratedFile> dbFiles = generatedFileMapper.selectByPlanId(plan.getId());
             if (dbFiles == null || dbFiles.isEmpty()) return true;
-            // 从 .java 文件路径推 BladeX 模块(blade-service/blade-{module} 或 blade-service-api/blade-{module}-api)
-            java.util.Set<String> modules = new java.util.LinkedHashSet<>();
-            for (AiGeneratedFile f : dbFiles) {
-                String path = f.getFilePath();
+            Set<String> modules = new LinkedHashSet<>();
+            for (AiGeneratedFile file : dbFiles) {
+                String path = file.getFilePath();
                 if (path == null) continue;
                 for (String prefix : new String[]{"blade-service/", "blade-service-api/"}) {
                     if (path.startsWith(prefix)) {
@@ -376,23 +583,73 @@ public class BladeXCodeAgent {
                 }
             }
             if (modules.isEmpty()) return true;
-            java.util.List<String> moduleList = new java.util.ArrayList<>(modules);
+            List<String> moduleList = new ArrayList<>(modules);
             BuildResult buildResult = buildVerifier.verify(moduleList);
             if (buildResult.isPasses()) {
-                logExecution(null, "COMPILE_VERIFICATION", "", "SUCCESS",
-                        "编译验证通过: " + moduleList, null);
+                logPlanExecution(plan, "COMPILE_VERIFICATION", "", "SUCCESS",
+                        "Compile verification passed: " + moduleList, null);
                 return true;
             }
-            String summary = "编译验证失败: " + moduleList + "; "
+            String summary = "Compile verification failed: " + moduleList + "; "
                     + buildResult.getErrors().stream().map(Object::toString).limit(10)
-                            .reduce((a, b) -> a + " | " + b).orElse("");
-            logExecution(null, "COMPILE_VERIFICATION", "", "FAILED", summary, null);
-            log.warn("C1 编译验证失败: plan={}, {}", plan.getReceptionId(), summary);
+                    .reduce((left, right) -> left + " | " + right).orElse("");
+            logPlanExecution(plan, "COMPILE_VERIFICATION", "", "FAILED", summary, null);
+            log.warn("Compile verification failed: plan={}, {}", plan.getReceptionId(), summary);
             return false;
-        } catch (Exception e) {
-            log.warn("C1 编译验证异常(不阻断, 视为通过): plan={}, err={}", plan.getReceptionId(), e.getMessage());
-            return true;
+        } catch (Exception error) {
+            log.error("Compile verification infrastructure failure: plan={}", plan.getReceptionId(), error);
+            logPlanExecution(plan, "COMPILE_VERIFICATION", "", "FAILED",
+                    "Compile verification infrastructure failure: " + error.getMessage(), null);
+            return false;
         }
+    }
+
+    boolean promoteAndCompileRealPlan(AiPlan plan, List<GeneratedFile> finalGeneratedFiles) {
+        if (finalGeneratedFiles == null || finalGeneratedFiles.isEmpty()) {
+            plan.setCompileVerificationStatus("FAILED_REAL_PROMOTION");
+            logPlanExecution(plan, "REAL_PROMOTION", "", "FAILED",
+                    "No generated files were available for promotion", null);
+            return false;
+        }
+        List<FileWriteTask> writeTasks = finalGeneratedFiles.stream()
+                .map(file -> new FileWriteTask(file.getFilePath(), file.getContent(), file.getAction()))
+                .toList();
+        FileWriteExecutor.PreparedWrite prepared;
+        try {
+            prepared = fileWriteExecutor.prepareTransactionalWrite(writeTasks, properties.getTargetProjectRoot());
+        } catch (Exception error) {
+            plan.setCompileVerificationStatus("FAILED_REAL_PROMOTION");
+            logPlanExecution(plan, "REAL_PROMOTION", "", "FAILED",
+                    "Unable to snapshot REAL project targets: " + error.getMessage(), null);
+            return false;
+        }
+
+        WriteResult promotion = prepared.apply();
+        if (!promotion.isSuccess()) {
+            plan.setCompileVerificationStatus("FAILED_REAL_PROMOTION");
+            logPlanExecution(plan, "REAL_PROMOTION", "", "ROLLED_BACK", promotion.getErrorMessage(), null);
+            return false;
+        }
+        logPlanExecution(plan, "REAL_PROMOTION", "", "SUCCESS",
+                "Promoted " + promotion.getWrittenFiles().size() + " staged files under a reversible snapshot", null);
+
+        if (!runCompileVerification(plan)) {
+            WriteResult rollback = prepared.rollback();
+            plan.setCompileVerificationStatus(rollback.isSuccess()
+                    ? "FAILED_COMPILE_ROLLED_BACK" : "FAILED_COMPILE_ROLLBACK");
+            logPlanExecution(plan, "REAL_ROLLBACK", "", rollback.isSuccess() ? "ROLLED_BACK" : "FAILED",
+                    rollback.isSuccess()
+                            ? "Compile verification failed; every promoted file was restored"
+                            : "Compile verification failed and rollback was incomplete: " + rollback.getErrorMessage(), null);
+            return false;
+        }
+
+        prepared.commit();
+        plan.setOutputDirectory(properties.getTargetProjectRoot());
+        plan.setCompileVerificationStatus("PASSED");
+        logPlanExecution(plan, "REAL_PROMOTION", "", "COMMITTED",
+                "Compile verification passed; REAL project changes committed", null);
+        return true;
     }
 
     /**
@@ -535,7 +792,8 @@ public class BladeXCodeAgent {
 
         // 3d-0. 模块骨架补齐 — 为本子方案涉及的 BladeX 模块(api/impl)补齐 pom/Application/bootstrap，
         //       复用既有写盘/落库流程；per-plan ensuredSkeletonKeys 去重避免重复生成。
-        List<GeneratedFile> skeletons = BladeXModuleSkeleton.ensureFor(allGeneratedFiles, ensuredSkeletonKeys, generationContext);
+        List<GeneratedFile> skeletons = BladeXModuleSkeleton.ensureFor(allGeneratedFiles, ensuredSkeletonKeys, generationContext,
+                referenceProjectIndex == null ? ignored -> false : referenceProjectIndex::pathExists);
         if (!skeletons.isEmpty()) {
             allGeneratedFiles.addAll(skeletons);
             log.info("补齐模块骨架: {} 个文件", skeletons.size());
@@ -550,10 +808,8 @@ public class BladeXCodeAgent {
         // 3d. 写入文件 — 阶段2: 按 plan.writeTarget 决定写盘 root
         //     ISOLATED(默认)→ outputRoot(隔离区);REAL → targetProjectRoot(默认亦隔离区, 需查重)
         WriteTarget writeTarget = WriteTarget.parse(plan.getWriteTarget());
-        String writeRoot = writeTarget.isReal()
-                ? properties.getTargetProjectRoot()
-                : plan.getOutputDirectory();
-        log.info("写盘目标: writeTarget={}, root={}", writeTarget.getCode(), writeRoot);
+        String writeRoot = plan.getOutputDirectory();
+        log.info("Generation write target: writeTarget={}, stagingRoot={}", writeTarget.getCode(), writeRoot);
 
         // REAL 模式: 写盘前查重 — 类名/表名冲突即拒绝(不覆盖现有代码)
         if (writeTarget.isReal()) {
@@ -572,15 +828,20 @@ public class BladeXCodeAgent {
             }
         }
 
-        // 写盘根可用性检查:ISOLATED 自动创建;REAL 必须已存在(避免误造目标项目目录)
-        boolean rootAvailable = writeTarget.isReal()
-                ? fileWriteExecutor.isRootAvailable(writeRoot)
-                : fileWriteExecutor.isTargetRootAvailable();
-        if (!rootAvailable) {
-            log.warn("写盘根不可用,跳过文件写入,仅把生成内容落库供 Part A 查看: {}", writeRoot);
+        // REAL generation is staged outside the target project. The target root must already exist,
+        // but it is not modified until every final deterministic gate passes.
+        boolean targetAvailable = !writeTarget.isReal()
+                || fileWriteExecutor.isRootAvailable(properties.getTargetProjectRoot());
+        if (!targetAvailable) {
             generatedFileStore.saveBatch(subPlan, plan, allGeneratedFiles, "SKIPPED");
-            logExecution(subPlan.getId(), "FILE_WRITE", "",
-                    "SKIPPED", "写盘根不可用: " + writeRoot, null);
+            logExecution(subPlan.getId(), "FILE_WRITE", "", "FAILED",
+                    "REAL target project root is unavailable: " + properties.getTargetProjectRoot(), null);
+            subPlan.setStatus(SubPlanStatus.FAILED);
+            subPlan.setErrorMessage("REAL target project root is unavailable");
+            subPlan.setCompletedAt(LocalDateTime.now());
+            subPlanMapper.updateById(subPlan);
+            statusNotifier.notifySubPlan(subPlan);
+            return false;
         } else {
             List<FileWriteTask> writeTasks = allGeneratedFiles.stream()
                     .map(f -> new FileWriteTask(f.getFilePath(), f.getContent(), f.getAction()))
@@ -883,7 +1144,7 @@ public class BladeXCodeAgent {
             case STANDARD_CRUD_SERVICE, COMPLEX_BUSINESS_SERVICE -> ClassType.SERVICE;
             case CUSTOM_MAPPER -> ClassType.MAPPER;
             case WRAPPER -> ClassType.WRAPPER;
-            case FEIGN_CLIENT -> ClassType.FEIGN;
+            case FEIGN_CLIENT, FEIGN_PROVIDER -> ClassType.FEIGN;
             case EXCEL_IMPORT_EXPORT -> ClassType.EXCEL;
             default -> null; // DDL_STATEMENT / MAPPER_XML / NACOS_CONFIG / EXCEL_IMPORT_EXPORT / OTHER 不参考
         };
@@ -902,12 +1163,14 @@ public class BladeXCodeAgent {
         List<GeneratedFile> result = new ArrayList<>();
         boolean hasApi = generated.stream().anyMatch(file -> "API".equals(BladeXModuleLayout.sideOfPath(file.getFilePath())));
         boolean hasImpl = generated.stream().anyMatch(file -> "IMPL".equals(BladeXModuleLayout.sideOfPath(file.getFilePath())));
-        if (hasApi && ensuredKeys.add(context.identity().moduleName() + ":PARENT_API")) {
+        if (hasApi && !referenceProjectIndex.pathExists(BladeXModuleLayout.apiPomPath(context))
+                && ensuredKeys.add(context.identity().moduleName() + ":PARENT_API")) {
             String content = referenceProjectIndex.buildParentPomWithModule(
                     "blade-service-api/pom.xml", context.identity().apiModuleName());
             if (content != null) result.add(GeneratedFile.create(TaskType.OTHER, "blade-service-api/pom.xml", content));
         }
-        if (hasImpl && ensuredKeys.add(context.identity().moduleName() + ":PARENT_IMPL")) {
+        if (hasImpl && !referenceProjectIndex.pathExists(BladeXModuleLayout.implPomPath(context))
+                && ensuredKeys.add(context.identity().moduleName() + ":PARENT_IMPL")) {
             String content = referenceProjectIndex.buildParentPomWithModule(
                     "blade-service/pom.xml", context.identity().serviceModuleName());
             if (content != null) result.add(GeneratedFile.create(TaskType.OTHER, "blade-service/pom.xml", content));
@@ -915,158 +1178,327 @@ public class BladeXCodeAgent {
         return result;
     }
 
-    private List<AtomicTask> parseAtomicTasks(AiSubPlan subPlan, GenerationContext generationContext) {
+    SubPlanTaskCompilation parseAtomicTasks(AiSubPlan subPlan, GenerationContext generationContext) {
+        if (generationContext.contractV2()) {
+            return parseCanonicalAtomicTasks(subPlan, generationContext);
+        }
         String content = subPlan.getPlanContent();
         if (content == null || content.isBlank()) {
-            return new ArrayList<>();
+            return new SubPlanTaskCompilation(List.of(), List.of(), List.of());
         }
-
-        // 提取关键信息: 实体名 (Order) 和模块名 (order)
-        String extractedEntity = extractEntityName(content);
-        String entityName = "Entity".equals(extractedEntity)
-                ? generationContext.identity().entityName() : extractedEntity;
-        String moduleName = generationContext.identity().moduleName();
 
         String title = subPlan.getTitle() == null ? "" : subPlan.getTitle();
-        String fullContext = "【子方案完整上下文】\n" + content;
+        PlanArtifactCompilation artifactCompilation = planArtifactCompiler.compile(
+                subPlan.getId(), title, content, generationContext);
+        ReferenceArtifactBinder.BindingResult binding = referenceArtifactBinder.bind(
+                artifactCompilation.artifacts(), generationContext, referenceProjectIndex);
+        List<PlannedArtifact> artifacts = new ArrayList<>(binding.artifacts());
+        List<PlanCompilationIssue> issues = new ArrayList<>(artifactCompilation.issues());
+        issues.addAll(binding.issues());
 
+        // Keep the proven standard CRUD classifier as a compatibility fallback. Structured artifacts supplement
+        // it and can explicitly prohibit defaults, but do not replace stable layer classification.
+        String entityName = generationContext.identity().entityName();
+        String moduleName = generationContext.identity().moduleName();
+        String fullContext = "== REVIEWED SUB-PLAN CONTEXT ==\n" + content;
         SubPlanLayerClassifier.Classification classification = SubPlanLayerClassifier.classify(title, content);
-
         List<AtomicTask> tasks = new ArrayList<>();
+        boolean hasExactEntityArtifact = artifacts.stream().anyMatch(artifact ->
+                artifact.kind() == ArtifactKind.ENTITY && entityName.equals(artifact.name()) && !artifact.prohibited());
+        boolean hasExactPrimaryController = artifacts.stream().anyMatch(artifact ->
+                artifact.kind() == ArtifactKind.CONTROLLER
+                        && (entityName + "Controller").equals(artifact.name()) && !artifact.prohibited());
+        boolean hasExplicitExcelImplementation = artifacts.stream().anyMatch(artifact ->
+                artifact.kind() == ArtifactKind.EXCEL_MODEL && artifact.moduleSide() == ModuleSide.IMPL
+                        && !artifact.prohibited());
 
-        // 1. DDL — 标题含 "DDL/数据库/建表/SQL"（落 doc/sql/{module}）
         if (classification.ddl()) {
             tasks.add(buildTask(TaskType.DDL_STATEMENT,
-                    title + " — 生成数据库 DDL\n\n" + fullContext,
-                    BladeXModuleLayout.ddlPath(generationContext),
-                    entityName, moduleName));
+                    title + " - generate reviewed database DDL\n\n" + fullContext,
+                    BladeXModuleLayout.ddlPath(generationContext), entityName, moduleName));
         }
-
-        // 2. Entity — 标题含 "Entity/实体"（落 API 模块 pojo.entity）
-        if (classification.entity()) {
+        if (classification.entity() && !hasExactEntityArtifact) {
             tasks.add(buildTask(TaskType.STANDARD_CRUD_ENTITY,
-                    title + " — 生成 Entity 类 (" + entityName + ")\n\n" + fullContext,
-                    BladeXModuleLayout.entityPath(generationContext, entityName),
-                    entityName, moduleName));
+                    title + " - generate exact Entity class (" + entityName + ")\n\n" + fullContext,
+                    BladeXModuleLayout.entityPath(generationContext, entityName), entityName, moduleName));
         }
-
-        // 3. VO 类 — 标题含 "VO/视图",生成所有在内容里被提及的 VO 类（落 API 模块 pojo.vo）
         if (classification.vo()) {
             for (String suffix : new String[]{"QVO", "IVO", "UVO", "VO", "EVO"}) {
-                    tasks.add(buildTask(TaskType.OTHER,
-                    title + " — 生成 " + entityName + suffix + " 类\n\n" + voInstructions(suffix, entityName) + "\n\n" + fullContext,
-                    BladeXModuleLayout.voPath(generationContext, entityName, suffix),
-                    entityName, moduleName));
+                String expectedVoName = entityName + suffix;
+                boolean hasExactVoArtifact = artifacts.stream().anyMatch(artifact ->
+                        artifact.kind() == ArtifactKind.VO && expectedVoName.equals(artifact.name())
+                                && !artifact.prohibited());
+                if (hasExactVoArtifact) continue;
+                tasks.add(buildTask(TaskType.OTHER,
+                        title + " - generate exact " + entityName + suffix + " class\n\n"
+                                + voInstructions(suffix, entityName) + "\n\n" + fullContext,
+                        BladeXModuleLayout.voPath(generationContext, entityName, suffix), entityName, moduleName));
             }
         }
-
-        // 4. Mapper — 标题含 "Mapper" 或 "Service"(Service 子方案通常同时含 Mapper)（落 IMPL 模块 mapper）
         if (classification.mapper()) {
             tasks.add(buildTask(TaskType.CUSTOM_MAPPER,
-                    title + " — 生成 " + entityName + "Mapper 接口\n\n" + fullContext,
-                    BladeXModuleLayout.mapperJavaPath(generationContext, entityName),
-                    entityName, moduleName));
-            // Mapper.xml 同伴文件（与 .java 同包目录，BladeX 约定）
+                    title + " - generate exact " + entityName + "Mapper interface\n\n" + fullContext,
+                    BladeXModuleLayout.mapperJavaPath(generationContext, entityName), entityName, moduleName));
             tasks.add(buildTask(TaskType.MAPPER_XML,
-                    title + " — 生成 " + entityName + "Mapper.xml\n\n" + fullContext,
-                    BladeXModuleLayout.mapperXmlPath(generationContext, entityName),
-                    entityName, moduleName));
+                    title + " - generate exact " + entityName + "Mapper.xml\n\n" + fullContext,
+                    BladeXModuleLayout.mapperXmlPath(generationContext, entityName), entityName, moduleName));
         }
-
-        // 5. Service 接口 + 实现（落 IMPL 模块 service / service.impl）
         if (classification.service()) {
             tasks.add(buildTask(TaskType.STANDARD_CRUD_SERVICE,
-                    title + " — 生成 I" + entityName + "Service 接口\n\n" + serviceInterfaceInstructions(entityName) + "\n\n" + fullContext,
-                    BladeXModuleLayout.serviceInterfacePath(generationContext, entityName),
-                    entityName, moduleName));
-            // 6. Service 实现
+                    title + " - generate exact I" + entityName + "Service interface\n\n"
+                            + serviceInterfaceInstructions(entityName) + "\n\n" + fullContext,
+                    BladeXModuleLayout.serviceInterfacePath(generationContext, entityName), entityName, moduleName));
             tasks.add(buildTask(TaskType.STANDARD_CRUD_SERVICE,
-                    title + " — 生成 " + entityName + "ServiceImpl 实现类\n\n" + serviceImplInstructions(entityName) + "\n\n" + fullContext,
-                    BladeXModuleLayout.serviceImplPath(generationContext, entityName),
-                    entityName, moduleName));
+                    title + " - generate exact " + entityName + "ServiceImpl implementation\n\n"
+                            + serviceImplInstructions(entityName) + "\n\n" + fullContext,
+                    BladeXModuleLayout.serviceImplPath(generationContext, entityName), entityName, moduleName));
         }
-
-        // 7. Wrapper（落 IMPL 模块 wrapper；用 WRAPPER 类型命中 buildWrapperSystemPrompt 的 DeptCache 禁令）
-        if (classification.wrapper()) {
+        boolean hasExplicitCrossModuleController = artifacts.stream()
+                .anyMatch(artifact -> artifact.kind() == ArtifactKind.CONTROLLER
+                        && artifact.ownerModule() != null
+                        && !artifact.ownerModule().equalsIgnoreCase(generationContext.identity().moduleName()));
+        if (classification.wrapper() && !hasExplicitCrossModuleController) {
             tasks.add(buildTask(TaskType.WRAPPER,
-                    title + " — 生成 " + entityName + "Wrapper 转换类\n\n" + wrapperInstructions(entityName) + "\n\n" + fullContext,
-                    BladeXModuleLayout.wrapperPath(generationContext, entityName),
-                    entityName, moduleName));
+                    title + " - generate exact " + entityName + "Wrapper converter\n\n"
+                            + wrapperInstructions(entityName) + "\n\n" + fullContext,
+                    BladeXModuleLayout.wrapperPath(generationContext, entityName), entityName, moduleName));
         }
-
-        // 8. Controller（落 IMPL 模块 controller）
-        if (classification.controller()) {
+        if (classification.controller() && !hasExplicitCrossModuleController && !hasExactPrimaryController) {
             tasks.add(buildTask(TaskType.STANDARD_CRUD_CONTROLLER,
-                    title + " — 生成 " + entityName + "Controller 类\n\n" + controllerInstructions(entityName, moduleName) + "\n\n" + fullContext,
-                    BladeXModuleLayout.controllerPath(generationContext, entityName),
-                    entityName, moduleName));
+                    title + " - generate exact " + entityName + "Controller class\n\n"
+                            + controllerInstructions(entityName, moduleName) + "\n\n" + fullContext,
+                    BladeXModuleLayout.controllerPath(generationContext, entityName), entityName, moduleName));
         }
-
-        // 9. Excel（落 IMPL 模块 excel）
-        if (classification.excel()) {
+        if (classification.excel() && !hasExplicitExcelImplementation) {
             tasks.add(buildTask(TaskType.EXCEL_IMPORT_EXPORT,
-                    title + " — 生成 " + entityName + "Excel 类\n\n" + excelInstructions(entityName) + "\n\n" + fullContext,
-                    BladeXModuleLayout.excelPath(generationContext, entityName),
-                    entityName, moduleName));
+                    title + " - generate exact " + entityName + "Excel class\n\n"
+                            + excelInstructions(entityName) + "\n\n" + fullContext,
+                    BladeXModuleLayout.excelPath(generationContext, entityName), entityName, moduleName));
         }
-
-        // 10. Feign — description 必须明确接口名 I{Entity}Client,否则 LLM 容易把实体名漂移成其他词（落 API 模块 feign）
         if (classification.feign()) {
             tasks.add(buildTask(TaskType.FEIGN_CLIENT,
-                    title + " — 生成 Feign 客户端接口 I" + entityName + "Client (实体名: " + entityName + ")\n\n"
+                    title + " - generate exact Feign client interface I" + entityName + "Client (entity: " + entityName + ")\n\n"
                             + feignInstructions(entityName, moduleName) + "\n\n" + fullContext,
-                    BladeXModuleLayout.feignPath(generationContext, entityName),
-                    entityName, moduleName));
+                    BladeXModuleLayout.feignPath(generationContext, entityName), entityName, moduleName));
         }
 
-        // 兜底
-        // Explicit named deliverables mentioned by the reviewed plan are generated in addition
-        // to the primary CRUD stack. This prevents DTO/Feign/server-entry files from silently disappearing.
-        for (String dtoClass : extractNamedDeliverables(content, "DTO")) {
-            tasks.add(buildTask(TaskType.OTHER,
-                    title + " - generate exact DTO class " + dtoClass + "\n\n" + fullContext,
-                    BladeXModuleLayout.dtoPath(generationContext, dtoClass),
-                    entityName, moduleName));
-        }
-        for (String clientClass : extractNamedDeliverables(content, "Client")) {
-            String primaryClient = "I" + entityName + "Client";
-            if (clientClass.equals(primaryClient)) continue;
-            tasks.add(buildTask(TaskType.FEIGN_CLIENT,
-                    title + " - generate exact Feign interface " + clientClass
-                            + "; do not rename it or replace its owning module\n\n" + fullContext,
-                    BladeXModuleLayout.namedFeignPath(generationContext, clientClass),
-                    stripClientName(clientClass), moduleName));
-        }
-        for (String controllerClass : extractNamedDeliverables(content, "Controller")) {
-            if (controllerClass.equals(entityName + "Controller")) continue;
-            tasks.add(buildTask(TaskType.STANDARD_CRUD_CONTROLLER,
-                    title + " - generate exact controller class " + controllerClass
-                            + "; keep all endpoints required by the reviewed plan\n\n" + fullContext,
-                    BladeXModuleLayout.namedControllerPath(generationContext, controllerClass),
-                    controllerClass.substring(0, controllerClass.length() - "Controller".length()), moduleName));
+        Set<String> prohibitedPaths = artifacts.stream()
+                .filter(PlannedArtifact::prohibited)
+                .map(PlannedArtifact::targetPath)
+                .filter(Objects::nonNull)
+                .map(this::normalizePlanPath)
+                .collect(java.util.stream.Collectors.toCollection(LinkedHashSet::new));
+        if (!prohibitedPaths.isEmpty()) {
+            tasks.removeIf(task -> prohibitedPaths.contains(normalizePlanPath(task.getTargetPath())));
         }
 
-        if (tasks.isEmpty()) {
-            tasks.add(buildTask(TaskType.OTHER,
-                    title + "\n\n" + fullContext,
-                    "ai-generated/subplan-" + subPlan.getId() + "/Code.java",
-                    entityName, moduleName));
-            log.info("子方案 {} 未匹配关键字,使用兜底", title);
+        // Compile explicit reviewed deliverables independently of the standard classifier. Failed bindings retain
+        // their artifact/issue but produce no task, so downstream generation cannot guess a path.
+        Set<String> existingPaths = tasks.stream().map(AtomicTask::getTargetPath)
+                .filter(Objects::nonNull).map(this::normalizePlanPath)
+                .collect(java.util.stream.Collectors.toCollection(LinkedHashSet::new));
+        for (PlannedArtifact artifact : artifacts) {
+            if (artifact.prohibited() || artifact.targetPath() == null || artifact.targetPath().isBlank()) continue;
+            String normalizedPath = normalizePlanPath(artifact.targetPath());
+            if (existingPaths.contains(normalizedPath)) continue;
+            AtomicTask task = buildArtifactTask(artifact, title, fullContext, generationContext, issues);
+            if (task != null && existingPaths.add(normalizedPath)) tasks.add(task);
         }
 
-        // 去重 (按 targetPath)
-        Set<String> seen = new java.util.LinkedHashSet<>();
+        // A real fallback is retained only when the plan contains no explicit structured deliverable or compilation
+        // error. When binding failed, generating arbitrary Code.java would hide the plan defect and add noise.
+        if (tasks.isEmpty() && artifactCompilation.artifacts().isEmpty() && issues.isEmpty()) {
+            tasks.add(buildTask(TaskType.OTHER, title + "\n\n" + fullContext,
+                    "ai-generated/subplan-" + subPlan.getId() + "/Code.java", entityName, moduleName));
+            log.info("Sub-plan {} matched no deterministic or structured artifact; using generic fallback", title);
+        }
+
+        Set<String> seen = new LinkedHashSet<>();
         List<AtomicTask> deduped = new ArrayList<>();
-        for (AtomicTask t : tasks) {
-            t.setGenerationContext(generationContext);
-            t.setModuleName(generationContext.identity().moduleName());
-            if (seen.add(t.getTargetPath())) {
-                deduped.add(t);
+        for (AtomicTask task : tasks) {
+            task.setGenerationContext(generationContext);
+            if (task.getModuleName() == null || task.getModuleName().isBlank()) {
+                task.setModuleName(generationContext.identity().moduleName());
+            }
+            if (task.getTargetPath() != null && seen.add(normalizePlanPath(task.getTargetPath()))) {
+                deduped.add(task);
             }
         }
-        log.info("子方案 [{}] 解析出 {} 个原子任务: {}", title, deduped.size(),
+        log.info("Sub-plan [{}] compiled {} atomic tasks, {} structured artifacts, {} issues: {}",
+                title, deduped.size(), artifacts.size(), issues.size(),
                 deduped.stream().map(AtomicTask::getTargetPath).toList());
-        return deduped;
+        return new SubPlanTaskCompilation(deduped, artifacts, issues);
+    }
+
+    private SubPlanTaskCompilation parseCanonicalAtomicTasks(AiSubPlan subPlan,
+                                                               GenerationContext generationContext) {
+        List<String> deliverableIds;
+        try {
+            deliverableIds = subPlan.getDeliverableIdsJson() == null
+                    ? List.of() : objectMapper.readValue(subPlan.getDeliverableIdsJson(), new TypeReference<List<String>>() { });
+        } catch (JsonProcessingException error) {
+            return new SubPlanTaskCompilation(List.of(), List.of(), List.of(
+                    PlanCompilationIssue.error(subPlan.getId(), "CANONICAL-DELIVERABLE-JSON-INVALID",
+                            "deliverableIds", error.getMessage())));
+        }
+        PlanArtifactCompilation compilation = planArtifactCompiler.compileCanonical(
+                subPlan.getId(), deliverableIds, generationContext);
+        ReferenceArtifactBinder.BindingResult binding = referenceArtifactBinder.bind(
+                compilation.artifacts(), generationContext, referenceProjectIndex);
+        List<PlanCompilationIssue> issues = new ArrayList<>(compilation.issues());
+        issues.addAll(binding.issues());
+        List<PlannedArtifact> artifacts = new ArrayList<>(binding.artifacts());
+        String title = subPlan.getTitle() == null ? "" : subPlan.getTitle();
+        String content = subPlan.getPlanContent() == null ? "" : subPlan.getPlanContent();
+        String fullContext = "== CANONICAL PLAN CONTRACT V2 ==\n"
+                + generationContext.domainContract().describeForPrompt()
+                + "\n== REVIEWED SUB-PLAN EXPLANATION ==\n" + content;
+        List<AtomicTask> tasks = new ArrayList<>();
+        Set<String> seen = new LinkedHashSet<>();
+        for (PlannedArtifact artifact : artifacts) {
+            if (artifact.prohibited() || artifact.targetPath() == null || artifact.targetPath().isBlank()) continue;
+            AtomicTask task = buildArtifactTask(artifact, title, fullContext, generationContext, issues);
+            if (task == null || !seen.add(normalizePlanPath(task.getTargetPath()))) continue;
+            task.setGenerationContext(generationContext);
+            tasks.add(task);
+        }
+        if (tasks.isEmpty() && issues.isEmpty()) {
+            issues.add(PlanCompilationIssue.error(subPlan.getId(), "CANONICAL-TASKS-EMPTY",
+                    "deliverableIds", "Canonical deliverables produced no atomic tasks"));
+        }
+        log.info("Canonical v2 sub-plan [{}] compiled {} tasks from deliverables {}",
+                title, tasks.size(), deliverableIds);
+        return new SubPlanTaskCompilation(tasks, artifacts, issues);
+    }
+
+    private AtomicTask buildArtifactTask(PlannedArtifact artifact, String title, String fullContext,
+                                         GenerationContext generationContext, List<PlanCompilationIssue> issues) {
+        TaskType type = switch (artifact.kind()) {
+            case DTO, VO, OTHER -> TaskType.OTHER;
+            case FEIGN_INTERFACE -> TaskType.FEIGN_CLIENT;
+            case FEIGN_PROVIDER -> TaskType.FEIGN_PROVIDER;
+            case CONTROLLER -> TaskType.STANDARD_CRUD_CONTROLLER;
+            case ENTITY -> TaskType.STANDARD_CRUD_ENTITY;
+            case SERVICE_INTERFACE, SERVICE_IMPL -> TaskType.STANDARD_CRUD_SERVICE;
+            case WRAPPER -> TaskType.WRAPPER;
+            case MAPPER -> TaskType.CUSTOM_MAPPER;
+            case MAPPER_XML -> TaskType.MAPPER_XML;
+            case CONFIG -> TaskType.NACOS_CONFIG;
+            case EXCEL_MODEL, EXCEL_UTILITY, EXCEL_LISTENER -> TaskType.EXCEL_IMPORT_EXPORT;
+            case DDL -> TaskType.DDL_STATEMENT;
+        };
+        String artifactEntity = artifactEntityName(artifact, generationContext);
+        StringBuilder description = new StringBuilder();
+        description.append(title).append(" - ")
+                .append(artifact.action()).append(' ')
+                .append(artifact.kind()).append(' ')
+                .append(artifact.name()).append('\n');
+        description.append("Exact target path: ").append(artifact.targetPath()).append('\n');
+        description.append("Owning module: ").append(artifact.ownerModule()).append('\n');
+        if (artifact.declaredPackage() != null) {
+            description.append("Exact package: ").append(artifact.declaredPackage()).append('\n');
+        }
+        description.append(artifactInstructions(artifact)).append("\n\n").append(fullContext);
+
+        boolean crossModuleModification = (artifact.action() == ArtifactAction.MODIFY
+                || artifact.action() == ArtifactAction.EXTEND)
+                && artifact.ownerModule() != null
+                && !artifact.ownerModule().equalsIgnoreCase(generationContext.identity().moduleName())
+                && artifact.kind() != ArtifactKind.DDL;
+        if (crossModuleModification) {
+            String existingSource = referenceProjectIndex == null
+                    ? null : referenceProjectIndex.readSourceContent(artifact.targetPath());
+            if (existingSource == null || existingSource.isBlank()) {
+                issues.add(PlanCompilationIssue.error(artifact.subPlanId(), "PLAN-TARGET-SOURCE-UNAVAILABLE",
+                        artifact.targetPath(), "Bound cross-module target source could not be read; generation skipped"));
+                return null;
+            }
+            description.append("\n\n== AUTHORITATIVE EXISTING FILE ==\n```java\n")
+                    .append(existingSource)
+                    .append("\n```\nPreserve unrelated logic and public contracts. Apply only the reviewed extension. ")
+                    .append("Return the complete modified source file; never replace it with a new simplified CRUD class.");
+        }
+        return buildTask(type, description.toString(), artifact.targetPath(), artifactEntity,
+                artifact.ownerModule() == null ? generationContext.identity().moduleName() : artifact.ownerModule());
+    }
+
+    private String artifactInstructions(PlannedArtifact artifact) {
+        return switch (artifact.kind()) {
+            case DTO -> "Generate the exact DTO class named " + artifact.name()
+                    + "; preserve every reviewed request/response field and do not rename the class.";
+            case FEIGN_INTERFACE -> "Generate the exact Feign contract interface " + artifact.name()
+                    + "; do not turn a provider implementation into a second client interface.";
+            case FEIGN_PROVIDER -> "Generate the concrete service-side Feign provider class " + artifact.name()
+                    + "; it must implement the reviewed client contract and must not declare @FeignClient.";
+            case CONTROLLER -> "Generate or modify only the exact controller " + artifact.name()
+                    + "; framework base classes mentioned in prose are dependencies, never deliverables.";
+            case EXCEL_MODEL -> "Generate only the explicitly reviewed Excel/EVO artifact " + artifact.name() + ".";
+            case EXCEL_UTILITY -> "Generate the exact EasyExcel utility " + artifact.name()
+                    + " with the reviewed export and template-download operations; do not emit a data model instead.";
+            case EXCEL_LISTENER -> "Generate the concrete EasyExcel ReadListener " + artifact.name()
+                    + " for the reviewed import model and transactional service import contract.";
+            case ENTITY -> "Generate or modify only the exact entity " + artifact.name() + ".";
+            case MAPPER -> "Generate only the exact Mapper interface " + artifact.name() + " using canonical entity and VO types.";
+            case MAPPER_XML -> "Generate only the Mapper XML for " + artifact.name() + " and keep namespace/result mappings type-closed.";
+            case CONFIG -> "Generate only the exact BladeX configuration file " + artifact.name() + ".";
+            case SERVICE_INTERFACE, SERVICE_IMPL -> "Generate or modify only the exact service type " + artifact.name() + ".";
+            case WRAPPER -> "Generate the exact wrapper " + artifact.name()
+                    + "; extend BaseEntityWrapper and provide build(), entityVO(), and entity() conversions.";
+            case DDL -> "Generate only the reviewed DDL change for module " + artifact.ownerModule() + ".";
+            default -> "Generate only the exact reviewed artifact " + artifact.name() + ".";
+        };
+    }
+
+    private String artifactEntityName(PlannedArtifact artifact, GenerationContext generationContext) {
+        String name = artifact.name();
+        String canonical = generationContext.identity().entityName();
+        boolean currentModule = artifact.ownerModule() == null
+                || artifact.ownerModule().equalsIgnoreCase(generationContext.identity().moduleName());
+        if (currentModule && (name.contains(canonical)
+                || artifact.kind() == ArtifactKind.EXCEL_UTILITY
+                || artifact.kind() == ArtifactKind.EXCEL_LISTENER)) {
+            return canonical;
+        }
+        return switch (artifact.kind()) {
+            case FEIGN_INTERFACE, FEIGN_PROVIDER -> stripClientName(name);
+            case WRAPPER -> stripSuffix(name, "Wrapper");
+            case CONTROLLER -> stripSuffix(name, "Controller");
+            case SERVICE_INTERFACE -> stripSuffix(stripLeadingInterfacePrefix(name), "Service");
+            case SERVICE_IMPL -> stripSuffix(name, "ServiceImpl");
+            case DTO -> stripSuffix(name, "DTO");
+            case EXCEL_MODEL -> name.endsWith("EVO") ? stripSuffix(name, "EVO")
+                    : name.endsWith("ExcelUtil") ? stripSuffix(name, "ExcelUtil") : stripSuffix(name, "Excel");
+            case EXCEL_UTILITY -> name.endsWith("ExcelUtil") ? stripSuffix(name, "ExcelUtil")
+                    : name;
+            case EXCEL_LISTENER -> name.endsWith("ExcelReadListener") ? stripSuffix(name, "ExcelReadListener")
+                    : stripSuffix(name, "ReadListener");
+            default -> name;
+        };
+    }
+
+    private String stripLeadingInterfacePrefix(String name) {
+        return name != null && name.length() > 1 && name.charAt(0) == 'I' && Character.isUpperCase(name.charAt(1))
+                ? name.substring(1) : name;
+    }
+
+    private String stripSuffix(String value, String suffix) {
+        return value != null && suffix != null && value.endsWith(suffix) && value.length() > suffix.length()
+                ? value.substring(0, value.length() - suffix.length()) : value;
+    }
+
+    private String normalizePlanPath(String path) {
+        return path == null ? "" : path.replace('\\', '/');
+    }
+
+    record SubPlanTaskCompilation(
+            List<AtomicTask> tasks,
+            List<PlannedArtifact> artifacts,
+            List<PlanCompilationIssue> issues) {
+        SubPlanTaskCompilation {
+            tasks = tasks == null ? List.of() : List.copyOf(tasks);
+            artifacts = artifacts == null ? List.of() : List.copyOf(artifacts);
+            issues = issues == null ? List.of() : List.copyOf(issues);
+        }
     }
 
     private AtomicTask buildTask(TaskType type, String description, String targetPath, String entityName, String moduleName) {
@@ -1086,21 +1518,6 @@ public class BladeXCodeAgent {
     }
 
     /** 提取实体名(类名),例如 "Order" / "Product" */
-    private Set<String> extractNamedDeliverables(String content, String suffix) {
-        Set<String> names = new LinkedHashSet<>();
-        if (content == null || suffix == null) return names;
-        Pattern explicit = Pattern.compile(
-                "(?:create|generate|add|new|\\u521b\\u5efa|\\u751f\\u6210|\\u65b0\\u589e|\\u5b9e\\u73b0|\\u4ea4\\u4ed8)[^\\n]{0,80}?`?"
-                        + "(I?[A-Z][A-Za-z0-9_]*" + Pattern.quote(suffix) + ")`?",
-                Pattern.CASE_INSENSITIVE);
-        Matcher matcher = explicit.matcher(content);
-        while (matcher.find()) names.add(matcher.group(1));
-        Pattern fileList = Pattern.compile("`(I?[A-Z][A-Za-z0-9_]*" + Pattern.quote(suffix) + ")(?:\\.java)?`");
-        matcher = fileList.matcher(content);
-        while (matcher.find()) names.add(matcher.group(1));
-        return names;
-    }
-
     private String stripClientName(String className) {
         String value = className.startsWith("I") && className.length() > 1 && Character.isUpperCase(className.charAt(1))
                 ? className.substring(1) : className;
@@ -1248,18 +1665,51 @@ public class BladeXCodeAgent {
     /**
      * 记录执行日志
      */
-    private void logExecution(Long subPlanId, String stage, String filePath,
-                               String action, String reason, String validationJson) {
+    private void logPlanExecution(AiPlan plan, String stage, String filePath,
+                                  String action, String reason, String validationJson) {
         AiExecutionLog logEntry = new AiExecutionLog();
+        logEntry.setPlanId(plan == null ? null : plan.getId());
+        populateAndInsertExecutionLog(logEntry, null, stage, filePath, action, reason, validationJson);
+    }
+
+    private void logExecution(Long subPlanId, String stage, String filePath,
+                              String action, String reason, String validationJson) {
+        populateAndInsertExecutionLog(new AiExecutionLog(), subPlanId, stage, filePath, action, reason, validationJson);
+    }
+
+    private void populateAndInsertExecutionLog(AiExecutionLog logEntry, Long subPlanId, String stage, String filePath,
+                                               String action, String reason, String validationJson) {
         logEntry.setSubPlanId(subPlanId);
         logEntry.setStage(stage);
         logEntry.setFilePath(filePath);
         logEntry.setAction(action);
         logEntry.setActionReason(reason);
-        logEntry.setValidationResult(validationJson);
+        logEntry.setValidationResult(normalizeValidationJson(objectMapper, validationJson));
         logEntry.setStatus("FAILED".equals(action) || "ROLLED_BACK".equals(action) ? "FAILED" : "SUCCESS");
         logEntry.setCreateTime(LocalDateTime.now());
         executionLogMapper.insert(logEntry);
+    }
+
+    /**
+     * Normalize validation_result as valid JSON before writing the MySQL JSON column.
+     * Plain-text diagnostics are preserved under a summary property instead of breaking log persistence.
+     */
+    static String normalizeValidationJson(ObjectMapper candidate, String validationJson) {
+        if (validationJson == null || validationJson.isBlank()) {
+            return null;
+        }
+        ObjectMapper mapper = candidate != null ? candidate : new ObjectMapper();
+        try {
+            Object parsed = mapper.readTree(validationJson);
+            if (parsed != null) {
+                return mapper.writeValueAsString(parsed);
+            }
+        } catch (JsonProcessingException ignored) {
+            // Preserve non-JSON diagnostics as a structured summary for reliable persistence.
+        }
+        return mapper.createObjectNode()
+                .put("summary", validationJson)
+                .toString();
     }
 
     private List<GeneratedProjectValidator.Issue> repairPlanWideProjectQuality(
@@ -1279,7 +1729,7 @@ public class BladeXCodeAgent {
                             codeGenRouter.fixProjectQuality(source, projectContext, task, issues),
                     file -> generatedFileStore.persistRepair(plan, file));
             for (ProjectQualityRepairer.RepairEvent event : result.events()) {
-                logExecution(null, "PLAN_QUALITY_FIX", event.filePath(),
+                logPlanExecution(plan, "PLAN_QUALITY_FIX", event.filePath(),
                         event.success() ? "CREATED" : "FAILED",
                         "attempt=" + event.attempt() + ", strategy=" + event.strategy() + ": " + event.detail(), null);
             }
@@ -1292,8 +1742,11 @@ public class BladeXCodeAgent {
         } catch (Exception e) {
             log.warn("Project quality repair failed unexpectedly; final validator will report persisted files: {}",
                     e.getMessage(), e);
-            return generatedProjectValidator.validate(generatedFileStore.loadPlanFiles(plan),
-                    expectedDeliverables, generationContext, referenceProjectIndex);
+            List<GeneratedFile> persisted = generatedFileStore.loadPlanFiles(plan);
+            List<GeneratedProjectValidator.Issue> fallback = new ArrayList<>(generatedProjectValidator.validate(
+                    persisted, expectedDeliverables, generationContext, referenceProjectIndex));
+            appendUniqueProjectIssues(fallback, generatedSourceGate.validate(persisted));
+            return fallback;
         }
     }
 
@@ -1336,6 +1789,7 @@ public class BladeXCodeAgent {
             }
             // 写到 execution_log,subPlanId 为 null 表示 plan 级
             AiExecutionLog entry = new AiExecutionLog();
+            entry.setPlanId(plan.getId());
             entry.setSubPlanId(null);
             entry.setStage("PLAN_CROSS_VALIDATION");
             entry.setAction(errorCount > 0 ? "FAILED" : "SUCCESS");
@@ -1381,7 +1835,7 @@ public class BladeXCodeAgent {
             if (generatedFileStore.persistRepair(plan, fixed)) repaired++;
         }
         if (repaired > 0) {
-            logExecution(null, "PLAN_CROSS_FIX", "", "SUCCESS",
+            logPlanExecution(plan, "PLAN_CROSS_FIX", "", "SUCCESS",
                     "Synchronized " + repaired + " package declarations with physical target paths", null);
         }
     }

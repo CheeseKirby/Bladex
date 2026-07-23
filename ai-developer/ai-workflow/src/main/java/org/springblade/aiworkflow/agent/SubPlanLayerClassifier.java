@@ -10,12 +10,17 @@ final class SubPlanLayerClassifier {
     private static final Pattern TARGET_LAYER = Pattern.compile(
             "(?im)^\\s*#{1,6}\\s*(?:\\u76ee\\u6807\\u5c42|target\\s+layer)\\s*[:\\uff1a]\\s*(.+?)\\s*$");
 
+    private static final Pattern GENERIC_MODULE_PREFIX = Pattern.compile(
+            "(?i)^\\s*(?:api|service)\\s*(?:\\u6a21\\u5757|module)\\s*"
+                    + "(?:\\([^)]*\\)|\\uff08[^\\uff09]*\\uff09)?\\s*(?:[-\\u2014:]\\s*)?");
+
     private SubPlanLayerClassifier() {
     }
 
     static Classification classify(String title, String content) {
         String declaredLayer = extractDeclaredLayer(content);
-        String signal = declaredLayer == null ? safe(title) : primaryLayerExpression(declaredLayer);
+        String declaredSignal = declaredLayer == null ? "" : normalizeDeclaredLayer(declaredLayer);
+        String signal = declaredSignal.isBlank() ? safe(title) : declaredSignal + "\n" + safe(title);
         String lower = signal.toLowerCase(Locale.ROOT);
 
         boolean feign = lower.contains("feign") || signal.contains("\u8fdc\u7a0b");
@@ -37,6 +42,12 @@ final class SubPlanLayerClassifier {
                 lower.contains("excel") || signal.contains("\u5bfc\u5165\u5bfc\u51fa"),
                 feign,
                 declaredLayer);
+    }
+
+    private static String normalizeDeclaredLayer(String declaredLayer) {
+        String primary = primaryLayerExpression(declaredLayer);
+        String withoutGenericModule = GENERIC_MODULE_PREFIX.matcher(primary).replaceFirst("").trim();
+        return withoutGenericModule;
     }
 
     private static String primaryLayerExpression(String declaredLayer) {

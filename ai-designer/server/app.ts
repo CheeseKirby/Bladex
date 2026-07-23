@@ -4,10 +4,15 @@ import cors from 'cors';
 import { isLlmConfigured } from './config/llmConfig';
 import { configRouter } from './routes/config';
 import { llmRouter } from './routes/llm';
-import { plansRouter } from './routes/plans';
+import { createPlansRouter, plansRouter } from './routes/plans';
+import type { ProjectStore } from './services/projectStore';
 import { transmissionRouter } from './routes/transmission';
 
-export function createApp() {
+export type AppOptions = {
+  projectStore?: ProjectStore;
+};
+
+export function createApp(options: AppOptions = {}) {
   const app = express();
   const allowedOrigins = (process.env.FRONTEND_ORIGIN || 'http://localhost:3005')
     .split(',')
@@ -21,6 +26,7 @@ export function createApp() {
       return callback(null, false);
     },
     credentials: false,
+    exposedHeaders: ['X-Review-Id'],
   }));
   app.use(express.json({ limit: process.env.BFF_JSON_LIMIT || '2mb' }));
 
@@ -30,7 +36,7 @@ export function createApp() {
   });
 
   app.use('/api/llm', llmRouter);
-  app.use('/api/plans', plansRouter);
+  app.use('/api/plans', options.projectStore ? createPlansRouter(options.projectStore) : plansRouter);
   app.use('/api/transmission', transmissionRouter);
   app.use('/api/config', configRouter);
 

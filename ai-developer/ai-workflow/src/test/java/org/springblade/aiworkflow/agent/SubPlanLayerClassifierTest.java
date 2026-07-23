@@ -46,6 +46,18 @@ class SubPlanLayerClassifierTest {
     }
 
     @Test
+    void serviceModulePrefixDoesNotCreateMapperOrServiceForControllerPlan() {
+        SubPlanLayerClassifier.Classification result = SubPlanLayerClassifier.classify(
+                "Wrapper and Controller layers",
+                "## \u76ee\u6807\u5c42: Service \u6a21\u5757 (blade-specialperiod) - Wrapper + Controller");
+
+        assertTrue(result.wrapper());
+        assertTrue(result.controller());
+        assertFalse(result.mapper());
+        assertFalse(result.service());
+    }
+
+    @Test
     void excelLayerIgnoresServiceModuleQualifier() {
         SubPlanLayerClassifier.Classification result = SubPlanLayerClassifier.classify(
                 "anything",
@@ -68,6 +80,19 @@ class SubPlanLayerClassifierTest {
         assertFalse(result.mapper());
         assertFalse(result.service());
         assertFalse(result.controller());
+    }
+
+
+    @Test
+    void genericApiModuleDeclarationKeepsSpecificEntityAndVoTitleSignals() {
+        SubPlanLayerClassifier.Classification result = SubPlanLayerClassifier.classify(
+                "Entity \u5b9e\u4f53\u4e0e VO \u89c6\u56fe\u5bf9\u8c61\u5b9a\u4e49",
+                "## \u76ee\u6807\u5c42: API \u6a21\u5757 (blade-specialperiod-api)");
+
+        assertTrue(result.entity());
+        assertTrue(result.vo());
+        assertFalse(result.controller());
+        assertFalse(result.service());
     }
 
     @Test

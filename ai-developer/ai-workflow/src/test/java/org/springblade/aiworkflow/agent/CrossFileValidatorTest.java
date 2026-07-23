@@ -844,8 +844,9 @@ class CrossFileValidatorTest {
 
         List<CrossFileValidator.ContractIssue> issues = validator.validate(List.of(mapper, controller));
 
-        assertTrue(issues.stream().anyMatch(i -> "LIST-MAPPER-PAGE-INCONSISTENT".equals(i.rule)),
-                "应检出 /list 未调用 Mapper 自定义分页方法(B7); 实际: "
+        assertTrue(issues.stream().anyMatch(i -> "LIST-MAPPER-PAGE-INCONSISTENT".equals(i.rule)
+                        && i.isError()),
+                "The dead custom mapper pagination path must be blocking; actual: "
                         + issues.stream().map(Object::toString).reduce((a, b) -> a + " | " + b).orElse(""));
     }
 

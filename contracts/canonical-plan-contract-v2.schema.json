@@ -1,0 +1,581 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:doc4test:canonical-plan-contract:2.0",
+  "title": "Canonical Plan Contract v2",
+  "type": "object",
+  "required": [
+    "contractVersion",
+    "sourceHash",
+    "sourceMode",
+    "rulesetVersion",
+    "identity",
+    "fields",
+    "domains",
+    "modules",
+    "aggregates",
+    "entities",
+    "states",
+    "integrations",
+    "deliverables",
+    "referenceBindings",
+    "architectureDecisions"
+  ],
+  "properties": {
+    "contractVersion": {
+      "const": "2.0"
+    },
+    "sourceHash": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "sourceMode": {
+      "enum": [
+        "STRUCTURED",
+        "LEGACY_INFERRED"
+      ]
+    },
+    "referenceSnapshotId": {
+      "type": "string"
+    },
+    "rulesetVersion": {
+      "type": "string",
+      "minLength": 1
+    },
+    "identity": {
+      "type": "object",
+      "required": [
+        "moduleName",
+        "entityName",
+        "tableName",
+        "basePackage",
+        "apiModuleName",
+        "serviceModuleName",
+        "serviceName"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "moduleName": {
+          "type": "string",
+          "minLength": 1
+        },
+        "entityName": {
+          "type": "string",
+          "minLength": 1
+        },
+        "tableName": {
+          "type": "string",
+          "minLength": 1
+        },
+        "basePackage": {
+          "type": "string",
+          "minLength": 1
+        },
+        "apiModuleName": {
+          "type": "string",
+          "minLength": 1
+        },
+        "serviceModuleName": {
+          "type": "string",
+          "minLength": 1
+        },
+        "serviceName": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "fields": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/field"
+      }
+    },
+    "domains": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "$ref": "#/$defs/domain"
+      }
+    },
+    "modules": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "$ref": "#/$defs/module"
+      }
+    },
+    "aggregates": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "$ref": "#/$defs/aggregate"
+      }
+    },
+    "entities": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "$ref": "#/$defs/entity"
+      }
+    },
+    "states": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/state"
+      }
+    },
+    "integrations": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/integration"
+      }
+    },
+    "deliverables": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/deliverable"
+      }
+    },
+    "referenceBindings": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/referenceBinding"
+      }
+    },
+    "architectureDecisions": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/architectureDecision"
+      }
+    }
+  },
+  "$defs": {
+    "idObject": {
+      "type": "object",
+      "required": [
+        "id"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "additionalProperties": true
+    },
+    "field": {
+      "type": "object",
+      "required": [
+        "id",
+        "entityId",
+        "name",
+        "columnName",
+        "javaType",
+        "required",
+        "role"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "entityId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "columnName": {
+          "type": "string",
+          "minLength": 1
+        },
+        "javaType": {
+          "type": "string",
+          "minLength": 1
+        },
+        "required": {
+          "type": "boolean"
+        },
+        "role": {
+          "enum": [
+            "PERSISTENT",
+            "DERIVED"
+          ]
+        },
+        "evidence": {
+          "type": "string"
+        }
+      }
+    },
+    "deliverable": {
+      "type": "object",
+      "required": [
+        "id",
+        "kind",
+        "name",
+        "moduleSide",
+        "action",
+        "providesTypes",
+        "requiresTypes"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "kind": {
+          "enum": [
+            "DDL",
+            "ENTITY",
+            "VO",
+            "MAPPER",
+            "SERVICE",
+            "WRAPPER",
+            "CONTROLLER",
+            "FEIGN",
+            "EXCEL",
+            "CONFIG",
+            "OTHER"
+          ]
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "moduleId": {
+          "type": "string"
+        },
+        "className": {
+          "type": "string"
+        },
+        "moduleSide": {
+          "enum": [
+            "API",
+            "IMPL",
+            "DOC",
+            "UNKNOWN"
+          ]
+        },
+        "action": {
+          "enum": [
+            "CREATE",
+            "MODIFY",
+            "EXTEND",
+            "PROHIBIT"
+          ]
+        },
+        "providesTypes": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "uniqueItems": true
+        },
+        "requiresTypes": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "uniqueItems": true
+        }
+      },
+      "additionalProperties": false
+    },
+    "domain": {
+      "type": "object",
+      "required": [
+        "id",
+        "name",
+        "ownerModuleIds"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "ownerModuleIds": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "uniqueItems": true
+        }
+      }
+    },
+    "module": {
+      "type": "object",
+      "required": [
+        "id",
+        "name",
+        "kind"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "basePackage": {
+          "type": "string",
+          "minLength": 1
+        },
+        "kind": {
+          "enum": [
+            "EXISTING",
+            "NEW",
+            "UNKNOWN"
+          ]
+        }
+      }
+    },
+    "aggregate": {
+      "type": "object",
+      "required": [
+        "id",
+        "name",
+        "domainId",
+        "rootEntityId"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "domainId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "rootEntityId": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "entity": {
+      "type": "object",
+      "required": [
+        "id",
+        "name",
+        "fields"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "moduleId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "aggregateId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "table": {
+          "type": "string",
+          "minLength": 1
+        },
+        "fields": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "uniqueItems": true
+        },
+        "fieldIds": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "uniqueItems": true
+        }
+      }
+    },
+    "transition": {
+      "type": "object",
+      "required": [
+        "from",
+        "to",
+        "trigger"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "from": {
+          "type": "string",
+          "minLength": 1
+        },
+        "to": {
+          "type": "string",
+          "minLength": 1
+        },
+        "trigger": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "state": {
+      "type": "object",
+      "required": [
+        "id",
+        "name",
+        "values"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "ownerId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "values": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "uniqueItems": true
+        },
+        "transitions": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/transition"
+          }
+        },
+        "referenceField": {
+          "type": "string"
+        }
+      }
+    },
+    "integration": {
+      "type": "object",
+      "required": [
+        "id",
+        "type"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "type": {
+          "enum": [
+            "API",
+            "FEIGN",
+            "WORKFLOW",
+            "EVENT",
+            "OTHER"
+          ]
+        },
+        "sourceModule": {
+          "type": "string"
+        },
+        "targetModule": {
+          "type": "string"
+        },
+        "entrypoint": {
+          "type": "string"
+        }
+      }
+    },
+    "referenceBinding": {
+      "type": "object",
+      "required": [
+        "id",
+        "planElementId",
+        "referenceSymbol",
+        "decision"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "planElementId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "referenceSymbol": {
+          "type": "string",
+          "minLength": 1
+        },
+        "decision": {
+          "enum": [
+            "REUSE",
+            "EXTEND"
+          ]
+        },
+        "targetModule": {
+          "type": "string"
+        }
+      }
+    },
+    "architectureDecision": {
+      "type": "object",
+      "required": [
+        "id",
+        "decision",
+        "rationale",
+        "evidence"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "decision": {
+          "type": "string",
+          "minLength": 1
+        },
+        "rationale": {
+          "type": "string",
+          "minLength": 1
+        },
+        "evidence": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "uniqueItems": true
+        }
+      }
+    }
+  },
+  "additionalProperties": false
+}

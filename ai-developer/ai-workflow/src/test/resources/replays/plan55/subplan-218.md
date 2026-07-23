@@ -1,0 +1,2 @@
+实体名: SpecialPeriod, 模块名: specialperiod, 包路径: org.springblade.specialperiod, 表名: blade_special_period.
+编写 SpecialPeriodExcel 实体类(使用 EasyExcel 的 @ExcelProperty 注解)。编写 ExcelUtil 工具类，实现通用的导出和模板下载方法(基于 EasyExcel)。针对 SpecialPeriodExcel 实现具体的 ReadListener 以解析导入文件。在 SpecialPeriodController 中补充 /export, /import, /template 端点，调用 Service 层的 exportData 和 importData 方法，实现年度节假日、公休日等特殊时段配置数据的批量导入导出功能。

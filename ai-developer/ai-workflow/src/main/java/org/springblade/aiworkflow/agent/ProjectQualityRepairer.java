@@ -27,11 +27,37 @@ public final class ProjectQualityRepairer {
     private static final Pattern PACKAGE = Pattern.compile("(?m)^\\s*package\\s+([\\w.]+)\\s*;");
     private static final Pattern TYPE = Pattern.compile("\\b(?:class|interface|enum|record)\\s+([A-Z][A-Za-z0-9_]*)");
     private static final Pattern IMPORT = Pattern.compile("(?m)^(\\s*import\\s+)(org\\.springblade\\.[\\w.]+)(\\s*;\\s*)$");
+    private static final Pattern SINGLE_FENCED_DOCUMENT = Pattern.compile(
+            "(?is)^\\s*```(?:java|xml|sql|yaml|yml|properties)?\\s*\\R(.*?)\\R?```\\s*$");
+    private static final List<String> PROTECTED_IMPORT_PREFIXES = List.of(
+            "org.springblade.core.",
+            "org.springblade.common.",
+            "org.springblade.modules.");
 
     private static final Set<String> LLM_REPAIRABLE_RULES = Set.of(
             "MAPPER-RESULT-PROPERTY-MISSING",
             "MAPPER-DDL-COLUMN-MISSING",
+            "MAPPER-PARAM-PROPERTY-MISSING",
+            "CANONICAL-ENTITY-FIELD-MISSING",
+            "CANONICAL-ENTITY-FIELD-TYPE",
+            "CANONICAL-ENTITY-FIELD-UNEXPECTED",
+            "CANONICAL-DDL-COLUMN-MISSING",
+            "CANONICAL-INPUT-FIELD-MISSING",
+            "CANONICAL-INPUT-VALIDATION-MISSING",
+            "CANONICAL-UVO-ID-MISSING",
+            "CANONICAL-UVO-INHERITANCE",
+            "CANONICAL-VO-DERIVED-FIELD-MISSING",
+            "CANONICAL-VO-FIELD-UNEXPECTED",
+            "CANONICAL-VO-FIELD-SHADOW",
+            "UNRESOLVED-PROJECT-IMPORT",
+            "JAVA-IMPORT-MISSING",
+            "SOURCE-INCOMPLETE-PLACEHOLDER",
+            "TYPE-METHOD-MISSING",
+            "TYPE-METHOD-REFERENCE-MISSING",
+            "TYPE-ARGUMENT-MISMATCH",
+            "TYPE-RETURN-MISMATCH",
             "CONTROLLER-SERVICE-BUSINESS-GAP",
+            "LIST-MAPPER-PAGE-INCONSISTENT",
             "REFERENCE-API-METHOD-MISSING",
             "CROSS-CONTROLLER-SERVICE-MISMATCH",
             "CROSS-SERVICE-IMPL-IFACE-MISMATCH",
@@ -40,18 +66,31 @@ public final class ProjectQualityRepairer {
             "CROSS-WRAPPER-ENTITY-IVO",
             "CROSS-WRAPPER-ENTITY-UVO",
             "CROSS-FEIGN-FALLBACK-MISSING",
-            "CROSS-IMPORT-CLOSURE-MISSING"
+            "CROSS-IMPORT-CLOSURE-MISSING",
+            "JAVA-SYNTAX-INVALID",
+            "JAVA-PACKAGE-PATH-MISMATCH",
+            "JAVA-TOPLEVEL-TYPE-MISMATCH",
+            "XML-SYNTAX-INVALID",
+            "XML-UNSAFE-DOCTYPE"
     );
 
     private final GeneratedProjectValidator validator;
     private final CrossFileValidator crossFileValidator;
     private final ConventionValidator conventionValidator;
+    private final GeneratedSourceGate sourceGate;
+    private final DeterministicContractRepairer deterministicContractRepairer = new DeterministicContractRepairer();
 
     public ProjectQualityRepairer(GeneratedProjectValidator validator, CrossFileValidator crossFileValidator,
                                   ConventionValidator conventionValidator) {
+        this(validator, crossFileValidator, conventionValidator, new GeneratedSourceGate());
+    }
+
+    ProjectQualityRepairer(GeneratedProjectValidator validator, CrossFileValidator crossFileValidator,
+                           ConventionValidator conventionValidator, GeneratedSourceGate sourceGate) {
         this.validator = Objects.requireNonNull(validator, "validator");
         this.crossFileValidator = Objects.requireNonNull(crossFileValidator, "crossFileValidator");
         this.conventionValidator = Objects.requireNonNull(conventionValidator, "conventionValidator");
+        this.sourceGate = Objects.requireNonNull(sourceGate, "sourceGate");
     }
 
     public RepairResult repair(List<GeneratedFile> sourceFiles,
@@ -68,89 +107,313 @@ public final class ProjectQualityRepairer {
             tasksByPath.forEach((path, task) -> normalizedTasks.put(normalize(path), task));
         }
         List<RepairEvent> events = new ArrayList<>();
-        List<GeneratedProjectValidator.Issue> issues = validate(files, expectedDeliverables, context, referenceIndex);
-        List<RepairProblem> problems = collectProblems(files, issues);
+        ValidationState state = inspect(files, expectedDeliverables, context, referenceIndex);
         int attempts = 0;
 
         for (int attempt = 1; attempt <= Math.max(1, maxAttempts); attempt++) {
             attempts = attempt;
             boolean progressed = false;
 
-            // Generated imports are a deterministic project contract. Normalize every Java file even when the
-            // reference project is unavailable and the strict import resolver cannot classify the issue yet.
-            for (GeneratedFile snapshot : new ArrayList<>(files)) {
-                GeneratedFile repaired = repairGeneratedImports(snapshot, files);
-                if (repaired == null || Objects.equals(snapshot.getContent(), repaired.getContent())) continue;
-                String path = normalize(snapshot.getFilePath());
-                if (!passesConvention(repaired)) {
-                    events.add(RepairEvent.failed(attempt, path, "DETERMINISTIC_IMPORT",
-                            "Deterministic import rewrite was rejected by layer-one validation"));
-                    continue;
+            Set<String> activeRules = state.problems().stream()
+                    .map(RepairProblem::rule)
+                    .collect(java.util.stream.Collectors.toCollection(LinkedHashSet::new));
+            DeterministicContractRepairer.RepairBatch contractRepair =
+                    deterministicContractRepairer.repair(files, context, activeRules);
+            if (!contractRepair.changedPaths().isEmpty()) {
+                ValidationState candidateState = inspect(
+                        contractRepair.files(), expectedDeliverables, context, referenceIndex);
+                if (isMonotonicImprovement(state, candidateState, true)) {
+                    if (persistTransaction(files, contractRepair.files(), contractRepair.changedPaths(), persister)) {
+                        files = contractRepair.files();
+                        state = candidateState;
+                        addBatchEvents(events, attempt, contractRepair.changedPaths(),
+                                "DETERMINISTIC_CONTRACT_GROUP", true, "");
+                        progressed = true;
+                    } else {
+                        addBatchEvents(events, attempt, contractRepair.changedPaths(),
+                                "DETERMINISTIC_CONTRACT_GROUP", false, "PERSISTENCE_TRANSACTION_FAILED: ");
+                    }
+                } else {
+                    addBatchEvents(events, attempt, contractRepair.changedPaths(),
+                            "DETERMINISTIC_CONTRACT_GROUP", false,
+                            "FAILED_REVALIDATION: contract-group candidate introduced a new error or did not improve quality; ");
                 }
-                if (!persister.persist(repaired)) {
-                    events.add(RepairEvent.failed(attempt, path, "DETERMINISTIC_IMPORT",
-                            "Deterministic import rewrite could not be persisted"));
-                    continue;
-                }
-                replace(files, path, repaired);
-                events.add(RepairEvent.success(attempt, path, "DETERMINISTIC_IMPORT",
-                        "Aligned imports with generated project FQCNs"));
-                progressed = true;
             }
 
-            issues = validate(files, expectedDeliverables, context, referenceIndex);
-            problems = collectProblems(files, issues);
-            if (problems.isEmpty()) break;
+            CandidateBatch cleanup = buildDeterministicSourceCleanupCandidate(files, attempt, events);
+            if (!cleanup.changedPaths().isEmpty()) {
+                ValidationState candidateState = inspect(cleanup.files(), expectedDeliverables, context, referenceIndex);
+                if (isMonotonicImprovement(state, candidateState, true)) {
+                    if (persistTransaction(files, cleanup.files(), cleanup.changedPaths(), persister)) {
+                        files = cleanup.files();
+                        state = candidateState;
+                        addBatchEvents(events, attempt, cleanup.changedPaths(),
+                                "DETERMINISTIC_SOURCE_CLEANUP", true, "");
+                        progressed = true;
+                    } else {
+                        addBatchEvents(events, attempt, cleanup.changedPaths(),
+                                "DETERMINISTIC_SOURCE_CLEANUP", false, "PERSISTENCE_TRANSACTION_FAILED: ");
+                    }
+                } else {
+                    addBatchEvents(events, attempt, cleanup.changedPaths(),
+                            "DETERMINISTIC_SOURCE_CLEANUP", false,
+                            "FAILED_REVALIDATION: candidate introduced a new error or worsened project quality; ");
+                }
+            }
+
+            CandidateBatch deterministic = buildDeterministicImportCandidate(files, attempt, events);
+            if (!deterministic.changedPaths().isEmpty()) {
+                ValidationState candidateState = inspect(deterministic.files(), expectedDeliverables, context, referenceIndex);
+                if (isMonotonicImprovement(state, candidateState, true)) {
+                    if (persistTransaction(files, deterministic.files(), deterministic.changedPaths(), persister)) {
+                        files = deterministic.files();
+                        state = candidateState;
+                        addBatchEvents(events, attempt, deterministic.changedPaths(),
+                                "DETERMINISTIC_IMPORT", true, "");
+                        progressed = true;
+                    } else {
+                        addBatchEvents(events, attempt, deterministic.changedPaths(),
+                                "DETERMINISTIC_IMPORT", false, "PERSISTENCE_TRANSACTION_FAILED: ");
+                    }
+                } else {
+                    addBatchEvents(events, attempt, deterministic.changedPaths(),
+                            "DETERMINISTIC_IMPORT", false,
+                            "FAILED_REVALIDATION: candidate introduced a new error or worsened project quality; ");
+                }
+            }
+
+            if (state.problems().isEmpty()) break;
 
             Map<String, List<RepairProblem>> byFile = new LinkedHashMap<>();
-            for (RepairProblem problem : problems) {
+            for (RepairProblem problem : state.problems()) {
                 if (problem.filePath() == null || !LLM_REPAIRABLE_RULES.contains(problem.rule())) continue;
                 byFile.computeIfAbsent(normalize(problem.filePath()), ignored -> new ArrayList<>()).add(problem);
             }
 
-            for (Map.Entry<String, List<RepairProblem>> entry : byFile.entrySet()) {
-                String path = entry.getKey();
-                GeneratedFile current = findByPath(files, path);
-                AtomicTask task = normalizedTasks.get(path);
-                if (current == null || task == null) {
-                    events.add(RepairEvent.failed(attempt, path, "PROJECT_LLM",
-                            "No generated source or atomic task was available for project-level repair"));
-                    continue;
+            CandidateBatch llmCandidate = buildLlmCandidate(files, byFile, normalizedTasks, context,
+                    fixer, attempt, events);
+            if (!llmCandidate.changedPaths().isEmpty()) {
+                ValidationState candidateState = inspect(llmCandidate.files(), expectedDeliverables, context, referenceIndex);
+                if (isMonotonicImprovement(state, candidateState, true)) {
+                    if (persistTransaction(files, llmCandidate.files(), llmCandidate.changedPaths(), persister)) {
+                        files = llmCandidate.files();
+                        state = candidateState;
+                        addBatchEvents(events, attempt, llmCandidate.changedPaths(),
+                                "PROJECT_LLM", true, "");
+                        progressed = true;
+                    } else {
+                        addBatchEvents(events, attempt, llmCandidate.changedPaths(),
+                                "PROJECT_LLM", false, "PERSISTENCE_TRANSACTION_FAILED: ");
+                    }
+                } else {
+                    addBatchEvents(events, attempt, llmCandidate.changedPaths(),
+                            "PROJECT_LLM", false,
+                            "FAILED_REVALIDATION: candidate did not strictly reduce errors or introduced a new error; ");
                 }
-                String issueDescription = entry.getValue().stream()
-                        .map(problem -> problem.rule() + ": " + problem.message())
-                        .reduce((left, right) -> left + "\n" + right)
-                        .orElse("");
-                String projectContext = buildProjectContext(current, files, context);
-                GenerationResult result = fixer.fix(current, projectContext, task, issueDescription);
-                if (result == null || !result.isSuccess() || result.getGeneratedFiles().isEmpty()) {
-                    String error = result == null ? "Project repair returned no result" : result.getErrorMessage();
-                    events.add(RepairEvent.failed(attempt, path, "PROJECT_LLM", error));
-                    continue;
-                }
-                GeneratedFile candidate = result.getGeneratedFiles().get(0);
-                GeneratedFile repaired = GeneratedFile.modify(current.getType(), current.getFilePath(), candidate.getContent());
-                if (!passesConvention(repaired)) {
-                    events.add(RepairEvent.failed(attempt, path, "PROJECT_LLM",
-                            "Project-level repair introduced a layer-one convention error"));
-                    continue;
-                }
-                if (!persister.persist(repaired)) {
-                    events.add(RepairEvent.failed(attempt, path, "PROJECT_LLM",
-                            "Project-level repair could not be persisted"));
-                    continue;
-                }
-                replace(files, path, repaired);
-                events.add(RepairEvent.success(attempt, path, "PROJECT_LLM", issueDescription));
-                progressed = true;
             }
 
-            issues = validate(files, expectedDeliverables, context, referenceIndex);
-            problems = collectProblems(files, issues);
             if (!progressed) break;
         }
 
-        return new RepairResult(files, issues, events, attempts);
+        return new RepairResult(files, state.projectIssues(),
+                finalizeEventsAfterRevalidation(events, state.projectIssues(), state.problems()), attempts);
+    }
+
+    private static void addBatchEvents(List<RepairEvent> events, int attempt,
+                                       Map<String, String> changedPaths, String strategy,
+                                       boolean success, String detailPrefix) {
+        for (Map.Entry<String, String> entry : changedPaths.entrySet()) {
+            String detail = detailPrefix + entry.getValue();
+            events.add(success
+                    ? RepairEvent.success(attempt, entry.getKey(), strategy, detail)
+                    : RepairEvent.failed(attempt, entry.getKey(), strategy, detail));
+        }
+    }
+
+    private CandidateBatch buildDeterministicSourceCleanupCandidate(List<GeneratedFile> files, int attempt,
+                                                                      List<RepairEvent> events) {
+        List<GeneratedFile> candidate = copyFiles(files);
+        Map<String, String> changedPaths = new LinkedHashMap<>();
+        for (GeneratedFile snapshot : new ArrayList<>(candidate)) {
+            if (snapshot.getContent() == null) continue;
+            Matcher matcher = SINGLE_FENCED_DOCUMENT.matcher(snapshot.getContent());
+            if (!matcher.matches()) continue;
+            GeneratedFile repaired = GeneratedFile.modify(snapshot.getType(), snapshot.getFilePath(),
+                    matcher.group(1).strip());
+            String path = normalize(snapshot.getFilePath());
+            if (!passesConvention(repaired)) {
+                events.add(RepairEvent.failed(attempt, path, "DETERMINISTIC_SOURCE_CLEANUP",
+                        "Markdown fence removal was rejected by layer-one validation"));
+                continue;
+            }
+            replace(candidate, path, repaired);
+            changedPaths.put(path, "Removed a whole-document Markdown code fence");
+        }
+        return new CandidateBatch(candidate, changedPaths);
+    }
+
+    private CandidateBatch buildDeterministicImportCandidate(List<GeneratedFile> files, int attempt,
+                                                              List<RepairEvent> events) {
+        List<GeneratedFile> candidate = copyFiles(files);
+        Map<String, String> changedPaths = new LinkedHashMap<>();
+        for (GeneratedFile snapshot : new ArrayList<>(candidate)) {
+            GeneratedFile repaired = repairGeneratedImports(snapshot, candidate);
+            if (repaired == null || Objects.equals(snapshot.getContent(), repaired.getContent())) continue;
+            String path = normalize(snapshot.getFilePath());
+            if (!passesConvention(repaired)) {
+                events.add(RepairEvent.failed(attempt, path, "DETERMINISTIC_IMPORT",
+                        "Deterministic import rewrite was rejected by layer-one validation"));
+                continue;
+            }
+            replace(candidate, path, repaired);
+            changedPaths.put(path, "Aligned imports with generated project FQCNs");
+        }
+        return new CandidateBatch(candidate, changedPaths);
+    }
+
+    private CandidateBatch buildLlmCandidate(List<GeneratedFile> files,
+                                             Map<String, List<RepairProblem>> byFile,
+                                             Map<String, AtomicTask> normalizedTasks,
+                                             GenerationContext context,
+                                             ProjectFileFixer fixer,
+                                             int attempt,
+                                             List<RepairEvent> events) {
+        List<GeneratedFile> candidateFiles = copyFiles(files);
+        Map<String, String> changedPaths = new LinkedHashMap<>();
+        for (Map.Entry<String, List<RepairProblem>> entry : byFile.entrySet()) {
+            String path = entry.getKey();
+            GeneratedFile current = findByPath(candidateFiles, path);
+            AtomicTask task = normalizedTasks.get(path);
+            if (current == null || task == null) {
+                events.add(RepairEvent.failed(attempt, path, "PROJECT_LLM",
+                        "No generated source or atomic task was available for project-level repair"));
+                continue;
+            }
+            String issueDescription = entry.getValue().stream()
+                    .map(problem -> problem.rule() + ": " + problem.message())
+                    .reduce((left, right) -> left + "\n" + right)
+                    .orElse("");
+            String projectContext = buildProjectContext(current, candidateFiles, context);
+            GenerationResult result = fixer.fix(current, projectContext, task, issueDescription);
+            if (result == null || !result.isSuccess() || result.getGeneratedFiles().isEmpty()) {
+                String error = result == null ? "Project repair returned no result" : result.getErrorMessage();
+                events.add(RepairEvent.failed(attempt, path, "PROJECT_LLM", error));
+                continue;
+            }
+            GeneratedFile generated = result.getGeneratedFiles().get(0);
+            GeneratedFile repaired = GeneratedFile.modify(current.getType(), current.getFilePath(), generated.getContent());
+            if (!passesConvention(repaired)) {
+                events.add(RepairEvent.failed(attempt, path, "PROJECT_LLM",
+                        "Project-level repair introduced a layer-one convention error"));
+                continue;
+            }
+            replace(candidateFiles, path, repaired);
+            changedPaths.put(path, issueDescription);
+        }
+        return new CandidateBatch(candidateFiles, changedPaths);
+    }
+
+    private ValidationState inspect(List<GeneratedFile> files,
+                                    List<ExpectedDeliverable> expectedDeliverables,
+                                    GenerationContext context,
+                                    ReferenceProjectIndex referenceIndex) {
+        List<GeneratedProjectValidator.Issue> projectIssues = new ArrayList<>(validate(
+                files, expectedDeliverables, context, referenceIndex));
+        appendUniqueIssues(projectIssues, sourceGate.validate(files));
+        return new ValidationState(projectIssues, collectProblems(files, projectIssues));
+    }
+
+    static boolean isMonotonicImprovement(ValidationState before, ValidationState after,
+                                          boolean requireStrictImprovement) {
+        Set<String> beforeErrors = problemFingerprints(before.problems());
+        Set<String> afterErrors = problemFingerprints(after.problems());
+        if (!beforeErrors.containsAll(afterErrors)) return false;
+
+        int beforeErrorCount = before.problems().size();
+        int afterErrorCount = after.problems().size();
+        long beforeWarnings = warningCount(before.projectIssues());
+        long afterWarnings = warningCount(after.projectIssues());
+        boolean nonWorsening = afterErrorCount <= beforeErrorCount && afterWarnings <= beforeWarnings;
+        if (!nonWorsening) return false;
+        return !requireStrictImprovement
+                || afterErrorCount < beforeErrorCount
+                || (afterErrorCount == beforeErrorCount && afterWarnings < beforeWarnings);
+    }
+
+    private static Set<String> problemFingerprints(List<RepairProblem> problems) {
+        Set<String> fingerprints = new LinkedHashSet<>();
+        for (RepairProblem problem : problems == null ? List.<RepairProblem>of() : problems) {
+            fingerprints.add(problem.rule() + "|" + normalize(problem.filePath()));
+        }
+        return fingerprints;
+    }
+
+    private static long warningCount(List<GeneratedProjectValidator.Issue> issues) {
+        return (issues == null ? List.<GeneratedProjectValidator.Issue>of() : issues).stream()
+                .filter(issue -> !issue.isError()).count();
+    }
+
+    private boolean persistTransaction(List<GeneratedFile> beforeFiles,
+                                       List<GeneratedFile> candidateFiles,
+                                       Map<String, String> changedPaths,
+                                       RepairPersister persister) {
+        List<GeneratedFile> persistedOriginals = new ArrayList<>();
+        for (String path : changedPaths.keySet()) {
+            GeneratedFile candidate = findByPath(candidateFiles, path);
+            GeneratedFile original = findByPath(beforeFiles, path);
+            if (candidate == null || !persister.persist(candidate)) {
+                for (int i = persistedOriginals.size() - 1; i >= 0; i--) {
+                    GeneratedFile rollback = persistedOriginals.get(i);
+                    persister.persist(GeneratedFile.modify(rollback.getType(), rollback.getFilePath(), rollback.getContent()));
+                }
+                return false;
+            }
+            if (original != null) persistedOriginals.add(original);
+        }
+        return true;
+    }
+
+    record ValidationState(List<GeneratedProjectValidator.Issue> projectIssues,
+                           List<RepairProblem> problems) {
+        ValidationState {
+            projectIssues = projectIssues == null ? List.of() : List.copyOf(projectIssues);
+            problems = problems == null ? List.of() : List.copyOf(problems);
+        }
+    }
+
+    private record CandidateBatch(List<GeneratedFile> files, Map<String, String> changedPaths) {
+    }
+
+    static List<RepairEvent> finalizeEventsAfterRevalidation(
+            List<RepairEvent> events, List<GeneratedProjectValidator.Issue> issues) {
+        return finalizeEventsAfterRevalidation(events, issues, List.of());
+    }
+
+    private static List<RepairEvent> finalizeEventsAfterRevalidation(
+            List<RepairEvent> events, List<GeneratedProjectValidator.Issue> issues,
+            List<RepairProblem> problems) {
+        Set<String> unresolvedPaths = new LinkedHashSet<>();
+        for (GeneratedProjectValidator.Issue issue : issues == null
+                ? List.<GeneratedProjectValidator.Issue>of() : issues) {
+            if (issue.isError() && issue.filePath() != null && !issue.filePath().isBlank()) {
+                unresolvedPaths.add(normalize(issue.filePath()));
+            }
+        }
+        for (RepairProblem problem : problems == null ? List.<RepairProblem>of() : problems) {
+            if (problem.filePath() != null && !problem.filePath().isBlank()) {
+                unresolvedPaths.add(normalize(problem.filePath()));
+            }
+        }
+        List<RepairEvent> finalized = new ArrayList<>();
+        for (RepairEvent event : events == null ? List.<RepairEvent>of() : events) {
+            if (event.success() && unresolvedPaths.contains(normalize(event.filePath()))) {
+                finalized.add(RepairEvent.failed(event.attempt(), event.filePath(), event.strategy(),
+                        "FAILED_REVALIDATION: " + event.detail()));
+            } else {
+                finalized.add(event);
+            }
+        }
+        return finalized;
     }
 
     static GeneratedFile repairGeneratedImports(GeneratedFile source, List<GeneratedFile> allFiles) {
@@ -172,6 +435,10 @@ public final class ProjectQualityRepairer {
         boolean changed = false;
         while (matcher.find()) {
             String imported = matcher.group(2);
+            if (isProtectedImport(imported)) {
+                matcher.appendReplacement(rewritten, Matcher.quoteReplacement(matcher.group(0)));
+                continue;
+            }
             String simpleName = imported.substring(imported.lastIndexOf('.') + 1);
             Set<String> candidates = fqcnBySimpleName.getOrDefault(simpleName, Set.of());
             if (candidates.size() == 1) {
@@ -190,11 +457,28 @@ public final class ProjectQualityRepairer {
                 : source;
     }
 
+    private static boolean isProtectedImport(String imported) {
+        return PROTECTED_IMPORT_PREFIXES.stream().anyMatch(imported::startsWith);
+    }
+
     private List<GeneratedProjectValidator.Issue> validate(List<GeneratedFile> files,
                                                             List<ExpectedDeliverable> expected,
                                                             GenerationContext context,
                                                             ReferenceProjectIndex referenceIndex) {
         return validator.validate(files, expected == null ? List.of() : expected, context, referenceIndex);
+    }
+
+    private void appendUniqueIssues(List<GeneratedProjectValidator.Issue> target,
+                                    List<GeneratedProjectValidator.Issue> additions) {
+        Set<String> fingerprints = new LinkedHashSet<>();
+        for (GeneratedProjectValidator.Issue issue : target) {
+            fingerprints.add(issue.rule() + "|" + normalize(issue.filePath()) + "|" + issue.message());
+        }
+        for (GeneratedProjectValidator.Issue issue : additions == null
+                ? List.<GeneratedProjectValidator.Issue>of() : additions) {
+            String fingerprint = issue.rule() + "|" + normalize(issue.filePath()) + "|" + issue.message();
+            if (fingerprints.add(fingerprint)) target.add(issue);
+        }
     }
 
     private List<RepairProblem> collectProblems(List<GeneratedFile> files,
@@ -223,6 +507,7 @@ public final class ProjectQualityRepairer {
         StringBuilder prompt = new StringBuilder();
         prompt.append("Canonical identity: ").append(context.identity()).append('\n');
         prompt.append("Reference conventions: ").append(context.referenceProfile().describeForPrompt()).append("\n\n");
+        prompt.append(context.domainContract().describeForPrompt()).append("\n");
         prompt.append("Generated file inventory (physical paths are authoritative):\n");
         files.stream().map(GeneratedFile::getFilePath).filter(Objects::nonNull).sorted()
                 .forEach(item -> prompt.append("- ").append(normalize(item)).append('\n'));

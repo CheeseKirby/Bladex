@@ -1,6 +1,6 @@
 import React, { useState, useCallback, useRef, useEffect } from 'react';
 import { Layout } from 'antd';
-import TopBar from './TopBar';
+import TopBar, { type ProjectOption } from './TopBar';
 import ModulePalette from '../palette/ModulePalette';
 import PlanCanvas from '../canvas/PlanCanvas';
 import ContextPanel from '../context/ContextPanel';
@@ -13,6 +13,9 @@ interface MainLayoutProps {
   onNewProject: () => void;
   onSave: () => void;
   onExport: () => void;
+  projects: ProjectOption[];
+  projectsLoading: boolean;
+  onSelectProject: (projectId: string) => void;
 }
 
 /**
@@ -22,7 +25,7 @@ interface MainLayoutProps {
  * - 底部输入区可拖拽改高 (拖顶部分割条), 内部内容可上下滚动查看
  * - 整体配色: 柔和蓝灰主题, 降低饱和度
  */
-const MainLayout: React.FC<MainLayoutProps> = ({ onNewProject, onSave, onExport }) => {
+const MainLayout: React.FC<MainLayoutProps> = ({ onNewProject, onSave, onExport, projects, projectsLoading, onSelectProject }) => {
   const project = usePlanStore((s) => s.project);
 
   // 底部输入区高度 — 可拖拽调整, 范围 [100, 60% 视口]
@@ -66,7 +69,7 @@ const MainLayout: React.FC<MainLayoutProps> = ({ onNewProject, onSave, onExport 
   return (
     <Layout style={{ height: '100vh', background: '#fff' }}>
       {/* 顶部栏 */}
-      <TopBar onNewProject={onNewProject} onSave={onSave} onExport={onExport} />
+      <TopBar onNewProject={onNewProject} onSave={onSave} onExport={onExport} projects={projects} projectsLoading={projectsLoading} onSelectProject={onSelectProject} />
 
       <Layout style={{ flex: 1, overflow: 'hidden' }}>
         {/* 左侧：模块面板 */}

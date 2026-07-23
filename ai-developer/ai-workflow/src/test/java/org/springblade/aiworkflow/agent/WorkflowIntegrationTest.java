@@ -170,6 +170,10 @@ class WorkflowIntegrationTest {
         PlanReceiveRequest request = new PlanReceiveRequest();
         request.setProjectId("test-demo-" + System.nanoTime());
         request.setProjectName("测试Demo");
+        PlanReceiveRequest.MetadataVO metadata = new PlanReceiveRequest.MetadataVO();
+        metadata.setSourceService("legacy-replay");
+        request.setMetadata(metadata);
+        request.setWriteTarget("ISOLATED");
         PlanReceiveRequest.MasterPlanVO master = new PlanReceiveRequest.MasterPlanVO();
         master.setId("m1");
         master.setVersion(1);

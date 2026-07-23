@@ -102,6 +102,11 @@ export interface MasterPlan {
   planContent: string;
   reviewedContent?: string;
   reviewChangeLog?: ChangeLogEntry[];
+  reviewStatus?: ReviewFinalStatus;
+  reviewAudit?: ReviewAuditEvidence;
+  reviewId?: string;
+  activeReviewId?: string;
+  contractHash?: string;
   status: WorkflowState;
   llmModel?: string;
   llmTokensUsed?: number;
@@ -117,6 +122,14 @@ export interface SubPlan {
   planContent: string;
   reviewedContent?: string;
   reviewChangeLog?: ChangeLogEntry[];
+  reviewStatus?: ReviewFinalStatus;
+  reviewAudit?: ReviewAuditEvidence;
+  reviewId?: string;
+  contractHash?: string;
+  deliverableIds?: string[];
+  referencedElementIds?: string[];
+  inputTypes?: string[];
+  outputTypes?: string[];
   prerequisites: string[];  // IDs of prerequisite sub-plans
   status: SubPlanStatus;
   transmissionRef?: string;
@@ -151,6 +164,37 @@ export interface ChangeLogEntry {
 }
 
 // === 审查反馈 ===
+export type ReviewFinalStatus =
+  | 'PASSED'
+  | 'PASSED_WITH_WARNINGS'
+  | 'BLOCKED'
+  | 'REVIEW_INFRA_ERROR';
+
+export interface ReviewRoundEvidence {
+  round: number;
+  receivedAt: string;
+  rawResponseLength: number;
+  rawResponseSha256: string;
+  parseStatus: 'SUCCESS' | 'FAILED';
+  schemaValidationStatus: 'SUCCESS' | 'FAILED';
+  referenceSummaryAvailable: boolean;
+  referenceSnapshotId?: string;
+  contractSource?: 'EMBEDDED' | 'INFERRED';
+  contractSourceHash?: string;
+  deterministicErrorCount?: number;
+  deterministicWarningCount?: number;
+  responseKind?: 'PRIMARY' | 'SCHEMA_RECOVERY';
+  diagnostic?: string;
+}
+
+export interface ReviewAuditEvidence {
+  reviewId: string;
+  rulesetVersion: string;
+  startedAt: string;
+  completedAt: string;
+  rounds: ReviewRoundEvidence[];
+}
+
 export interface ReviewIssue {
   severity: 'ERROR' | 'WARN';
   rule: string;
@@ -158,9 +202,11 @@ export interface ReviewIssue {
 }
 
 export interface ReviewResult {
+  status?: ReviewFinalStatus;
   passes: boolean;
   issues: ReviewIssue[];
   reviewLog?: ReviewLogEntry[];
+  audit?: ReviewAuditEvidence;
 }
 
 export interface ReviewLogEntry {

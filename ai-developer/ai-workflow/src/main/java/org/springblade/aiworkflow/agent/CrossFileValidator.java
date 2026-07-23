@@ -996,13 +996,25 @@ public class CrossFileValidator {
                 String pageMethod = prefixPageMethod.get(prefix);
                 if (pageMethod == null) continue;
                 String code = cid.toString();
-                if (code.contains("\"/list\"") && !code.contains(pageMethod + "(")) {
-                    issues.add(new ContractIssue("WARN",
-                            ctrlName + " /list 端点用 Condition.getQueryWrapper, 未调用 Mapper 自定义分页方法 "
-                                    + pageMethod + ", QVO 区间字段会被忽略(死代码)。"
-                                    + "要么 /list 改用 " + pageMethod + "(IPage, QVO), 要么移除 Mapper 自定义分页方法与 QVO 区间字段。",
+                boolean pageMethodUsedByImplementation = units.stream()
+                        .flatMap(unit -> unit.findAll(ClassOrInterfaceDeclaration.class).stream())
+                        .filter(type -> !type.isInterface())
+                        .anyMatch(type -> type.toString().contains(pageMethod + "("));
+                if (code.contains("\"/list\"") && !pageMethodUsedByImplementation) {
+                    String serviceImplName = prefix + "ServiceImpl";
+                    String repairPath = units.stream()
+                            .filter(unit -> unit.findAll(ClassOrInterfaceDeclaration.class).stream()
+                                    .anyMatch(type -> serviceImplName.equals(type.getNameAsString())))
+                            .map(cuToFilePath::get)
+                            .filter(java.util.Objects::nonNull)
+                            .findFirst().orElse(cuToFilePath.get(cu));
+                    issues.add(new ContractIssue("ERROR",
+                            ctrlName + " /list flow does not use custom mapper page method " + pageMethod
+                                    + "; the Mapper/QVO query contract is dead code. "
+                                    + "The service implementation must call baseMapper." + pageMethod
+                                    + "(IPage, QVO), or the Mapper/XML method must be removed consistently.",
                             "LIST-MAPPER-PAGE-INCONSISTENT",
-                            cuToFilePath.get(cu), null));
+                            repairPath, cuToFilePath.get(cu)));
                 }
             }
         }

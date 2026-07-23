@@ -59,6 +59,9 @@ public class ExecutionTimelineVO {
     private Integer qualityWarningCount;
 
 
+    @Schema(description = "Plan-level generation, repair, and final-gate steps")
+    private List<TimelineStep> planSteps;
+
     @Schema(description = "按子方案分组的步骤列表")
     private List<SubPlanTimeline> subPlanTimelines;
 

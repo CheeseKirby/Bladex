@@ -2,7 +2,8 @@ import React, { useState, useRef, useCallback, useEffect } from 'react';
 import { Input, Button, Space, Tag, message } from 'antd';
 import { SendOutlined } from '@ant-design/icons';
 import { usePlanStore } from '../../store/planStore';
-import { generatePlanStream } from '../../services/api';
+import { completeOneShot, generatePlanStream } from '../../services/api';
+import { createSuggestedModules, needsAutomaticInputPreparation } from '../../services/planInputPreparation';
 import type { SSEMessage, DraggedModule } from '../../types/plan';
 import RequirementStatusBar from './RequirementStatusBar';
 
@@ -26,6 +27,7 @@ const ChatInput: React.FC<ChatInputProps> = ({ disabled }) => {
   const appendStreamingChunk = usePlanStore((s) => s.appendStreamingChunk);
   const setIsStreaming = usePlanStore((s) => s.setIsStreaming);
   const setProjectStatus = usePlanStore((s) => s.setProjectStatus);
+  const setRawRequirements = usePlanStore((s) => s.setRawRequirements);
   const setMasterPlan = usePlanStore((s) => s.setMasterPlan);
   const setReviewResult = usePlanStore((s) => s.setReviewResult);
   const canvasModules = usePlanStore((s) => s.canvasModules);
@@ -71,6 +73,9 @@ const ChatInput: React.FC<ChatInputProps> = ({ disabled }) => {
     const requestId = streamRequestIdRef.current;
     streamAbortRef.current?.();
     streamAbortRef.current = null;
+    const submittedRequirement = input.trim();
+    let generationRequirement = submittedRequirement;
+    let generationModules = [...canvasModules];
     setStreamingContent('');
     setIsGenerating(true);
     setIsStreaming(true);
@@ -126,10 +131,28 @@ const ChatInput: React.FC<ChatInputProps> = ({ disabled }) => {
     };
 
     try {
+      if (needsAutomaticInputPreparation(generationRequirement, generationModules)) {
+        setStreamingContent('正在自动补齐模块、字段和业务约束，完成后将继续生成方案...');
+        const prepared = await completeOneShot(generationRequirement, generationModules);
+        if (!prepared?.success) {
+          throw new Error(prepared?.msg || prepared?.error || '需求自动完备失败');
+        }
+        const suggestedModules = createSuggestedModules(prepared.data?.suggestions);
+        for (const module of suggestedModules) addModuleToCanvas(module);
+        generationModules = [...generationModules, ...suggestedModules];
+        if (typeof prepared.data?.enriched === 'string' && prepared.data.enriched.trim()) {
+          generationRequirement = prepared.data.enriched.trim();
+        }
+        if (needsAutomaticInputPreparation(generationRequirement, generationModules)) {
+          throw new Error('PLAN_INPUT_PREPARATION_ERROR: 未能形成唯一实体、模块名、表名和至少 3 个业务字段');
+        }
+      }
+      setRawRequirements(generationRequirement);
+      setStreamingContent('');
       const stream = generatePlanStream(
         {
-          userInput: input,
-          modules: canvasModules,
+          userInput: generationRequirement,
+          modules: generationModules,
           projectId: project.id,
         },
         handleMessage,
@@ -154,9 +177,12 @@ const ChatInput: React.FC<ChatInputProps> = ({ disabled }) => {
       const msg = err instanceof Error ? err.message : String(err);
       console.error('请求失败:', err);
       message.error(`请求失败: ${msg}`);
+      setProjectStatus('DRAFT');
+      setStreamingContent('');
       setIsGenerating(false);
       setIsStreaming(false);
       streamAbortRef.current = null;
+      return;
     }
 
     setInput('');

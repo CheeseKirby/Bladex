@@ -261,6 +261,7 @@ public class PromptBuilder {
             case STANDARD_CRUD_CONTROLLER -> substitute(buildControllerSystemPrompt(), entity, module);
             case STANDARD_CRUD_SERVICE, COMPLEX_BUSINESS_SERVICE -> substitute(buildServiceSystemPrompt(), entity, module);
             case FEIGN_CLIENT -> substitute(buildFeignSystemPrompt(), entity, module);
+            case FEIGN_PROVIDER -> substitute(buildFeignProviderSystemPrompt(), entity, module);
             case EXCEL_IMPORT_EXPORT -> substitute(buildExcelSystemPrompt(), entity, module);
             case CUSTOM_MAPPER -> substitute(buildMapperSystemPrompt(), entity, module);
             case MAPPER_XML -> substitute(buildMapperXmlSystemPrompt(), entity, module);
@@ -292,6 +293,7 @@ public class PromptBuilder {
         }
         authority.append("- validation namespace=").append(profile.validationNamespace())
                 .append("; swagger generation=").append(profile.swaggerGeneration()).append("\n\n");
+        authority.append(context.domainContract().describeForPrompt()).append("\n");
         return authority + rolePrompt;
     }
 
@@ -334,6 +336,12 @@ public class PromptBuilder {
                 ? generationContext.referenceProfile() : ReferenceFrameworkProfile.defaults();
         String basePackage = generationContext != null
                 ? generationContext.identity().basePackage() : "org.springblade." + module;
+
+        java.util.List<String> canonicalTypes = canonicalBusinessTypes(generationContext);
+        java.util.List<String> canonicalVoTypes = canonicalTypes.stream()
+                .filter(name -> name.startsWith(entity) && name.endsWith("VO"))
+                .toList();
+        boolean structuredContract = generationContext != null && generationContext.planContract() != null;
 
         StringBuilder sb = new StringBuilder();
 
@@ -383,8 +391,21 @@ public class PromptBuilder {
         if (generationContext != null) {
             sb.append("- Canonical table name: ").append(generationContext.identity().tableName()).append("\n");
         }
-        sb.append("- VO 类名: ").append(entity).append("VO / ").append(entity).append("QVO / ").append(entity).append("IVO / ").append(entity).append("UVO / ").append(entity).append("EVO\n");
-        sb.append("- VO/IVO/UVO 业务字段必须与 Entity 逐字段同名同类型 (Entity 用 periodName 就用 periodName, 不要改成 name; Entity 是 Date 就用 Date, 不要用 LocalDate)。凭空业务字段(如 weekDays/priority)禁止; 展示衍生字段用 xxxName 后缀。违反会导致 BeanUtil.copy 丢字段、CRUD 断裂, 且会被跨文件自检拦截并强制重生成。\n");
+        if (structuredContract) {
+            sb.append("- Canonical generated business types (closed symbol table): ")
+                    .append(canonicalTypes).append("\n");
+            sb.append("- Never reference or invent a business type outside that symbol table. ")
+                    .append("In particular, do not use ").append(entity).append("EVO unless it is listed.\n");
+            sb.append("- Canonical VO family for this plan: ").append(canonicalVoTypes).append("\n");
+        } else {
+            sb.append("- Legacy VO family may include VO/QVO/IVO/UVO/EVO; use only types requested by the task.\n");
+        }
+        if (structuredContract) {
+            sb.append("- VO/IVO/UVO fields must use exact canonical names and types. ")
+                    .append("Do not add display aliases or derived fields unless they are explicitly listed in the canonical domain contract.\n");
+        } else {
+            sb.append("- VO/IVO/UVO business fields must stay aligned with Entity names and types; do not invent unrelated fields.\n");
+        }
         sb.append("- Mapper XML: resultMap 的 type 必须与对应 Mapper 方法返回元素类型一致(方法返回 List<XxxVO> 则 resultMap type 指向 XxxVO 且 property 与 VO 字段同名; 返回 List<Entity> 则指向 Entity); <select> 的 @Param 前缀必须与 Mapper 接口 @Param(\"xxx\") 一致。\n");
         sb.append("- Wrapper 必须提供: entityVO(Entity)、entity(IVO)、entity(UVO) 三个方法\n");
         sb.append("- Feign 接口不要引用 fallback 类 (本次只生成接口, fallback 后续单独生成)\n");
@@ -393,12 +414,23 @@ public class PromptBuilder {
         sb.append("- 启动类 ").append(entity).append("Application 的 BladeApplication.run(appName, ...) 第一个参数 appName 必须为 \"blade-").append(module).append("\",\n");
         sb.append("  不得加 -service 等后缀(如 blade-").append(module).append("-service 是错误的), 以保证与前端 API 路径前缀 /api/blade-").append(module).append(" 及 Nacos 服务名一致。\n");
         sb.append("- Mapper 自定义查询方法(如 export").append(entity).append(")的返回类型必须与 I").append(entity).append("Service 接口对应方法声明的返回类型严格一致:\n");
-        sb.append("  若接口声明 List<").append(entity).append("EVO>, Mapper 与 Mapper.xml 也必须返回 List<").append(entity).append("EVO>, 不可返回 List<").append(entity).append("VO> 导致类型不匹配。\n");
+        sb.append("- Mapper, Service, Controller and Wrapper method signatures may use only canonical generated business types and framework types.\n");
 
         return sb.toString();
     }
 
     // ─── 系统提示词构建方法 ───
+
+    private java.util.List<String> canonicalBusinessTypes(GenerationContext context) {
+        if (context == null || context.planContract() == null) return java.util.List.of();
+        return context.planContract().deliverables().stream()
+                .filter(item -> item != null && !"PROHIBIT".equals(item.action()))
+                .flatMap(item -> item.providesTypes().stream())
+                .filter(name -> name != null && !name.isBlank())
+                .distinct()
+                .sorted()
+                .toList();
+    }
 
     private String buildEntitySystemPrompt() {
         return """
@@ -549,6 +581,22 @@ public class PromptBuilder {
                 + "\n\n完整规范:\n" + conventionLoader.getFeignConvention();
     }
 
+    private String buildFeignProviderSystemPrompt() {
+        return """
+                You are generating the service-side implementation of a BladeX Feign contract.
+
+                Requirements:
+                - Generate one concrete Java class, never an interface.
+                - Add @RestController and @AllArgsConstructor.
+                - Implement the reviewed I{Name}Client interface exactly.
+                - Do not add @FeignClient to the provider implementation.
+                - Do not add a class-level @RequestMapping; mappings come from the implemented interface.
+                - Inject the reviewed I{Name}Service or the exact service contract named by the plan.
+                - Delegate every interface method to the service and wrap results with R.data/R.status as appropriate.
+                - Keep package, class name, Java version and Swagger/validation generation aligned with the target path and reference profile.
+                - Return the complete source file only.
+                """;
+    }
     private String buildExcelSystemPrompt() {
         return """
                 你是一位BladeX代码生成器。请生成Excel导入导出类。
@@ -681,11 +729,11 @@ public class PromptBuilder {
                 - 包路径: org.springblade.{module}.pojo.vo  (API 模块, 平铺, 不要 ivo/qvo/uvo/evo 子包)
                 - 类名: {Entity}QVO / {Entity}IVO / {Entity}UVO / {Entity}VO / {Entity}EVO
                 - @Data + implements Serializable + serialVersionUID
-                - **字段必须与 Entity 业务字段逐字段同名同类型** (Entity 有 orderNo/customerName/amount, IVO/UVO/VO 也要有同名同类型字段; Entity 用 periodName 就用 periodName 不要改成 name; Entity 是 Date 就用 Date 不要用 LocalDate)。凭空业务字段禁止; 展示衍生字段(字典翻译)用 xxxName 后缀。违反会被自检拦截并强制重生成。
+                - **Field closure**: use the authoritative canonical field inventory from the user prompt. Do not add display aliases or derived fields unless explicitly declared.
                 - IVO (新增): 必填字段加 @NotBlank/@NotNull
                 - UVO (修改): 必须含 id(@NotNull) + Entity 的所有可修改业务字段 (新增能改的字段, 修改也能改)
                 - VO (输出): Long 类型 id 加 @JsonSerialize(using = ToStringSerializer.class)
-                - QVO (查询): Entity 的可筛选字段 + 范围字段(如 minAmount/maxAmount)
+                - QVO may use only canonical fields. Range aliases are forbidden unless explicitly declared in the canonical contract.
                 - import 路径必须与上述包路径一致, 否则引用方编译失败
                 """;
     }

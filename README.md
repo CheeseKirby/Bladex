@@ -1,7 +1,25 @@
 # AI 驱动 BladeX 代码生成工作流
 
-通过可视化设计 + 自然语言需求,自动生成符合 BladeX 4.1.0 规范的完整业务模块(Entity/VO/Controller/Service/Mapper/Wrapper/Excel/Feign + DDL + 模块骨架)。
+通过可视化设计、自然语言需求和参考项目分析，生成符合目标 BladeX 工程约束的业务代码（Entity/VO/Controller/Service/Mapper/Wrapper/Excel/Feign、DDL 与模块骨架）。当前版本已针对 BladeX 2.4.0.RELEASE、Java 8、`javax.*`、Swagger v2 和双模块布局完成真实回放验证。
 
+## 当前阶段
+
+项目已进入**初步可用**阶段，核心链路包括：
+
+- Canonical Plan Contract v2 统一领域契约；
+- 持久化 `reviewId` 与不可绕过的审核凭证；
+- 基于 `deliverableIds` 的契约分片和子方案拆分；
+- Part A → Part B 的哈希、签名和 bundle 一致性校验；
+- Part B 类型闭包、跨文件校验、确定性修复和隔离输出；
+- BFF/Part B 重启后的项目、审核和执行状态恢复；
+- Windows 一键启动、MySQL 初始化和参考项目自动加载。
+
+详细设计和验收边界见：
+
+- [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)
+- [`docs/VERIFICATION.md`](docs/VERIFICATION.md)
+
+> 内置 `SOURCE_GATE` 是依赖无关的源码门禁。完整可编译性仍应在能够访问目标项目私有 Maven 依赖的环境中执行真实 Java/Maven 编译；`PASSED_SOURCE_GATE_DEPENDENCIES_UNVERIFIED` 不等同于完整依赖编译通过。
 ## 架构
 
 三个服务,通过 REST/JSON 互通:
@@ -27,6 +45,8 @@
 │   ├── ai-workflow/          Spring Boot 服务(端口 8111)
 │   │   └── src/main/resources/bladex-docs/   BladeX 规范文档(打进 jar,运行时加载)
 │   └── sql/init.sql          数据库 schema
+├── contracts/               Canonical Plan Contract v2 Schema 与跨语言 fixture
+├── docs/                    架构和验收说明
 ├── pack.ps1                  源机:打交付包
 ├── deploy.ps1                目标机:一键部署
 ├── start.ps1                 启动 3 个服务
@@ -61,6 +81,7 @@
 | 变量 | 必填 | 说明 |
 |---|---|---|
 | `ANTHROPIC_AUTH_TOKEN` | 是 | LLM 鉴权 token |
+| `PLAN_BUNDLE_SIGNING_SECRET` | 自动 | Part A/Part B 共享的 HMAC-SHA256 密钥；缺失时由 `deploy.ps1` 或 `start.ps1` 安全生成 |
 | `ANTHROPIC_BASE_URL` | 是 | LLM 网关(火山方舟 / Claude 官方) |
 | `LLM_MODEL` | 是 | 模型名(glm-5.1 等) |
 | `DB_USERNAME` / `DB_PASSWORD` | 是 | MySQL 凭证 |
@@ -171,5 +192,7 @@ powershell -ExecutionPolicy Bypass -File deploy.ps1
 | `BFF_JSON_LIMIT` | `2mb` | Maximum JSON request body size |
 | `BFF_LLM_RATE_LIMIT` | `30` | Maximum LLM HTTP requests per rate window |
 | `BFF_LLM_RATE_WINDOW_MS` | `60000` | LLM rate-limit window in milliseconds |
+| `BFF_PLAN_STORE_PATH` | `../output/bff-projects.json` | BFF 重启后恢复 Part A 设计状态的原子 JSON 存储 |
 | `AI_WORKFLOW_ADMIN_TOKEN` | (空) | 管理端 token;未配置时写入端点仅接受本地回环 |
-| `TARGET_PROJECT_ROOT` | `../../ai-generated-modules` | 生成产物写入根 + 现有项目索引根(默认隔离区,不再指 blade_hgsjy 定制版) |
+| `TARGET_PROJECT_ROOT` | `../../ai-generated-modules` | 生成产物写入根（默认隔离区） |
+| `REFERENCE_PROJECT_ROOT` | （空） | 可选：启动时自动加载的参考项目绝对路径；不要写入仓库共享配置 |

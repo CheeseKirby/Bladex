@@ -1,0 +1,2 @@
+实体名: SpecialPeriod, 模块名: specialperiod, 包路径: org.springblade.specialperiod, 表名: blade_special_period.
+编写 SpecialPeriodWrapper 转换类(继承 BaseEntityWrapper)，实现 entityVO 方法填充 periodTypeDesc 和 statusDesc，并提供 IVO/UVO 转 Entity 方法。编写 SpecialPeriodController(继承 BladeController, RequestMapping=/specialperiod)，提供 detail, list, save, update, remove 端点及 enable, disable, check-conflict 状态机端点。编写 SpecialPeriodStatController(RequestMapping=/specialperiod/stat)，提供统计聚合查询端点。所有接口使用 R 统一返回结构，使用 @Api 和 @ApiOperation 注解。

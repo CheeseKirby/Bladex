@@ -53,6 +53,9 @@ public class PlanReceiverController {
             @Valid @RequestBody PlanReceiveRequest request,
             HttpServletRequest req) {
         // REAL 模式写真实项目:必须鉴权,且要求 admin token 已配置(即使本地回环也不放行),防止误触写真实项目
+        if (request.getCanonicalContract() == null) {
+            guard.requireAdmin(req);
+        }
         if (WriteTarget.parse(request.getWriteTarget()).isReal()) {
             if (!guard.isTokenConfigured()) {
                 throw new org.springframework.web.server.ResponseStatusException(

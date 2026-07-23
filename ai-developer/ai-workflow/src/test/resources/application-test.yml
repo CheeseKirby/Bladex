@@ -13,5 +13,7 @@ ai-workflow:
   target-project-root: target/ai-workflow-test-target
   output-root: target/ai-workflow-test-output
   part-a-callback-url: http://localhost:3004/api/transmission/status-update
+  bundle-signing-secret: test-bundle-secret
+  legacy-isolated-enabled: true
   admin:
     token: test-token

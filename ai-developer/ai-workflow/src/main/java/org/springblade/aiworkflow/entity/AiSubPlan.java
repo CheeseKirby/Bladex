@@ -47,6 +47,21 @@ public class AiSubPlan implements Serializable {
     @Schema(description = "前置依赖(JSON)")
     private String prerequisitesJson;
 
+    @Schema(description = "Canonical deliverable IDs JSON")
+    private String deliverableIdsJson;
+
+    @Schema(description = "Canonical contract hash")
+    private String contractHash;
+
+    @Schema(description = "Referenced contract element IDs JSON")
+    private String referencedElementIdsJson;
+
+    @Schema(description = "Required business types JSON")
+    private String inputTypesJson;
+
+    @Schema(description = "Provided business types JSON")
+    private String outputTypesJson;
+
     @Schema(description = "状态: QUEUED/EXECUTING/COMPLETED/FAILED")
     private SubPlanStatus status;
 

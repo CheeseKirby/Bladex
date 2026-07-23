@@ -5,6 +5,7 @@ export default defineConfig({
   plugins: [react()],
   server: {
     port: 3005,
+    strictPort: true,
     proxy: {
       '/api': {
         // BFF 端口由 .env 的 VITE_BFF_PORT 控制(默认 3004),与 server/index.ts 的 PORT 保持一致

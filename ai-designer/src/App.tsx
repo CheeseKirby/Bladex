@@ -1,16 +1,22 @@
-import React, { useState, useCallback } from 'react';
+import React, { useState, useCallback, useEffect, useRef } from 'react';
 import { ConfigProvider, Modal, Input, message, App as AntApp } from 'antd';
 import zhCN from 'antd/locale/zh_CN';
 import DndProvider from './components/layout/DndProvider';
 import MainLayout from './components/layout/MainLayout';
 import { usePlanStore } from './store/planStore';
-import { saveProject } from './services/api';
+import { saveProject, loadProject, listProjects } from './services/api';
+import type { Project } from './types/plan';
+import type { ProjectOption } from './components/layout/TopBar';
 
 const App: React.FC = () => {
   const [newProjectModalOpen, setNewProjectModalOpen] = useState(false);
   const [newProjectName, setNewProjectName] = useState('');
+  const [projects, setProjects] = useState<ProjectOption[]>([]);
+  const [projectsLoading, setProjectsLoading] = useState(true);
+  const restoreRequestRef = useRef(0);
 
   const createProject = usePlanStore((s) => s.createProject);
+  const hydrateProject = usePlanStore((s) => s.hydrateProject);
   const project = usePlanStore((s) => s.project);
 
   const handleNewProject = useCallback(() => {
@@ -18,8 +24,56 @@ const App: React.FC = () => {
     setNewProjectModalOpen(true);
   }, []);
 
+  const refreshProjects = useCallback(async (): Promise<ProjectOption[]> => {
+    const response = await listProjects();
+    const items = Array.isArray(response?.data) ? response.data as ProjectOption[] : [];
+    const sorted = [...items].sort((left, right) =>
+      String(right.updatedAt ?? '').localeCompare(String(left.updatedAt ?? '')),
+    );
+    setProjects(sorted);
+    return sorted;
+  }, []);
+
+  const restoreProject = useCallback(async (projectId: string, notify: boolean) => {
+    const requestId = ++restoreRequestRef.current;
+    setProjectsLoading(true);
+    try {
+      const response = await loadProject(projectId);
+      if (requestId !== restoreRequestRef.current) return;
+      const restored = response?.data as Project | undefined;
+      if (!restored?.id || !Array.isArray(restored.modules) || !Array.isArray(restored.subPlans)) {
+        throw new Error('\u9879\u76ee\u6570\u636e\u7ed3\u6784\u65e0\u6548');
+      }
+      hydrateProject(restored);
+      if (notify) message.success(`\u5df2\u6062\u590d\u9879\u76ee "${restored.projectName}"`);
+    } catch (error) {
+      if (requestId === restoreRequestRef.current && notify) {
+        message.error(error instanceof Error ? `\u52a0\u8f7d\u9879\u76ee\u5931\u8d25\uff1a${error.message}` : '\u52a0\u8f7d\u9879\u76ee\u5931\u8d25');
+      }
+    } finally {
+      if (requestId === restoreRequestRef.current) setProjectsLoading(false);
+    }
+  }, [hydrateProject]);
+
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      try {
+        // Load the durable project catalogue, but do not silently make the newest historical project current.
+        // Review/execution state remains recoverable through the selector; a fresh browser session starts neutral.
+        await refreshProjects();
+      } catch {
+        // The page remains usable for a new in-memory project when the BFF catalogue is temporarily unavailable.
+      } finally {
+        if (!cancelled) setProjectsLoading(false);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [refreshProjects]);
+
   const handleCreateProject = useCallback(() => {
     if (!newProjectName.trim()) return;
+    restoreRequestRef.current += 1;
     createProject(newProjectName.trim());
     setNewProjectModalOpen(false);
     message.success(`项目 "${newProjectName}" 已创建`);
@@ -29,11 +83,17 @@ const App: React.FC = () => {
     if (!project) return;
     try {
       await saveProject(project);
+      await refreshProjects();
       message.success('项目已保存');
     } catch {
       message.warning('保存失败（离线模式，数据仅在内存中）');
     }
-  }, [project]);
+  }, [project, refreshProjects]);
+
+  const handleSelectProject = useCallback((projectId: string) => {
+    if (projectId === project?.id) return;
+    void restoreProject(projectId, true);
+  }, [project?.id, restoreProject]);
 
   const handleExport = useCallback(() => {
     if (!project) return;
@@ -64,6 +124,9 @@ const App: React.FC = () => {
             onNewProject={handleNewProject}
             onSave={handleSave}
             onExport={handleExport}
+            projects={projects}
+            projectsLoading={projectsLoading}
+            onSelectProject={handleSelectProject}
           />
         </DndProvider>
 

@@ -28,6 +28,9 @@ public class AiExecutionLog implements Serializable {
     @Schema(description = "主键")
     private Long id;
 
+    @Schema(description = "Associated plan ID for plan-level events")
+    private Long planId;
+
     @Schema(description = "关联子方案ID")
     private Long subPlanId;
 

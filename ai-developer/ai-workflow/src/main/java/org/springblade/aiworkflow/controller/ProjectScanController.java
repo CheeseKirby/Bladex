@@ -7,6 +7,8 @@ import jakarta.servlet.http.HttpServletRequest;
 import lombok.AllArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springblade.aiworkflow.agent.IndexedClassInfo;
+import org.springblade.aiworkflow.agent.ReferenceSearchRequest;
+import org.springblade.aiworkflow.agent.ReferenceSearchResult;
 import org.springblade.aiworkflow.common.ApiResponse;
 import org.springblade.aiworkflow.controller.ConfigController.AdminTokenGuard;
 import org.springblade.aiworkflow.service.IProjectScanService;
@@ -90,6 +92,18 @@ public class ProjectScanController {
             return ApiResponse.fail(404, "参考项目未就绪,请先 POST /api/project/reference 设置路径");
         }
         return ApiResponse.ok(summary);
+    }
+
+    @PostMapping("/reference/search")
+    @Operation(summary = "Search reference-project business context", description = "Returns a bounded intent-scoped snapshot with symbols, relations, anomalies and an access decision")
+    public ApiResponse<ReferenceSearchResult> searchReference(@RequestBody ReferenceSearchRequest request) {
+        if (!referenceProjectIndex.isReady()) {
+            return ApiResponse.fail(404, "Reference project is not ready; configure and scan it first");
+        }
+        ReferenceSearchRequest normalized = request == null
+                ? new ReferenceSearchRequest("", null, null) : request;
+        return ApiResponse.ok(referenceProjectIndex.searchReference(
+                normalized.intent(), normalized.normalizedTopK(), normalized.normalizedRelationDepth()));
     }
 
     @GetMapping("/browse")

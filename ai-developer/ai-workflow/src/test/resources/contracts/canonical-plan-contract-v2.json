@@ -1,0 +1,208 @@
+{
+  "contractVersion": "2.0",
+  "sourceHash": "4a2b5e7b6afd3d2c170c9517ded62d415551e5dde54be078b0ddf5bde6dd31c4",
+  "sourceMode": "STRUCTURED",
+  "referenceSnapshotId": "ref-fixture",
+  "rulesetVersion": "canonical-plan-v2",
+  "identity": {
+    "moduleName": "ticket",
+    "entityName": "Ticket",
+    "tableName": "blade_ticket",
+    "basePackage": "org.springblade.ticket",
+    "apiModuleName": "blade-ticket-api",
+    "serviceModuleName": "blade-ticket",
+    "serviceName": "blade-ticket"
+  },
+  "fields": [
+    {
+      "id": "field.ticket.ticket-no",
+      "entityId": "entity.ticket",
+      "name": "ticketNo",
+      "columnName": "ticket_no",
+      "javaType": "String",
+      "required": true,
+      "role": "PERSISTENT",
+      "evidence": "Unique ticket number"
+    },
+    {
+      "id": "field.ticket.status-name",
+      "entityId": "entity.ticket",
+      "name": "statusName",
+      "columnName": "status_name",
+      "javaType": "String",
+      "required": false,
+      "role": "DERIVED",
+      "evidence": "Display status"
+    }
+  ],
+  "domains": [
+    {
+      "id": "domain.ticket",
+      "name": "ticket",
+      "ownerModuleIds": [
+        "module.ticket"
+      ]
+    }
+  ],
+  "modules": [
+    {
+      "id": "module.ticket",
+      "name": "ticket",
+      "basePackage": "org.springblade.ticket",
+      "kind": "UNKNOWN"
+    }
+  ],
+  "aggregates": [
+    {
+      "id": "aggregate.ticket",
+      "name": "TicketAggregate",
+      "domainId": "domain.ticket",
+      "rootEntityId": "entity.ticket"
+    }
+  ],
+  "entities": [
+    {
+      "id": "entity.ticket",
+      "name": "Ticket",
+      "moduleId": "module.ticket",
+      "aggregateId": "aggregate.ticket",
+      "table": "blade_ticket",
+      "fields": [
+        "ticketNo",
+        "statusName"
+      ],
+      "fieldIds": [
+        "field.ticket.ticket-no",
+        "field.ticket.status-name"
+      ]
+    }
+  ],
+  "states": [
+    {
+      "id": "state.ticket-state",
+      "name": "ticketState",
+      "ownerId": "aggregate.ticket",
+      "values": [
+        "DRAFT",
+        "APPROVED"
+      ],
+      "transitions": [
+        {
+          "from": "DRAFT",
+          "to": "APPROVED",
+          "trigger": "submit"
+        }
+      ]
+    }
+  ],
+  "integrations": [
+    {
+      "id": "integration.api.1",
+      "type": "API",
+      "sourceModule": "ticket",
+      "entrypoint": "TicketController.submit"
+    }
+  ],
+  "deliverables": [
+    {
+      "id": "deliverable.ddl.1",
+      "kind": "DDL",
+      "name": "DDL",
+      "moduleId": "module.ticket",
+      "moduleSide": "IMPL",
+      "action": "CREATE",
+      "providesTypes": [],
+      "requiresTypes": []
+    },
+    {
+      "id": "deliverable.entity.2",
+      "kind": "ENTITY",
+      "name": "Ticket",
+      "moduleId": "module.ticket",
+      "className": "Ticket",
+      "moduleSide": "API",
+      "action": "CREATE",
+      "providesTypes": [
+        "Ticket"
+      ],
+      "requiresTypes": []
+    },
+    {
+      "id": "deliverable.vo.3",
+      "kind": "VO",
+      "name": "TicketVO",
+      "moduleId": "module.ticket",
+      "className": "TicketVO",
+      "moduleSide": "API",
+      "action": "CREATE",
+      "providesTypes": [
+        "TicketVO",
+        "TicketQVO",
+        "TicketIVO",
+        "TicketUVO",
+        "TicketEVO"
+      ],
+      "requiresTypes": [
+        "Ticket"
+      ]
+    },
+    {
+      "id": "deliverable.mapper.4",
+      "kind": "MAPPER",
+      "name": "TicketMapper",
+      "moduleId": "module.ticket",
+      "className": "TicketMapper",
+      "moduleSide": "IMPL",
+      "action": "CREATE",
+      "providesTypes": [
+        "TicketMapper"
+      ],
+      "requiresTypes": [
+        "Ticket",
+        "TicketVO",
+        "TicketQVO"
+      ]
+    },
+    {
+      "id": "deliverable.service.5",
+      "kind": "SERVICE",
+      "name": "ITicketService",
+      "moduleId": "module.ticket",
+      "className": "ITicketService",
+      "moduleSide": "IMPL",
+      "action": "CREATE",
+      "providesTypes": [
+        "ITicketService",
+        "TicketServiceImpl"
+      ],
+      "requiresTypes": [
+        "Ticket",
+        "TicketVO",
+        "TicketQVO",
+        "TicketIVO",
+        "TicketUVO"
+      ]
+    },
+    {
+      "id": "deliverable.controller.6",
+      "kind": "CONTROLLER",
+      "name": "TicketController",
+      "moduleId": "module.ticket",
+      "className": "TicketController",
+      "moduleSide": "IMPL",
+      "action": "CREATE",
+      "providesTypes": [
+        "TicketController"
+      ],
+      "requiresTypes": [
+        "ITicketService",
+        "TicketVO",
+        "TicketQVO",
+        "TicketIVO",
+        "TicketUVO"
+      ]
+    }
+  ],
+  "referenceBindings": [],
+  "architectureDecisions": []
+}

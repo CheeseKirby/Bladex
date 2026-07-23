@@ -174,12 +174,21 @@ const ExecutionTimelinePanel: React.FC = () => {
               <Tag color="gold">{timeline.qualityWarningCount} WARN</Tag>
             )}
             <Tag color={timeline.compileVerificationStatus === 'PASSED' ? 'green'
-              : timeline.compileVerificationStatus === 'FAILED' ? 'red'
-                : timeline.compileVerificationStatus === 'SKIPPED_DEPENDENCIES_UNAVAILABLE' ? 'gold' : 'default'}>
+              : timeline.compileVerificationStatus === 'PASSED_SOURCE_GATE_DEPENDENCIES_UNVERIFIED' ? 'blue'
+                : timeline.compileVerificationStatus === 'FAILED'
+                  || timeline.compileVerificationStatus === 'FAILED_SOURCE_GATE'
+                  || timeline.compileVerificationStatus === 'NOT_RUN_PLAN_COMPILATION_FAILED' ? 'red'
+                    : timeline.compileVerificationStatus === 'SKIPPED_DEPENDENCIES_UNAVAILABLE' ? 'gold' : 'default'}>
               {timeline.compileVerificationStatus === 'PASSED' ? '\u7f16\u8bd1\u5df2\u9a8c\u8bc1'
-                : timeline.compileVerificationStatus === 'FAILED' ? '\u7f16\u8bd1\u5931\u8d25'
-                  : timeline.compileVerificationStatus === 'SKIPPED_DEPENDENCIES_UNAVAILABLE'
-                    ? '\u7f16\u8bd1\u672a\u9a8c\u8bc1\uff08\u4f9d\u8d56\u4e0d\u53ef\u7528\uff09' : '\u7f16\u8bd1\u5c1a\u672a\u6267\u884c'}
+                : timeline.compileVerificationStatus === 'PASSED_SOURCE_GATE_DEPENDENCIES_UNVERIFIED'
+                  ? '\u6e90\u7801\u95e8\u7981\u901a\u8fc7\uff08\u4f9d\u8d56\u672a\u7f16\u8bd1\uff09'
+                  : timeline.compileVerificationStatus === 'FAILED_SOURCE_GATE' ? '\u6e90\u7801\u95e8\u7981\u5931\u8d25'
+                    : timeline.compileVerificationStatus === 'FAILED' ? '\u7f16\u8bd1\u5931\u8d25'
+                      : timeline.compileVerificationStatus === 'NOT_RUN_PLAN_COMPILATION_FAILED'
+                        ? '\u8ba1\u5212\u9884\u68c0\u5931\u8d25\uff0c\u672a\u751f\u6210'
+                        : timeline.compileVerificationStatus === 'SKIPPED_DEPENDENCIES_UNAVAILABLE'
+                          ? '\u7f16\u8bd1\u672a\u9a8c\u8bc1\uff08\u4f9d\u8d56\u4e0d\u53ef\u7528\uff09'
+                          : '\u7f16\u8bd1\u5c1a\u672a\u6267\u884c'}
             </Tag>
           </Space>
           {timeline.outputDirectory && (

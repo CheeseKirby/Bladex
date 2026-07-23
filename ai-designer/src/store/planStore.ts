@@ -28,7 +28,10 @@ interface PlanStore {
 
   // Actions
   createProject: (name: string) => void;
+  /** 从 BFF 持久化快照恢复项目与可推导的运行状态。 */
+  hydrateProject: (project: Project) => void;
   setProjectStatus: (status: WorkflowState) => void;
+  setRawRequirements: (requirements: string) => void;
   addModuleToCanvas: (module: DraggedModule) => void;
   removeModuleFromCanvas: (id: string) => void;
   updateModuleConfig: (id: string, config: Partial<DraggedModule['config']>) => void;
@@ -38,7 +41,9 @@ interface PlanStore {
   /** 删除子方案之间的依赖边 (source → target),也支持 ReactFlow 的 edge id 形式 "src->tgt" */
   removeSubPlanDependency: (sourceId: string, targetId: string) => void;
   updateSubPlanStatus: (id: string, status: SubPlanStatus) => void;
-  setSubPlanReview: (id: string, reviewedContent: string, changeLog?: ChangeLogEntry[]) => void;
+  setSubPlanReview: (id: string, reviewedContent: string, changeLog?: ChangeLogEntry[], metadata?: { reviewId?: string; contractHash?: string; reviewStatus?: import('../types/plan').ReviewFinalStatus; reviewAudit?: import('../types/plan').ReviewAuditEvidence }) => void;
+  setSubPlanReviewDraft: (id: string, reviewedContent: string, changeLog?: ChangeLogEntry[], contractHash?: string) => void;
+  clearSubPlanReview: (id: string) => void;
   setStreamingContent: (content: string) => void;
   appendStreamingChunk: (chunk: string) => void;
   setIsStreaming: (streaming: boolean) => void;
@@ -57,6 +62,22 @@ interface PlanStore {
 
 let idCounter = 0;
 const genId = () => `node_${Date.now()}_${++idCounter}`;
+
+function derivePersistedPartBOverallStatus(
+  projectStatus: WorkflowState,
+  statuses: Record<string, PartBSubPlanStatus>,
+  receptionId: string | null,
+): string | null {
+  if (!receptionId) return null;
+  const values = Object.values(statuses);
+  if (values.length === 0) return projectStatus === 'TRANSMITTED' ? 'RECEIVED' : null;
+  if (values.every((status) => status === 'COMPLETED')) return 'COMPLETED';
+  if (values.some((status) => status === 'FAILED')) return 'FAILED';
+  if (values.some((status) => status === 'EXECUTING')) return 'EXECUTING';
+  if (values.some((status) => status === 'QUEUED')) return 'RECEIVED';
+  if (values.some((status) => status === 'COMPLETED_WITH_ERRORS')) return 'COMPLETED_WITH_ERRORS';
+  return projectStatus === 'TRANSMITTED' ? 'RECEIVED' : null;
+}
 
 export const usePlanStore = create<PlanStore>((set) => ({
   project: null,
@@ -91,9 +112,39 @@ export const usePlanStore = create<PlanStore>((set) => ({
       executionTimeline: null,
     }),
 
+  hydrateProject: (project: Project) =>
+    set(() => {
+      const restored = structuredClone(project);
+      const receptionId = restored.subPlans.find((subPlan) => subPlan.transmissionRef)?.transmissionRef ?? null;
+      const partBStatuses = Object.fromEntries(
+        restored.subPlans
+          .filter((subPlan) => subPlan.partBStatus)
+          .map((subPlan) => [subPlan.id, subPlan.partBStatus!]),
+      ) as Record<string, PartBSubPlanStatus>;
+      return {
+        project: restored,
+        canvasModules: [...restored.modules],
+        streamingContent: '',
+        isStreaming: false,
+        reviewResult: restored.masterPlan?.reviewStatus
+          ? { passes: restored.masterPlan.reviewStatus === 'PASSED' || restored.masterPlan.reviewStatus === 'PASSED_WITH_WARNINGS', issues: [] }
+          : null,
+        receptionId,
+        partBStatuses,
+        partBOverallStatus: derivePersistedPartBOverallStatus(restored.status, partBStatuses, receptionId),
+        generatedFiles: [],
+        executionTimeline: null,
+      };
+    }),
+
   setProjectStatus: (status: WorkflowState) =>
     set((state) => ({
       project: state.project ? { ...state.project, status } : null,
+    })),
+
+  setRawRequirements: (requirements: string) =>
+    set((state) => ({
+      project: state.project ? { ...state.project, rawRequirements: requirements } : null,
     })),
 
   addModuleToCanvas: (module: DraggedModule) =>
@@ -143,14 +194,18 @@ export const usePlanStore = create<PlanStore>((set) => ({
       const remaining = state.project.subPlans
         .filter((sp) => sp.id !== id)
         // 同步剔除依赖中对被删项的引用,避免画布出现孤儿连线
-        .map((sp) => ({
-          ...sp,
-          prerequisites: sp.prerequisites.filter((p) => p !== id),
-        }));
+        .map((sp) => {
+          const prerequisites = sp.prerequisites.filter((p) => p !== id);
+          if (prerequisites.length === sp.prerequisites.length) return sp;
+          return {
+            ...sp, prerequisites, status: 'GENERATED' as const,
+            reviewId: undefined, reviewStatus: undefined, reviewAudit: undefined,
+          };
+        });
       // 同时清理对应的 Part B 状态
       const { [id]: _removed, ...remainingStatuses } = state.partBStatuses;
       return {
-        project: { ...state.project, subPlans: remaining },
+        project: { ...state.project, subPlans: remaining, status: 'SUBPLANS_GENERATED' },
         partBStatuses: remainingStatuses,
       };
     }),
@@ -160,10 +215,14 @@ export const usePlanStore = create<PlanStore>((set) => ({
       if (!state.project) return state;
       const updated = state.project.subPlans.map((sp) =>
         sp.id === targetId
-          ? { ...sp, prerequisites: sp.prerequisites.filter((p) => p !== sourceId) }
+          ? {
+              ...sp, prerequisites: sp.prerequisites.filter((p) => p !== sourceId),
+              status: 'GENERATED' as const, reviewId: undefined,
+              reviewStatus: undefined, reviewAudit: undefined,
+            }
           : sp
       );
-      return { project: { ...state.project, subPlans: updated } };
+      return { project: { ...state.project, subPlans: updated, status: 'SUBPLANS_GENERATED' } };
     }),
 
   updateSubPlanStatus: (id: string, status: SubPlanStatus) =>
@@ -178,12 +237,12 @@ export const usePlanStore = create<PlanStore>((set) => ({
         : null,
     })),
 
-  setSubPlanReview: (id: string, reviewedContent: string, changeLog: ChangeLogEntry[] = []) =>
+  setSubPlanReview: (id: string, reviewedContent: string, changeLog: ChangeLogEntry[] = [], metadata = {}) =>
     set((state) => {
       if (!state.project || !state.project.subPlans.some((sp) => sp.id === id)) return state;
       const subPlans = state.project.subPlans.map((sp) =>
         sp.id === id
-          ? { ...sp, reviewedContent, reviewChangeLog: changeLog, status: 'REVIEWED' as const }
+          ? { ...sp, reviewedContent, reviewChangeLog: changeLog, ...metadata, status: 'REVIEWED' as const }
           : sp
       );
       const allReviewed = subPlans.length > 0 && subPlans.every((sp) =>
@@ -196,6 +255,35 @@ export const usePlanStore = create<PlanStore>((set) => ({
           status: allReviewed ? 'SUBPLANS_REVIEWED' : 'SUBPLANS_GENERATED',
         },
       };
+    }),
+
+  setSubPlanReviewDraft: (id: string, reviewedContent: string, changeLog: ChangeLogEntry[] = [], contractHash?: string) =>
+    set((state) => {
+      if (!state.project) return state;
+      const subPlans = state.project.subPlans.map((sp) => sp.id === id ? {
+        ...sp,
+        reviewedContent,
+        reviewChangeLog: changeLog,
+        reviewId: undefined,
+        contractHash: contractHash ?? sp.contractHash,
+        reviewStatus: undefined,
+        reviewAudit: undefined,
+        status: 'GENERATED' as const,
+      } : sp);
+      return { project: { ...state.project, subPlans, status: 'SUBPLANS_GENERATED' } };
+    }),
+
+  clearSubPlanReview: (id: string) =>
+    set((state) => {
+      if (!state.project) return state;
+      const subPlans = state.project.subPlans.map((sp) => sp.id === id ? {
+        ...sp,
+        reviewId: undefined,
+        reviewStatus: undefined,
+        reviewAudit: undefined,
+        status: 'GENERATED' as const,
+      } : sp);
+      return { project: { ...state.project, subPlans, status: 'SUBPLANS_GENERATED' } };
     }),
 
   setStreamingContent: (content: string) => set({ streamingContent: content }),
