@@ -17,6 +17,7 @@ const App: React.FC = () => {
 
   const createProject = usePlanStore((s) => s.createProject);
   const hydrateProject = usePlanStore((s) => s.hydrateProject);
+  const getPersistableProject = usePlanStore((s) => s.getPersistableProject);
   const project = usePlanStore((s) => s.project);
 
   const handleNewProject = useCallback(() => {
@@ -80,15 +81,16 @@ const App: React.FC = () => {
   }, [newProjectName, createProject]);
 
   const handleSave = useCallback(async () => {
-    if (!project) return;
+    const snapshot = getPersistableProject();
+    if (!snapshot) return;
     try {
-      await saveProject(project);
+      await saveProject(snapshot);
       await refreshProjects();
       message.success('项目已保存');
     } catch {
       message.warning('保存失败（离线模式，数据仅在内存中）');
     }
-  }, [project, refreshProjects]);
+  }, [getPersistableProject, refreshProjects]);
 
   const handleSelectProject = useCallback((projectId: string) => {
     if (projectId === project?.id) return;
@@ -96,17 +98,18 @@ const App: React.FC = () => {
   }, [project?.id, restoreProject]);
 
   const handleExport = useCallback(() => {
-    if (!project) return;
-    const json = JSON.stringify(project, null, 2);
+    const snapshot = getPersistableProject();
+    if (!snapshot) return;
+    const json = JSON.stringify(snapshot, null, 2);
     const blob = new Blob([json], { type: 'application/json' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = `${project.projectName}_${new Date().toISOString().slice(0, 10)}.json`;
+    a.download = `${snapshot.projectName}_${new Date().toISOString().slice(0, 10)}.json`;
     a.click();
     URL.revokeObjectURL(url);
     message.success('项目已导出');
-  }, [project]);
+  }, [getPersistableProject]);
 
   return (
     <ConfigProvider

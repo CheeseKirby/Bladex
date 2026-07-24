@@ -1,3 +1,5 @@
+import type { ExecutionTimeline, GeneratedFileSummary } from './api';
+
 // === 方案工作流状态 ===
 export type WorkflowState =
   | 'DRAFT'
@@ -217,6 +219,14 @@ export interface ReviewLogEntry {
 }
 
 // === 项目 ===
+export interface PartBExecutionSnapshot {
+  receptionId: string;
+  overallStatus: string | null;
+  subPlanStatuses: Record<string, PartBSubPlanStatus>;
+  generatedFiles: GeneratedFileSummary[];
+  executionTimeline: ExecutionTimeline | null;
+}
+
 export interface Project {
   id: string;
   projectName: string;
@@ -226,6 +236,10 @@ export interface Project {
   status: WorkflowState;
   masterPlan?: MasterPlan;
   subPlans: SubPlan[];
+  partBExecution?: PartBExecutionSnapshot;
+  /** Legacy project fields retained for persisted snapshot compatibility. */
+  transmissionRef?: string;
+  partBOverallStatus?: string;
 }
 
 // === 流式消息 ===

@@ -30,6 +30,8 @@ interface PlanStore {
   createProject: (name: string) => void;
   /** 从 BFF 持久化快照恢复项目与可推导的运行状态。 */
   hydrateProject: (project: Project) => void;
+  /** Merge design state and Part B runtime state for save/export. */
+  getPersistableProject: () => Project | null;
   setProjectStatus: (status: WorkflowState) => void;
   setRawRequirements: (requirements: string) => void;
   addModuleToCanvas: (module: DraggedModule) => void;
@@ -79,7 +81,51 @@ function derivePersistedPartBOverallStatus(
   return projectStatus === 'TRANSMITTED' ? 'RECEIVED' : null;
 }
 
-export const usePlanStore = create<PlanStore>((set) => ({
+function createPersistableProjectSnapshot(state: Pick<PlanStore,
+  'project' | 'receptionId' | 'partBStatuses' | 'partBOverallStatus' | 'generatedFiles' | 'executionTimeline'
+>): Project | null {
+  if (!state.project) return null;
+  const snapshot = structuredClone(state.project);
+  const receptionId = state.receptionId
+    ?? snapshot.partBExecution?.receptionId
+    ?? snapshot.transmissionRef
+    ?? snapshot.subPlans.find((subPlan) => subPlan.transmissionRef)?.transmissionRef
+    ?? null;
+  if (!receptionId) return snapshot;
+
+  const persistedSubPlanStatuses = Object.fromEntries(
+    snapshot.subPlans
+      .filter((subPlan) => subPlan.partBStatus)
+      .map((subPlan) => [subPlan.id, subPlan.partBStatus!]),
+  ) as Record<string, PartBSubPlanStatus>;
+  const subPlanStatuses = {
+    ...persistedSubPlanStatuses,
+    ...(snapshot.partBExecution?.subPlanStatuses ?? {}),
+    ...state.partBStatuses,
+  };
+  const overallStatus = state.partBOverallStatus
+    ?? snapshot.partBExecution?.overallStatus
+    ?? snapshot.partBOverallStatus
+    ?? derivePersistedPartBOverallStatus(snapshot.status, subPlanStatuses, receptionId);
+
+  snapshot.transmissionRef = receptionId;
+  if (overallStatus) snapshot.partBOverallStatus = overallStatus;
+  snapshot.subPlans = snapshot.subPlans.map((subPlan) => ({
+    ...subPlan,
+    transmissionRef: receptionId,
+    partBStatus: subPlanStatuses[subPlan.id] ?? subPlan.partBStatus,
+  }));
+  snapshot.partBExecution = {
+    receptionId,
+    overallStatus,
+    subPlanStatuses,
+    generatedFiles: structuredClone(state.generatedFiles),
+    executionTimeline: state.executionTimeline ? structuredClone(state.executionTimeline) : null,
+  };
+  return snapshot;
+}
+
+export const usePlanStore = create<PlanStore>((set, get) => ({
   project: null,
   canvasModules: [],
   streamingContent: '',
@@ -115,12 +161,24 @@ export const usePlanStore = create<PlanStore>((set) => ({
   hydrateProject: (project: Project) =>
     set(() => {
       const restored = structuredClone(project);
-      const receptionId = restored.subPlans.find((subPlan) => subPlan.transmissionRef)?.transmissionRef ?? null;
-      const partBStatuses = Object.fromEntries(
+      const persistedExecution = restored.partBExecution;
+      const receptionId = persistedExecution?.receptionId
+        ?? restored.transmissionRef
+        ?? restored.subPlans.find((subPlan) => subPlan.transmissionRef)?.transmissionRef
+        ?? null;
+      const subPlanStatuses = Object.fromEntries(
         restored.subPlans
           .filter((subPlan) => subPlan.partBStatus)
           .map((subPlan) => [subPlan.id, subPlan.partBStatus!]),
       ) as Record<string, PartBSubPlanStatus>;
+      const partBStatuses = {
+        ...subPlanStatuses,
+        ...(persistedExecution?.subPlanStatuses ?? {}),
+      };
+      const persistedTimeline = receptionId
+        && persistedExecution?.executionTimeline?.receptionId === receptionId
+        ? persistedExecution.executionTimeline
+        : null;
       return {
         project: restored,
         canvasModules: [...restored.modules],
@@ -131,11 +189,15 @@ export const usePlanStore = create<PlanStore>((set) => ({
           : null,
         receptionId,
         partBStatuses,
-        partBOverallStatus: derivePersistedPartBOverallStatus(restored.status, partBStatuses, receptionId),
-        generatedFiles: [],
-        executionTimeline: null,
+        partBOverallStatus: persistedExecution?.overallStatus
+          ?? restored.partBOverallStatus
+          ?? derivePersistedPartBOverallStatus(restored.status, partBStatuses, receptionId),
+        generatedFiles: receptionId ? structuredClone(persistedExecution?.generatedFiles ?? []) : [],
+        executionTimeline: persistedTimeline ? structuredClone(persistedTimeline) : null,
       };
     }),
+
+  getPersistableProject: () => createPersistableProjectSnapshot(get()),
 
   setProjectStatus: (status: WorkflowState) =>
     set((state) => ({

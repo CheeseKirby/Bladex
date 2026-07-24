@@ -213,7 +213,7 @@ export function upsertPlanContractBlock(planContent: string, contract: PlanContr
 }
 
 export function stripPlanContractBlock(planContent: string): string {
-  return planContent
+  return normalizeLineEndings(planContent)
     .replace(/\n*## Machine-readable plan contract\s*/gi, '\n')
     .replace(CONTRACT_BLOCK_GLOBAL, '')
     .trimEnd();
@@ -1384,8 +1384,13 @@ function toId(value: string): string {
   return value.replace(/([a-z0-9])([A-Z])/g, '$1-$2').replace(/[^A-Za-z0-9]+/g, '-').toLowerCase().replace(/^-|-$/g, '');
 }
 
+function normalizeLineEndings(value: string): string {
+  return value.replace(/\r\n?/g, '\n');
+}
+
 function hashText(value: string): string {
-  return createHash('sha256').update(value, 'utf8').digest('hex');
+  // Canonical hashes must not depend on the checkout or caller platform.
+  return createHash('sha256').update(normalizeLineEndings(value), 'utf8').digest('hex');
 }
 
 

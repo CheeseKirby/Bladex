@@ -29,7 +29,10 @@ class CanonicalPlanContractV2Test {
         try (InputStream input = getClass().getResourceAsStream("/contracts/multiple-plan-contract-blocks.sha256")) {
             expected = new String(input.readAllBytes(), StandardCharsets.UTF_8).trim();
         }
-        assertEquals(expected, CanonicalJsonHasher.contentHash(content));
+        String lfContent = content.replace("\r\n", "\n").replace('\r', '\n');
+        String crlfContent = lfContent.replace("\n", "\r\n");
+        assertEquals(expected, CanonicalJsonHasher.contentHash(lfContent));
+        assertEquals(expected, CanonicalJsonHasher.contentHash(crlfContent));
     }
 
     @Test

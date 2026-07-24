@@ -344,6 +344,56 @@ describe('hydrateProject', () => {
   });
 });
 
+describe('Part B project persistence snapshot', () => {
+  beforeEach(() => resetStore());
+
+  test('save snapshot retains Part B identity, statuses, files and timeline for hydration', () => {
+    seedProjectWithSubPlans([makeSubPlan({ id: 'sp-persisted', status: 'TRANSMITTED' })]);
+    usePlanStore.getState().setReceptionId('rec-persisted');
+    usePlanStore.getState().setPartBStatus('sp-persisted', 'COMPLETED');
+    usePlanStore.getState().setPartBOverallStatus('COMPLETED');
+    usePlanStore.getState().setGeneratedFiles([{
+      id: 1, subPlanId: 2, partASubPlanId: 'sp-persisted', fileName: 'Demo.java', filePath: '/Demo.java', action: 'CREATED',
+    }]);
+    usePlanStore.getState().setExecutionTimeline({
+      receptionId: 'rec-persisted', overallStatus: 'COMPLETED', totalSubPlans: 1,
+      completedSubPlans: 1, failedSubPlans: 0, subPlanTimelines: [],
+    });
+
+    const snapshot = usePlanStore.getState().getPersistableProject();
+    assert.ok(snapshot);
+    assert.equal(snapshot.transmissionRef, 'rec-persisted');
+    assert.equal(snapshot.partBOverallStatus, 'COMPLETED');
+    assert.equal(snapshot.subPlans[0].transmissionRef, 'rec-persisted');
+    assert.equal(snapshot.subPlans[0].partBStatus, 'COMPLETED');
+    assert.equal(snapshot.partBExecution?.receptionId, 'rec-persisted');
+    assert.equal(snapshot.partBExecution?.subPlanStatuses['sp-persisted'], 'COMPLETED');
+    assert.equal(snapshot.partBExecution?.generatedFiles.length, 1);
+    assert.equal(snapshot.partBExecution?.executionTimeline?.overallStatus, 'COMPLETED');
+
+    resetStore();
+    usePlanStore.getState().hydrateProject(snapshot);
+
+    const restored = usePlanStore.getState();
+    assert.equal(restored.receptionId, 'rec-persisted');
+    assert.equal(restored.partBOverallStatus, 'COMPLETED');
+    assert.equal(restored.partBStatuses['sp-persisted'], 'COMPLETED');
+    assert.equal(restored.generatedFiles[0]?.fileName, 'Demo.java');
+    assert.equal(restored.executionTimeline?.receptionId, 'rec-persisted');
+  });
+
+  test('hydrates legacy project-level Part B fields when no v2 snapshot exists', () => {
+    usePlanStore.getState().hydrateProject({
+      id: 'legacy-project', projectName: 'legacy', modules: [], status: 'TRANSMITTED', subPlans: [],
+      transmissionRef: 'rec-legacy', partBOverallStatus: 'COMPLETED',
+    });
+
+    const restored = usePlanStore.getState();
+    assert.equal(restored.receptionId, 'rec-legacy');
+    assert.equal(restored.partBOverallStatus, 'COMPLETED');
+  });
+});
+
 
 describe('resetProject', () => {
   beforeEach(() => resetStore());

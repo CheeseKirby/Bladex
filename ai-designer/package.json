@@ -1,7 +1,7 @@
 {
   "name": "ai-designer",
   "private": true,
-  "version": "1.0.0",
+  "version": "0.1.0",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -9,9 +9,10 @@
     "preview": "vite preview",
     "server": "tsx server/index.ts",
     "typecheck": "tsc --noEmit && tsc -p tsconfig.server.json --noEmit",
-    "test:server": "tsx --test \"server/*.test.ts\" \"server/**/*.test.ts\"",
-    "test:client": "tsx --test \"src/*.test.ts\" \"src/**/*.test.ts\"",
-    "test": "npm run test:server && npm run test:client"
+    "test:server": "node scripts/run-tests.mjs server",
+    "test:client": "node scripts/run-tests.mjs src",
+    "test": "npm run test:server && npm run test:client",
+    "audit": "npm audit --package-lock-only --audit-level=high"
   },
   "dependencies": {
     "@ant-design/icons": "^5.3.0",
