@@ -3,7 +3,6 @@ package org.springblade.aiworkflow.agent;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.extern.slf4j.Slf4j;
 import org.springblade.aiworkflow.entity.AiPlan;
-import org.springblade.aiworkflow.enums.WriteTarget;
 
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
@@ -28,8 +27,7 @@ public final class GenerationReportWriter {
     public static void write(AiPlan plan, List<GeneratedFile> files, List<ExpectedDeliverable> expected,
                              List<AtomicTask> tasks, List<GeneratedProjectValidator.Issue> issues,
                              List<CrossFileValidator.ContractIssue> contractIssues, ObjectMapper objectMapper) {
-        if (plan == null || WriteTarget.parse(plan.getWriteTarget()).isReal()
-                || plan.getOutputDirectory() == null || plan.getOutputDirectory().isBlank()) return;
+        if (plan == null || plan.getOutputDirectory() == null || plan.getOutputDirectory().isBlank()) return;
         try {
             Path root = Path.of(plan.getOutputDirectory()).toAbsolutePath().normalize();
             Files.createDirectories(root);

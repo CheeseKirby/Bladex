@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { test } from 'node:test';
+import { DEFAULT_REFERENCE_PROFILE } from '../services/referenceSummary';
 import type { ReferenceReviewEvidence } from '../services/referenceSummary';
 import {
   applyPlanRepairOperations,
@@ -16,6 +17,7 @@ const riskyReference: ReferenceReviewEvidence = {
   adaptationSummary: 'profile',
   search: {
     snapshotId: 'ref-current',
+    profile: DEFAULT_REFERENCE_PROFILE,
     intent: 'special period hot work approval',
     symbols: [
       {
@@ -103,6 +105,8 @@ test('closed contract with explicit binding, owner and integration clears owners
     contractVersion: '2.0',
     sourceHash: 'will-be-normalized',
     sourceMode: 'STRUCTURED',
+    referenceSnapshotId: 'ref-current',
+    referenceProfile: DEFAULT_REFERENCE_PROFILE,
     rulesetVersion: 'canonical-plan-v2',
     identity: { moduleName: 'safetycontrol', entityName: 'RiskDateExtension', tableName: 'sk_risk_dates', basePackage: 'org.springblade.safetycontrol', apiModuleName: 'blade-safety-control-api', serviceModuleName: 'blade-safety-control', serviceName: 'blade-safety-control' },
     fields: [
@@ -184,6 +188,7 @@ test('a NEW reference decision cannot force a standalone plan to invent an integ
     adaptationSummary: 'profile',
     search: {
       snapshotId: 'ref-new', intent: 'visitor appointment', symbols: [], relations: [], anomalies: [],
+      profile: DEFAULT_REFERENCE_PROFILE,
       decisions: [{ capability: 'visitor appointment', decision: 'NEW', targetModule: 'safetycontrol', confidence: 0.35,
         reason: 'No ownership match', evidenceSymbols: [] }],
     },

@@ -51,8 +51,7 @@ export interface PlanTransmitRequest {
   bundleHash?: string;
   /** HMAC-SHA256 issued by trusted Part A for the reviewed bundle. */
   bundleSignature?: string;
-  /** 写入目标: 'ISOLATED'(默认,隔离区) | 'REAL'(真实 blade_hgsjy,需鉴权+查重)。可选,不传按 ISOLATED */
-  writeTarget?: 'ISOLATED' | 'REAL';
+  writeTarget?: 'ISOLATED';
 }
 
 /** Part B 响应 */

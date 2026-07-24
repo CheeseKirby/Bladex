@@ -5,7 +5,7 @@ import lombok.Data;
 /**
  * 参考项目状态 VO — 阶段2增强。
  *
- * <p>用户通过前端指定一个 BladeX 框架项目作为"风格参考源",REAL 模式生成代码时
+ * <p>The selected BladeX project is a read-only source of style and framework conventions.
  * 从该项目的同类代码提取结构化摘要注入 prompt,让生成的新模块贴合现有风格。
  * 参考项目只读,不写入(写入目标仍是 blade_hgsjy)。
  */

@@ -7,12 +7,42 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class ReferenceFrameworkProfileTest {
 
     @TempDir
     Path root;
+
+    @Test
+    void defaultsToBladeX410JakartaAndOpenApiV3() {
+        ReferenceFrameworkProfile profile = ReferenceFrameworkProfile.defaults();
+        assertEquals("4.1.0.RELEASE", profile.bladeXVersion());
+        assertEquals("17", profile.javaVersion());
+        assertEquals("jakarta", profile.validationNamespace());
+        assertEquals("v3", profile.swaggerGeneration());
+    }
+
+    @Test
+    void snapshotLeaseBlocksReferenceSwitchAndRejectsDrift() throws Exception {
+        ReferenceProjectIndex index = new ReferenceProjectIndex();
+        ReferenceProjectIndex.SnapshotLease lease = index.acquireSnapshot(null, false);
+        java.util.concurrent.ExecutorService executor = java.util.concurrent.Executors.newSingleThreadExecutor();
+        try {
+            java.util.concurrent.Future<?> change = executor.submit(() -> index.setPath(root.toString()));
+            Thread.sleep(100);
+            assertFalse(change.isDone());
+            lease.close();
+            change.get(2, java.util.concurrent.TimeUnit.SECONDS);
+            index.scan(true);
+            assertThrows(IllegalStateException.class, () -> index.acquireSnapshot("ref-stale", true));
+        } finally {
+            lease.close();
+            executor.shutdownNow();
+        }
+    }
 
     @Test
     void detectsVersionPackagesAndApplicationStyleFromReferenceSource() throws Exception {

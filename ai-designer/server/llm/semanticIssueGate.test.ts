@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { test } from 'node:test';
+import { DEFAULT_REFERENCE_PROFILE } from '../services/referenceSummary';
 import type { PlanContract } from './planContract';
 import { gateSemanticIssues, normalizeRule } from './semanticIssueGate';
 import type { ReferenceReviewEvidence } from '../services/referenceSummary';
@@ -60,6 +61,7 @@ test('a reference architecture decision can keep a manual decision blocker', () 
     searchDurationMs: 1,
     search: {
       snapshotId: 'ref-1234567890', intent: 'ticket', symbols: [], relations: [], anomalies: [],
+      profile: DEFAULT_REFERENCE_PROFILE,
       decisions: [{ capability: 'ticket', decision: 'ARCHITECTURE_DECISION_REQUIRED', confidence: 0.9, reason: 'conflict', evidenceSymbols: [] }],
     },
   };

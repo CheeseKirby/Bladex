@@ -65,7 +65,7 @@ public final class CanonicalJsonHasher {
     public static String bundleHash(PlanReceiveRequest request, String contractHash) {
         Map<String, Object> material = new LinkedHashMap<>();
         material.put("projectId", request.getProjectId());
-        material.put("writeTarget", org.springblade.aiworkflow.enums.WriteTarget.parse(request.getWriteTarget()).getCode());
+        material.put("writeTarget", "ISOLATED");
         PlanReceiveRequest.GenerationIdentityVO identity = request.getGenerationIdentity();
         Map<String, Object> generationIdentity = new LinkedHashMap<>();
         generationIdentity.put("moduleName", identity == null ? null : identity.getModuleName());

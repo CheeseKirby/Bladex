@@ -6,7 +6,7 @@
 [![Node.js](https://img.shields.io/badge/Node.js-20.19.x-339933?logo=node.js&logoColor=white)](#支持矩阵)
 [![JDK](https://img.shields.io/badge/JDK-17-007396?logo=openjdk&logoColor=white)](#支持矩阵)
 
-通过可视化设计、自然语言需求和参考项目分析，生成符合目标 BladeX 工程约束的业务代码（Entity/VO/Controller/Service/Mapper/Wrapper/Excel/Feign、DDL 与模块骨架）。当前版本已针对 BladeX 2.4.0.RELEASE、Java 8、`javax.*`、Swagger v2 和双模块布局完成真实回放验证。
+通过可视化设计、自然语言需求和参考项目分析，生成符合目标 BladeX 工程约束的业务代码（Entity/VO/Controller/Service/Mapper/Wrapper/Excel/Feign、DDL 与模块骨架）。当前默认目标基线为 BladeX 4.1.0.RELEASE、Java 17、`jakarta.*`、OpenAPI v3 和 API + Service 双模块布局；参考项目检测结果会在评审时写入契约。
 
 > 当前版本：`0.1.0`。生成器运行环境与生成代码目标环境不同，详见下方支持矩阵。
 
@@ -27,10 +27,10 @@
 
 | 组件 | 支持范围 |
 |---|---|
-| BladeX | 2.4.0.RELEASE |
-| Java | 8 |
-| Java EE API | `javax.*` |
-| Swagger | v2 |
+| BladeX | 4.1.0.RELEASE |
+| Java | 17 |
+| Jakarta EE API | `jakarta.*` |
+| OpenAPI | v3 |
 | 模块布局 | API + Service 双模块 |
 | 最终编译 | 需要目标项目私有 Maven 仓库和依赖环境 |
 

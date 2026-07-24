@@ -26,6 +26,7 @@ import {
   type ReviewRoundEvidence,
 } from '../llm/reviewProtocol';
 import {
+  DEFAULT_REFERENCE_PROFILE,
   buildCanonicalReferenceIntent,
   formatReferenceReviewEvidence,
   formatReferenceReviewEvidenceForGeneration,
@@ -346,6 +347,7 @@ llmRouter.post('/review-plan', async (req: Request, res: Response) => {
     }
   }
   let reviewReferenceSnapshotId = parentReviewRecord?.referenceSnapshotId;
+  let reviewReferenceProfile = parentReviewRecord?.contract.referenceProfile;
   const reviewId = randomUUID();
   const reviewStartedAt = new Date().toISOString();
   const queuedCanonicalContent = upsertPlanContractBlock(planContent, requestCompilation.contract);
@@ -412,6 +414,7 @@ llmRouter.post('/review-plan', async (req: Request, res: Response) => {
       ? { adaptationSummary: await getReferenceAdaptationSummary(), search: null, searchStatus: 'SUCCESS' as const, searchDurationMs: 0 }
       : await getReferenceReviewEvidence(buildCanonicalReferenceIntent(initialMockContract));
     reviewReferenceSnapshotId ??= referenceEvidence.search?.snapshotId;
+    reviewReferenceProfile ??= referenceEvidence.search?.profile;
     let mockContent = planContent;
     let mockCompilation = compilePlanContract(mockContent);
     let mockIssues = validatePlanContract(mockCompilation, referenceEvidence, mockContent);
@@ -426,12 +429,14 @@ llmRouter.post('/review-plan', async (req: Request, res: Response) => {
     }
     let mockContract = withContractReviewMetadata(mockCompilation.contract, {
       referenceSnapshotId: reviewReferenceSnapshotId,
+      referenceProfile: reviewReferenceProfile,
       rulesetVersion: REVIEW_RULESET_VERSION,
     });
     mockContent = renderCanonicalContractSummary(mockContent, mockContract);
     mockCompilation = compilePlanContract(mockContent);
     mockContract = withContractReviewMetadata(mockCompilation.contract, {
       referenceSnapshotId: reviewReferenceSnapshotId,
+      referenceProfile: reviewReferenceProfile,
       rulesetVersion: REVIEW_RULESET_VERSION,
     });
     mockContent = upsertPlanContractBlock(mockContent, mockContract);
@@ -548,6 +553,7 @@ llmRouter.post('/review-plan', async (req: Request, res: Response) => {
       ? { adaptationSummary: await getReferenceAdaptationSummary(), search: null, searchStatus: 'SUCCESS' as const, searchDurationMs: 0 }
       : await getReferenceReviewEvidence(buildCanonicalReferenceIntent(initialCanonicalContract));
     reviewReferenceSnapshotId ??= lastReferenceEvidence.search?.snapshotId;
+    reviewReferenceProfile ??= lastReferenceEvidence.search?.profile;
     if (!parentReviewRecord && (lastReferenceEvidence.searchStatus !== 'SUCCESS' || !lastReferenceEvidence.search)) {
       throw new ReviewInfrastructureError(
         `Reference evidence unavailable: ${lastReferenceEvidence.searchStatus ?? 'INVALID_RESPONSE'}${lastReferenceEvidence.searchDiagnostic ? ` (${lastReferenceEvidence.searchDiagnostic})` : ''}`,
@@ -772,12 +778,14 @@ ${buildSemanticReviewSubject(currentContent, canonicalCompilation.contract)}`,
     let finalCompilation = compilePlanContract(currentContent);
     let finalContract = withContractReviewMetadata(finalCompilation.contract, {
       referenceSnapshotId: reviewReferenceSnapshotId,
+      referenceProfile: reviewReferenceProfile,
       rulesetVersion: REVIEW_RULESET_VERSION,
     });
     currentContent = renderCanonicalContractSummary(currentContent, finalContract);
     finalCompilation = compilePlanContract(currentContent);
     finalContract = withContractReviewMetadata(finalCompilation.contract, {
       referenceSnapshotId: reviewReferenceSnapshotId,
+      referenceProfile: reviewReferenceProfile,
       rulesetVersion: REVIEW_RULESET_VERSION,
     });
     currentContent = upsertPlanContractBlock(currentContent, finalContract);
@@ -1418,7 +1426,8 @@ async function handleLiveGeneratePlan(req: Request, res: Response): Promise<void
       const normalizedDraft = normalizePlanDraftAgainstRequirement(configuredDraft, userInput || '');
       const referenceGrounded = groundPlanDraftWithReferenceEvidence(normalizedDraft, referenceEvidence);
       const contract = applyReferenceGrounding(
-        compileStructuredPlanDraft(referenceGrounded.draft, referenceEvidence.search?.snapshotId),
+        compileStructuredPlanDraft(referenceGrounded.draft, referenceEvidence.search?.snapshotId,
+          referenceEvidence.search?.profile),
         referenceGrounded.grounding,
       );
       const markdown = renderStructuredPlan(referenceGrounded.draft, contract);
@@ -1459,7 +1468,8 @@ async function handleLiveGeneratePlan(req: Request, res: Response): Promise<void
     const normalizedDraft = normalizePlanDraftAgainstRequirement(parsed.value, userInput || '');
     const referenceGrounded = groundPlanDraftWithReferenceEvidence(normalizedDraft, referenceEvidence);
     const contract = applyReferenceGrounding(
-      compileStructuredPlanDraft(referenceGrounded.draft, referenceEvidence.search?.snapshotId),
+      compileStructuredPlanDraft(referenceGrounded.draft, referenceEvidence.search?.snapshotId,
+          referenceEvidence.search?.profile),
       referenceGrounded.grounding,
     );
     const markdown = renderStructuredPlan(referenceGrounded.draft, contract);
@@ -1549,7 +1559,8 @@ async function handleMockGeneratePlan(req: Request, res: Response): Promise<void
     deliverables,
     architectureDecisions: [],
   };
-  const contract = compileStructuredPlanDraft(draft);
+  const contract = compileStructuredPlanDraft(
+    draft, 'ref-default-bladex-4.1.0', DEFAULT_REFERENCE_PROFILE);
   const canonicalMockPlan = renderStructuredPlan(draft, contract);
   const lines = canonicalMockPlan.split('\n');
 

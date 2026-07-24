@@ -34,7 +34,7 @@ interface ReferenceProjectModalProps {
 /**
  * 参考项目配置 Modal — 阶段2增强。
  *
- * <p>用户指定一个 BladeX 框架项目路径,REAL 模式生成代码时从该项目找同类代码,
+ * <p>The selected BladeX project is read-only and supplies style and framework conventions.
  * 提取结构化摘要注入 prompt,让生成的新模块贴合现有风格。参考项目只读,不写入。
  */
 const ReferenceProjectModal: React.FC<ReferenceProjectModalProps> = ({ open, onClose }) => {
@@ -168,7 +168,7 @@ const ReferenceProjectModal: React.FC<ReferenceProjectModalProps> = ({ open, onC
       <Alert
         type="info"
         showIcon
-        message="REAL 模式生成代码时,从参考项目找同类代码,提取结构化摘要注入 LLM,让生成的新模块贴合现有风格。"
+        message="The selected project is read-only and supplies similar-code summaries for generation."
         style={{ marginBottom: 16 }}
       />
 
@@ -263,7 +263,7 @@ const ReferenceProjectModal: React.FC<ReferenceProjectModalProps> = ({ open, onC
           ) : status?.path ? (
             <Text type="warning">已设置路径但未就绪: {status.path}</Text>
           ) : (
-            <Text type="secondary">未设置(REAL 模式生成时不注入参考)</Text>
+            <Text type="secondary">Not configured (generation will not inject project-specific references)</Text>
           )}
         </div>
       </div>

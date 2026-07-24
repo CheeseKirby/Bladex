@@ -61,6 +61,8 @@ class PlanExecutionServiceV2PersistenceTest {
         verify(planMapper).insert(planCaptor.capture());
         AiPlan persistedPlan = planCaptor.getValue();
         assertNotNull(persistedPlan.getCanonicalContractJson());
+        assertNotNull(persistedPlan.getReferenceProfileJson());
+        assertEquals("4.1.0.RELEASE", objectMapper.readTree(persistedPlan.getReferenceProfileJson()).get("bladeXVersion").asText());
         assertNotNull(persistedPlan.getReviewManifestJson());
         assertEquals(request.getBundleHash(), persistedPlan.getBundleHash());
         assertEquals(request.getBundleSignature(), persistedPlan.getBundleSignature());

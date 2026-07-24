@@ -1,7 +1,6 @@
 package org.springblade.aiworkflow.validation;
 
 import org.springblade.aiworkflow.agent.CanonicalPlanContractV2;
-import org.springblade.aiworkflow.enums.WriteTarget;
 import org.springblade.aiworkflow.vo.PlanReceiveRequest;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
@@ -38,6 +37,10 @@ public class PlanRequestValidator {
 
     public void validate(PlanReceiveRequest request) {
         if (request == null) throw new IllegalArgumentException("Plan request must not be null");
+        String writeTarget = request.getWriteTarget();
+        if (writeTarget != null && !writeTarget.isBlank() && !"ISOLATED".equalsIgnoreCase(writeTarget.trim())) {
+            throw new IllegalArgumentException("writeTarget must be ISOLATED; direct project writes are disabled");
+        }
         if (request.getMasterPlan() == null) throw new IllegalArgumentException("Master plan is required");
         if (request.getSubPlans() == null || request.getSubPlans().isEmpty()) {
             throw new IllegalArgumentException("At least one sub-plan is required");
@@ -89,10 +92,9 @@ public class PlanRequestValidator {
         CanonicalPlanContractV2 contract = request.getCanonicalContract();
         boolean updatedPartA = request.getMetadata() != null
                 && "ai-designer".equalsIgnoreCase(request.getMetadata().getSourceService());
-        boolean realWrite = WriteTarget.parse(request.getWriteTarget()).isReal();
         if (contract == null) {
-            if (updatedPartA || realWrite) {
-                throw new IllegalArgumentException("canonicalContract v2 is required for updated Part A and REAL writes");
+            if (updatedPartA) {
+                throw new IllegalArgumentException("canonicalContract v2 is required for updated Part A");
             }
             boolean legacyReplay = request.getMetadata() != null
                     && "legacy-replay".equalsIgnoreCase(request.getMetadata().getSourceService());

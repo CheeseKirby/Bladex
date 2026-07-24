@@ -9,7 +9,6 @@ import lombok.AllArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springblade.aiworkflow.common.ApiResponse;
 import org.springblade.aiworkflow.controller.ConfigController.AdminTokenGuard;
-import org.springblade.aiworkflow.enums.WriteTarget;
 import org.springblade.aiworkflow.service.IPlanExecutionService;
 import org.springblade.aiworkflow.vo.ExecutionStatusVO;
 import org.springblade.aiworkflow.vo.ExecutionTimelineVO;
@@ -44,7 +43,6 @@ public class PlanReceiverController {
      * <p>这里**必须**保持 receivePlan 与 executeAsync 是两次独立调用 — 不要把 executeAsync 内联进 receivePlan,
      * 否则 @Async 自调用会被 Spring AOP 跳过(代理不生效),工作流将变成同步执行,Part A 的 POST 会一直阻塞到全部完成。
      *
-     * <p>阶段2: writeTarget=REAL(写目标项目根)需 X-Admin-Token 鉴权,防止误触写真实项目。
      * 未配 token 时仅放行本地回环(AdminTokenGuard 现有逻辑)。
      */
     @PostMapping("/receive")
@@ -52,16 +50,7 @@ public class PlanReceiverController {
     public ApiResponse<PlanReceiveResponse> receive(
             @Valid @RequestBody PlanReceiveRequest request,
             HttpServletRequest req) {
-        // REAL 模式写真实项目:必须鉴权,且要求 admin token 已配置(即使本地回环也不放行),防止误触写真实项目
         if (request.getCanonicalContract() == null) {
-            guard.requireAdmin(req);
-        }
-        if (WriteTarget.parse(request.getWriteTarget()).isReal()) {
-            if (!guard.isTokenConfigured()) {
-                throw new org.springframework.web.server.ResponseStatusException(
-                        org.springframework.http.HttpStatus.FORBIDDEN,
-                        "REAL 模式(writeTarget=REAL)写真实项目,必须先配置 ai-workflow.admin.token;未配置时拒绝执行(即使本地回环)");
-            }
             guard.requireAdmin(req);
         }
         PlanReceiveResponse response = planExecutionService.receivePlan(request);

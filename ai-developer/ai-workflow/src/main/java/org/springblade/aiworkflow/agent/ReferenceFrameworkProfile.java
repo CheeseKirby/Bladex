@@ -3,6 +3,7 @@ package org.springblade.aiworkflow.agent;
 import java.util.LinkedHashMap;
 import java.util.Locale;
 import java.util.Map;
+import java.util.TreeMap;
 
 /** Structured conventions detected from the selected reference project. */
 public record ReferenceFrameworkProfile(
@@ -32,16 +33,16 @@ public record ReferenceFrameworkProfile(
         String sourceProjectRoot) {
 
     public ReferenceFrameworkProfile {
-        bladeXVersion = textOr(bladeXVersion, "UNKNOWN");
-        javaVersion = textOr(javaVersion, "UNKNOWN");
+        bladeXVersion = textOr(bladeXVersion, "4.1.0.RELEASE");
+        javaVersion = textOr(javaVersion, "17");
         parentGroupId = textOr(parentGroupId, "org.springblade");
         apiParentArtifactId = textOr(apiParentArtifactId, "blade-service-api");
         serviceParentArtifactId = textOr(serviceParentArtifactId, "blade-service");
         apiParentVersion = textOr(apiParentVersion, bladeXVersion);
         serviceParentVersion = textOr(serviceParentVersion, bladeXVersion);
         internalDependencyVersion = textOr(internalDependencyVersion, bladeXVersion);
-        validationNamespace = textOr(validationNamespace, "javax");
-        swaggerGeneration = textOr(swaggerGeneration, "v2");
+        validationNamespace = textOr(validationNamespace, "jakarta");
+        swaggerGeneration = textOr(swaggerGeneration, "v3");
         entityPackageSuffix = normalizeSuffix(entityPackageSuffix, "pojo.entity");
         voPackageSuffixes = immutableVoPackages(voPackageSuffixes);
         controllerPackageSuffix = normalizeSuffix(controllerPackageSuffix, "controller");
@@ -58,12 +59,34 @@ public record ReferenceFrameworkProfile(
 
     public static ReferenceFrameworkProfile defaults() {
         return new ReferenceFrameworkProfile(
-                "UNKNOWN", "17", "org.springblade", "blade-service-api", "blade-service",
+                "4.1.0.RELEASE", "17", "org.springblade", "blade-service-api", "blade-service",
                 "${revision}", "${revision}", "${bladex.project.version}", "jakarta", "v3",
                 "pojo.entity", Map.of("VO", "pojo.vo", "QVO", "pojo.vo", "IVO", "pojo.vo",
                 "UVO", "pojo.vo", "EVO", "pojo.vo"),
                 "controller", "service", "service.impl", "mapper", "wrapper", "feign", "excel",
                 true, "BLADE_CLOUD_APPLICATION", "blade", "SPRING_CONFIG_ACTIVATE", null);
+    }
+
+    /** Profile material embedded in reviewed contracts; local source paths are intentionally excluded. */
+    public ReferenceFrameworkProfile withoutSourceProjectRoot() {
+        return new ReferenceFrameworkProfile(
+                bladeXVersion, javaVersion, parentGroupId, apiParentArtifactId, serviceParentArtifactId,
+                apiParentVersion, serviceParentVersion, internalDependencyVersion, validationNamespace,
+                swaggerGeneration, entityPackageSuffix, voPackageSuffixes, controllerPackageSuffix,
+                servicePackageSuffix, serviceImplPackageSuffix, mapperPackageSuffix, wrapperPackageSuffix,
+                feignPackageSuffix, excelPackageSuffix, mapperXmlInJava, applicationStyle, nacosNamespace,
+                profileStyle, null);
+    }
+
+    /** Stable material used by reference snapshot hashing. */
+    public String fingerprintMaterial() {
+        return String.join("|",
+                bladeXVersion, javaVersion, parentGroupId, apiParentArtifactId, serviceParentArtifactId,
+                apiParentVersion, serviceParentVersion, internalDependencyVersion, validationNamespace,
+                swaggerGeneration, entityPackageSuffix, new TreeMap<>(voPackageSuffixes).toString(),
+                controllerPackageSuffix, servicePackageSuffix, serviceImplPackageSuffix, mapperPackageSuffix,
+                wrapperPackageSuffix, feignPackageSuffix, excelPackageSuffix, Boolean.toString(mapperXmlInJava),
+                applicationStyle, nacosNamespace, profileStyle);
     }
 
     public String voPackageSuffix(String className) {

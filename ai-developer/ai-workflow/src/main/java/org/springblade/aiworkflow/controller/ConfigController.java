@@ -188,7 +188,7 @@ public class ConfigController {
             }
         }
 
-        /** admin token 是否已配置(REAL 模式等高危写操作要求必须配置,未配置时即使本地回环也拒绝) */
+        /** Whether the admin token is configured for privileged reference-project management. */
         public boolean isTokenConfigured() {
             return !adminToken.isEmpty();
         }

@@ -9,15 +9,12 @@ import org.springblade.aiworkflow.agent.BladeXCodeAgent;
 import org.springblade.aiworkflow.agent.GenerationIdentity;
 import org.springblade.aiworkflow.agent.GenerationIdentityResolver;
 import org.springblade.aiworkflow.agent.ReferenceFrameworkProfile;
-import org.springblade.aiworkflow.agent.ProjectWriteLockManager;
-import org.springblade.aiworkflow.config.AiWorkflowProperties;
 import org.springblade.aiworkflow.entity.AiExecutionLog;
 import org.springblade.aiworkflow.entity.AiGeneratedFile;
 import org.springblade.aiworkflow.entity.AiPlan;
 import org.springblade.aiworkflow.entity.AiSubPlan;
 import org.springblade.aiworkflow.enums.PlanStatus;
 import org.springblade.aiworkflow.enums.SubPlanStatus;
-import org.springblade.aiworkflow.enums.WriteTarget;
 import org.springblade.aiworkflow.mapper.AiExecutionLogMapper;
 import org.springblade.aiworkflow.mapper.AiGeneratedFileMapper;
 import org.springblade.aiworkflow.mapper.AiPlanMapper;
@@ -66,19 +63,16 @@ public class PlanExecutionServiceImpl implements IPlanExecutionService {
     private final AiExecutionLogMapper executionLogMapper;
     private final BladeXCodeAgent bladeXCodeAgent;
     private final ObjectMapper objectMapper;
-    private final ProjectWriteLockManager projectWriteLockManager;
-    private final AiWorkflowProperties properties;
     private final PlanRequestValidator planRequestValidator;
 
     /** 进行中的 receptionId,用于幂等保护,防止控制器/重试导致同一方案并发执行。 */
     private final Set<String> inFlight = ConcurrentHashMap.newKeySet();
 
+    @org.springframework.beans.factory.annotation.Autowired
     public PlanExecutionServiceImpl(AiPlanMapper planMapper, AiSubPlanMapper subPlanMapper,
                                     AiGeneratedFileMapper generatedFileMapper,
                                     AiExecutionLogMapper executionLogMapper,
                                     BladeXCodeAgent bladeXCodeAgent, ObjectMapper objectMapper,
-                                    ProjectWriteLockManager projectWriteLockManager,
-                                    AiWorkflowProperties properties,
                                     PlanRequestValidator planRequestValidator) {
         this.planMapper = planMapper;
         this.subPlanMapper = subPlanMapper;
@@ -86,9 +80,19 @@ public class PlanExecutionServiceImpl implements IPlanExecutionService {
         this.executionLogMapper = executionLogMapper;
         this.bladeXCodeAgent = bladeXCodeAgent;
         this.objectMapper = objectMapper;
-        this.projectWriteLockManager = projectWriteLockManager;
-        this.properties = properties;
         this.planRequestValidator = planRequestValidator;
+    }
+
+    /** Compatibility constructor; REAL-write locking/configuration are ignored. */
+    public PlanExecutionServiceImpl(AiPlanMapper planMapper, AiSubPlanMapper subPlanMapper,
+                                    AiGeneratedFileMapper generatedFileMapper,
+                                    AiExecutionLogMapper executionLogMapper,
+                                    BladeXCodeAgent bladeXCodeAgent, ObjectMapper objectMapper,
+                                    org.springblade.aiworkflow.agent.ProjectWriteLockManager ignoredWriteLockManager,
+                                    org.springblade.aiworkflow.config.AiWorkflowProperties ignoredProperties,
+                                    PlanRequestValidator planRequestValidator) {
+        this(planMapper, subPlanMapper, generatedFileMapper, executionLogMapper,
+                bladeXCodeAgent, objectMapper, planRequestValidator);
     }
 
     @Override
@@ -134,6 +138,12 @@ public class PlanExecutionServiceImpl implements IPlanExecutionService {
             plan.setGenerationIdentityJson(objectMapper.writeValueAsString(generationIdentity));
             if (request.getCanonicalContract() != null) {
                 plan.setCanonicalContractJson(objectMapper.writeValueAsString(request.getCanonicalContract()));
+                if (request.getCanonicalContract().referenceProfile() != null) {
+                    ReferenceFrameworkProfile profile = objectMapper.convertValue(
+                            request.getCanonicalContract().referenceProfile(), ReferenceFrameworkProfile.class)
+                            .withoutSourceProjectRoot();
+                    plan.setReferenceProfileJson(objectMapper.writeValueAsString(profile));
+                }
             }
             if (request.getReviewManifest() != null) {
                 plan.setReviewManifestJson(objectMapper.writeValueAsString(request.getReviewManifest()));
@@ -148,7 +158,7 @@ public class PlanExecutionServiceImpl implements IPlanExecutionService {
             plan.setMasterPlanContent(request.getMasterPlan().getContent());
         }
         // 阶段2: 写入目标(空/非法→ISOLATED,安全默认)。决定后续写盘 root 与是否查重。
-        plan.setWriteTarget(WriteTarget.parse(request.getWriteTarget()).getCode());
+        plan.setWriteTarget("ISOLATED");
         plan.setCreateTime(LocalDateTime.now());
         try {
             planMapper.insert(plan);
@@ -269,7 +279,6 @@ public class PlanExecutionServiceImpl implements IPlanExecutionService {
             return;
         }
 
-        java.util.concurrent.locks.ReentrantLock writeLock = null;
         boolean claimAcquired = false;
         try {
             int claimed = planMapper.update(null, new UpdateWrapper<AiPlan>()
@@ -290,15 +299,6 @@ public class PlanExecutionServiceImpl implements IPlanExecutionService {
             if (plan == null) {
                 throw new IllegalStateException("Claimed plan disappeared before execution: " + receptionId);
             }
-            if (WriteTarget.parse(plan.getWriteTarget()).isReal()) {
-                if (projectWriteLockManager == null) {
-                    throw new IllegalStateException("Project write lock manager is unavailable for REAL execution");
-                }
-                writeLock = projectWriteLockManager.lockFor(properties.getTargetProjectRoot());
-                writeLock.lock();
-                log.info("REAL project write lock acquired: receptionId={}, root={}",
-                        receptionId, properties.getTargetProjectRoot());
-            }
             bladeXCodeAgent.executeWorkflow(receptionId);
         } catch (Throwable error) {
             if (error instanceof InterruptedException) {
@@ -311,7 +311,6 @@ public class PlanExecutionServiceImpl implements IPlanExecutionService {
                 log.error("Workflow execution claim failed: receptionId={}", receptionId, error);
             }
         } finally {
-            if (writeLock != null && writeLock.isHeldByCurrentThread()) writeLock.unlock();
             inFlight.remove(receptionId);
         }
     }

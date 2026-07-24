@@ -215,7 +215,7 @@ class PlanArtifactCompilerTest {
                 item.id(), item.kind(), item.name(), "module.hotwork", item.className(), item.moduleSide(),
                 "MODIFY", item.providesTypes(), item.requiresTypes()));
         CanonicalPlanContractV2 contract = new CanonicalPlanContractV2(source.contractVersion(), source.sourceHash(),
-                source.sourceMode(), source.referenceSnapshotId(), source.rulesetVersion(), source.identity(),
+                source.sourceMode(), source.referenceSnapshotId(), source.referenceProfile(), source.rulesetVersion(), source.identity(),
                 source.fields(), source.domains(), modules, source.aggregates(), source.entities(), source.states(),
                 source.integrations(), deliverables, source.referenceBindings(), source.architectureDecisions());
         GenerationContext canonicalContext = new GenerationContext(contract.generationIdentity(),
@@ -252,7 +252,7 @@ class PlanArtifactCompilerTest {
     private CanonicalPlanContractV2 copyContract(CanonicalPlanContractV2 source,
                                                   List<CanonicalPlanContractV2.Deliverable> deliverables) {
         return new CanonicalPlanContractV2(source.contractVersion(), source.sourceHash(), source.sourceMode(),
-                source.referenceSnapshotId(), source.rulesetVersion(), source.identity(), source.fields(),
+                source.referenceSnapshotId(), source.referenceProfile(), source.rulesetVersion(), source.identity(), source.fields(),
                 source.domains(), source.modules(), source.aggregates(), source.entities(), source.states(),
                 source.integrations(), deliverables, source.referenceBindings(), source.architectureDecisions());
     }

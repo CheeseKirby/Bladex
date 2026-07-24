@@ -8,6 +8,46 @@ const MAX_REFERENCE_RELATIONS = 40;
 const MAX_REFERENCE_ANOMALIES = 20;
 const MAX_SEARCH_CACHE_ENTRIES = 100;
 
+export interface ReferenceFrameworkProfile {
+  bladeXVersion: string;
+  javaVersion: string;
+  parentGroupId: string;
+  apiParentArtifactId: string;
+  serviceParentArtifactId: string;
+  apiParentVersion: string;
+  serviceParentVersion: string;
+  internalDependencyVersion: string;
+  validationNamespace: string;
+  swaggerGeneration: string;
+  entityPackageSuffix: string;
+  voPackageSuffixes: Record<string, string>;
+  controllerPackageSuffix: string;
+  servicePackageSuffix: string;
+  serviceImplPackageSuffix: string;
+  mapperPackageSuffix: string;
+  wrapperPackageSuffix: string;
+  feignPackageSuffix: string;
+  excelPackageSuffix: string;
+  mapperXmlInJava: boolean;
+  applicationStyle: string;
+  nacosNamespace: string;
+  profileStyle: string;
+}
+
+export const DEFAULT_REFERENCE_PROFILE: ReferenceFrameworkProfile = {
+  bladeXVersion: '4.1.0.RELEASE', javaVersion: '17', parentGroupId: 'org.springblade',
+  apiParentArtifactId: 'blade-service-api', serviceParentArtifactId: 'blade-service',
+  apiParentVersion: '${revision}', serviceParentVersion: '${revision}',
+  internalDependencyVersion: '${bladex.project.version}', validationNamespace: 'jakarta',
+  swaggerGeneration: 'v3', entityPackageSuffix: 'pojo.entity',
+  voPackageSuffixes: { VO: 'pojo.vo', QVO: 'pojo.vo', IVO: 'pojo.vo', UVO: 'pojo.vo', EVO: 'pojo.vo' },
+  controllerPackageSuffix: 'controller', servicePackageSuffix: 'service',
+  serviceImplPackageSuffix: 'service.impl', mapperPackageSuffix: 'mapper',
+  wrapperPackageSuffix: 'wrapper', feignPackageSuffix: 'feign', excelPackageSuffix: 'excel',
+  mapperXmlInJava: true, applicationStyle: 'BLADE_CLOUD_APPLICATION', nacosNamespace: 'blade',
+  profileStyle: 'SPRING_CONFIG_ACTIVATE',
+};
+
 export interface ReferenceSymbol {
   score: number;
   relationExpanded: boolean;
@@ -54,6 +94,7 @@ export interface ReferenceAccessDecision {
 
 export interface ReferenceSearchResult {
   snapshotId: string;
+  profile: ReferenceFrameworkProfile;
   intent: string;
   symbols: ReferenceSymbol[];
   relations: ReferenceRelation[];
@@ -236,6 +277,8 @@ function putSearchCache(key: string, value: ReferenceSearchOutcome): void {
 
 function parseReferenceSearchResult(value: unknown): ReferenceSearchResult | null {
   if (!isRecord(value) || !nonBlankString(value.snapshotId) || typeof value.intent !== 'string') return null;
+  const profile = parseReferenceFrameworkProfile(value.profile);
+  if (!profile) return null;
   if (!Array.isArray(value.symbols) || !Array.isArray(value.relations)
     || !Array.isArray(value.anomalies) || !Array.isArray(value.decisions)) return null;
 
@@ -248,11 +291,50 @@ function parseReferenceSearchResult(value: unknown): ReferenceSearchResult | nul
 
   return {
     snapshotId: value.snapshotId,
+    profile,
     intent: value.intent,
     symbols: symbols as ReferenceSymbol[],
     relations: relations as ReferenceRelation[],
     anomalies: anomalies as ReferenceAnomaly[],
     decisions: decisions as ReferenceAccessDecision[],
+  };
+}
+
+
+export function parseReferenceFrameworkProfile(value: unknown): ReferenceFrameworkProfile | null {
+  if (!isRecord(value) || typeof value.mapperXmlInJava !== 'boolean' || !isStringRecord(value.voPackageSuffixes)) return null;
+  const stringFields = [
+    'bladeXVersion', 'javaVersion', 'parentGroupId', 'apiParentArtifactId', 'serviceParentArtifactId',
+    'apiParentVersion', 'serviceParentVersion', 'internalDependencyVersion', 'validationNamespace',
+    'swaggerGeneration', 'entityPackageSuffix', 'controllerPackageSuffix', 'servicePackageSuffix',
+    'serviceImplPackageSuffix', 'mapperPackageSuffix', 'wrapperPackageSuffix', 'feignPackageSuffix',
+    'excelPackageSuffix', 'applicationStyle', 'nacosNamespace', 'profileStyle',
+  ] as const;
+  if (stringFields.some((field) => !nonBlankString(value[field]))) return null;
+  return {
+    bladeXVersion: value.bladeXVersion as string,
+    javaVersion: value.javaVersion as string,
+    parentGroupId: value.parentGroupId as string,
+    apiParentArtifactId: value.apiParentArtifactId as string,
+    serviceParentArtifactId: value.serviceParentArtifactId as string,
+    apiParentVersion: value.apiParentVersion as string,
+    serviceParentVersion: value.serviceParentVersion as string,
+    internalDependencyVersion: value.internalDependencyVersion as string,
+    validationNamespace: value.validationNamespace as string,
+    swaggerGeneration: value.swaggerGeneration as string,
+    entityPackageSuffix: value.entityPackageSuffix as string,
+    voPackageSuffixes: { ...value.voPackageSuffixes },
+    controllerPackageSuffix: value.controllerPackageSuffix as string,
+    servicePackageSuffix: value.servicePackageSuffix as string,
+    serviceImplPackageSuffix: value.serviceImplPackageSuffix as string,
+    mapperPackageSuffix: value.mapperPackageSuffix as string,
+    wrapperPackageSuffix: value.wrapperPackageSuffix as string,
+    feignPackageSuffix: value.feignPackageSuffix as string,
+    excelPackageSuffix: value.excelPackageSuffix as string,
+    mapperXmlInJava: value.mapperXmlInJava,
+    applicationStyle: value.applicationStyle as string,
+    nacosNamespace: value.nacosNamespace as string,
+    profileStyle: value.profileStyle as string,
   };
 }
 

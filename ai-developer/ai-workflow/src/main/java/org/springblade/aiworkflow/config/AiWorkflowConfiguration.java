@@ -133,11 +133,6 @@ public class AiWorkflowConfiguration {
     }
 
     @Bean
-    public BuildVerifier buildVerifier(AiWorkflowProperties properties) {
-        return new BuildVerifier(properties.getTargetProjectRoot());
-    }
-
-    @Bean
     public ExistingProjectIndex existingProjectIndex(AiWorkflowProperties properties) {
         // 阶段1:已有项目结构索引。懒加载(构造不扫),复用 target-project-root 配置。
         return new ExistingProjectIndex(properties);
@@ -162,18 +157,15 @@ public class AiWorkflowConfiguration {
                                             ConventionValidator conventionValidator,
                                             ChangeEvaluator changeEvaluator,
                                             FileWriteExecutor fileWriteExecutor,
-                                            BuildVerifier buildVerifier,
                                             ObjectMapper objectMapper,
                                             AiWorkflowProperties properties,
-                                            ConflictDetector conflictDetector,
                                             ReferenceProjectIndex referenceProjectIndex,
                                             TopologySorter topologySorter,
                                             GeneratedFileStore generatedFileStore,
                                             WorkflowStatusNotifier statusNotifier) {
         return new BladeXCodeAgent(planMapper, subPlanMapper, executionLogMapper, generatedFileMapper,
                 codeGenRouter, conventionValidator, changeEvaluator, fileWriteExecutor,
-                buildVerifier, objectMapper, properties.getMaxReviewRetries(),
-                properties.isAutoCommit(),
-                properties, conflictDetector, referenceProjectIndex, topologySorter, generatedFileStore, statusNotifier);
+                objectMapper, properties.getMaxReviewRetries(), properties.isAutoCommit(),
+                properties, referenceProjectIndex, topologySorter, generatedFileStore, statusNotifier);
     }
 }

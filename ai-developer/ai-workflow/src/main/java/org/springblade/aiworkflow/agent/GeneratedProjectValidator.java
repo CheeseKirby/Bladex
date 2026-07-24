@@ -162,18 +162,34 @@ public final class GeneratedProjectValidator {
 
     private void validateFrameworkCompatibility(List<GeneratedFile> files, GenerationContext context,
                                                 List<Issue> issues) {
-        String frameworkVersion = context == null || context.referenceProfile() == null
-                ? null : context.referenceProfile().bladeXVersion();
-        if (frameworkVersion == null || !frameworkVersion.matches("^2(?:\\..*)?$")) return;
+        ReferenceFrameworkProfile profile = context == null ? null : context.referenceProfile();
+        if (profile == null) return;
+        String frameworkVersion = profile.bladeXVersion();
         for (GeneratedFile file : files) {
             String path = normalize(file.getFilePath());
             String content = file.getContent();
             if (path == null || content == null || !path.endsWith(".java")) continue;
-            Matcher matcher = BLADEX2_LONG_SELECT_COUNT.matcher(content);
-            while (matcher.find()) {
-                issues.add(error("FRAMEWORK-SELECTCOUNT-TYPE-MISMATCH", path,
-                        "BladeX " + frameworkVersion + " / MyBatis-Plus 3.1 selectCount returns Integer; variable "
-                                + matcher.group(1) + " cannot be declared as Long"));
+            if (profile.usesJavax() && content.contains("import jakarta.validation.")) {
+                issues.add(error("FRAMEWORK-VALIDATION-NAMESPACE-MISMATCH", path,
+                        "Reference profile requires javax.validation imports"));
+            } else if (!profile.usesJavax() && content.contains("import javax.validation.")) {
+                issues.add(error("FRAMEWORK-VALIDATION-NAMESPACE-MISMATCH", path,
+                        "Reference profile requires jakarta.validation imports"));
+            }
+            if (profile.usesSwaggerV2() && content.contains("import io.swagger.v3.oas.annotations.")) {
+                issues.add(error("FRAMEWORK-SWAGGER-GENERATION-MISMATCH", path,
+                        "Reference profile requires Swagger v2 annotations"));
+            } else if (!profile.usesSwaggerV2() && content.contains("import io.swagger.annotations.")) {
+                issues.add(error("FRAMEWORK-SWAGGER-GENERATION-MISMATCH", path,
+                        "Reference profile requires OpenAPI v3 annotations"));
+            }
+            if (frameworkVersion != null && frameworkVersion.matches("^2(?:\\..*)?$")) {
+                Matcher matcher = BLADEX2_LONG_SELECT_COUNT.matcher(content);
+                while (matcher.find()) {
+                    issues.add(error("FRAMEWORK-SELECTCOUNT-TYPE-MISMATCH", path,
+                            "BladeX " + frameworkVersion + " / MyBatis-Plus 3.1 selectCount returns Integer; variable "
+                                    + matcher.group(1) + " cannot be declared as Long"));
+                }
             }
         }
     }

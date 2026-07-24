@@ -3,7 +3,9 @@ import type {
   ReferenceAccessDecision,
   ReferenceReviewEvidence,
   ReferenceSymbol,
+  ReferenceFrameworkProfile,
 } from '../services/referenceSummary';
+import { parseReferenceFrameworkProfile } from '../services/referenceSummary';
 
 export const PLAN_CONTRACT_VERSION = '2.0';
 export const PLAN_CONTRACT_RULESET_VERSION = 'canonical-plan-v2';
@@ -116,6 +118,7 @@ export interface PlanContract {
   sourceHash: string;
   sourceMode: 'STRUCTURED' | 'LEGACY_INFERRED';
   referenceSnapshotId?: string;
+  referenceProfile?: ReferenceFrameworkProfile;
   rulesetVersion: string;
   identity: PlanIdentityContract;
   fields: PlanFieldContract[];
@@ -238,6 +241,10 @@ export function validatePlanContract(
   }
   for (const diagnostic of compilation.diagnostics.slice(1)) {
     add('WARN', 'PLAN-CONTRACT-DIAGNOSTIC', diagnostic);
+  }
+  if (contract.sourceMode === 'STRUCTURED' && (!contract.referenceSnapshotId || !contract.referenceProfile)) {
+    add('ERROR', 'REFERENCE-CONTEXT-REQUIRED',
+      'Structured contracts must pin both referenceSnapshotId and referenceProfile.');
   }
 
   const ids = collectContractIds(contract);
@@ -1196,11 +1203,14 @@ function parsePlanContract(value: unknown, sourceHash: string): PlanContract | n
     entities.map((entity) => entity.table).filter((table): table is string => Boolean(table)));
   const fields = parseArray(value.fields, parseField) ?? inferFieldContracts(entities, '');
   const sourceMode = value.sourceMode === 'STRUCTURED' ? 'STRUCTURED' : 'LEGACY_INFERRED';
+  const referenceProfile = value.referenceProfile == null ? null : parseReferenceFrameworkProfile(value.referenceProfile);
+  if (value.referenceProfile != null && !referenceProfile) return null;
   return normalizeContract({
     contractVersion: PLAN_CONTRACT_VERSION,
     sourceHash,
     sourceMode,
     ...(typeof value.referenceSnapshotId === 'string' ? { referenceSnapshotId: value.referenceSnapshotId } : {}),
+    ...(referenceProfile ? { referenceProfile } : {}),
     rulesetVersion: typeof value.rulesetVersion === 'string' && value.rulesetVersion
       ? value.rulesetVersion : PLAN_CONTRACT_RULESET_VERSION,
     identity,
@@ -1311,6 +1321,8 @@ function normalizeContract(contract: PlanContract, sourceHash: string): PlanCont
     sourceHash,
     sourceMode: contract.sourceMode ?? 'LEGACY_INFERRED',
     ...(contract.referenceSnapshotId ? { referenceSnapshotId: contract.referenceSnapshotId } : {}),
+    ...(contract.referenceProfile ? { referenceProfile: { ...contract.referenceProfile,
+      voPackageSuffixes: { ...contract.referenceProfile.voPackageSuffixes } } } : {}),
     rulesetVersion: contract.rulesetVersion || PLAN_CONTRACT_RULESET_VERSION,
     identity: { ...contract.identity },
     fields: contract.fields.map((field) => ({ ...field })),
@@ -1420,7 +1432,7 @@ export interface SubPlanDescriptorHashMaterial {
 
 export interface PlanBundleHashMaterial {
   projectId: string;
-  writeTarget: 'ISOLATED' | 'REAL';
+  writeTarget: 'ISOLATED';
   generationIdentity: PlanIdentityContract;
   masterPlan: { id: string; version: number; contentHash: string };
   contractHash: string;
@@ -1460,12 +1472,14 @@ export function hashPlanBundle(material: PlanBundleHashMaterial): string {
 
 export function withContractReviewMetadata(
   contract: PlanContract,
-  metadata: { referenceSnapshotId?: string; sourceMode?: PlanContract['sourceMode']; rulesetVersion?: string },
+  metadata: { referenceSnapshotId?: string; referenceProfile?: ReferenceFrameworkProfile;
+    sourceMode?: PlanContract['sourceMode']; rulesetVersion?: string },
 ): PlanContract {
   return normalizeContract({
     ...contract,
     sourceMode: metadata.sourceMode ?? contract.sourceMode,
     referenceSnapshotId: metadata.referenceSnapshotId ?? contract.referenceSnapshotId,
+    referenceProfile: metadata.referenceProfile ?? contract.referenceProfile,
     rulesetVersion: metadata.rulesetVersion ?? contract.rulesetVersion,
   }, contract.sourceHash);
 }

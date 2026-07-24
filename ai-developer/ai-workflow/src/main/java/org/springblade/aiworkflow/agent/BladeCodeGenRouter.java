@@ -66,7 +66,7 @@ public class BladeCodeGenRouter {
     /**
      * 带参考项目的生成 — 阶段2增强。
      *
-     * <p>REAL 模式下,把参考项目适配摘要 + 同类代码摘要注入 prompt,让新模块能接入参考项目编译 + 风格贴合。
+     * <p>Reference adaptation injects the selected project profile and similar-code summary into the prompt.
      * adaptationSummary/referenceSummary 为 null 时等价于 {@link #generate}。
      */
     public GenerationResult generateWithReference(AtomicTask task, String adaptationSummary, String referenceSummary) {

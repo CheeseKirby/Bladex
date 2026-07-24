@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
+import { DEFAULT_REFERENCE_PROFILE } from '../services/referenceSummary';
 import { compileConfiguredPlanDraft } from './configuredPlanDraft';
 import { compilePlanContract, validateNarrativeContractConsistency, validatePlanContract } from './planContract';
 import { compileStructuredPlanDraft, renderStructuredPlan } from './planDraft';
@@ -25,6 +26,7 @@ const evidence: ReferenceReviewEvidence = {
   adaptationSummary: 'BladeX 2.4.0, Java 8, javax, Swagger v2',
   search: {
     snapshotId: 'ref-current',
+    profile: DEFAULT_REFERENCE_PROFILE,
     intent: enrichedRequirement,
     anomalies: [],
     decisions: [{
