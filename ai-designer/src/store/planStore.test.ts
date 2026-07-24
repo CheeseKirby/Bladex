@@ -22,7 +22,6 @@ function resetStore() {
     partBOverallStatus: null,
     generatedFiles: [],
     executionTimeline: null,
-    writeTarget: 'ISOLATED',
   });
 }
 

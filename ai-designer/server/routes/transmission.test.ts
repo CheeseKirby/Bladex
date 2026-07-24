@@ -80,6 +80,15 @@ test('reviewed v2 bundle is enriched with canonical contract, manifest hashes an
   assert.equal(result.value.bundleSignature, signPlanBundle(String(result.value.bundleHash), manifest as any, signingSecret));
 });
 
+test('direct REAL writes are rejected before signing or transmission', async () => {
+  const suffix = `${Date.now()}-real-disabled`;
+  const reviews = await seedReviews(suffix);
+  const payload = { ...bundle(suffix, contract.deliverables.map((item) => item.id), reviews), writeTarget: 'REAL' };
+  const result = prepareV2PlanBundle(payload, signingSecret);
+  assert.equal(result.ok, false);
+  if (!result.ok) assert.equal(result.code, 'REAL_WRITE_DISABLED');
+});
+
 test('bundle preparation rejects duplicate ownership and review replay across projects', async () => {
   const suffix = `${Date.now()}-blocked`;
   const reviews = await seedReviews(suffix);

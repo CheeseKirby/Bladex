@@ -11,7 +11,6 @@ import org.springblade.aiworkflow.entity.AiSubPlan;
 import org.springblade.aiworkflow.enums.PlanStatus;
 import org.springblade.aiworkflow.enums.SubPlanStatus;
 import org.springblade.aiworkflow.enums.TaskType;
-import org.springblade.aiworkflow.enums.WriteTarget;
 import org.springblade.aiworkflow.enums.ClassType;
 import org.springblade.aiworkflow.config.AiWorkflowProperties;
 import org.springblade.aiworkflow.mapper.AiExecutionLogMapper;
@@ -45,16 +44,13 @@ public class BladeXCodeAgent {
     private final ConventionValidator conventionValidator;
     private final ChangeEvaluator changeEvaluator;
     private final FileWriteExecutor fileWriteExecutor;
-    private final BuildVerifier buildVerifier;
     private final ObjectMapper objectMapper;
     private final int maxReviewRetries;
     private final boolean autoCommit;
     private final WorkflowStatusNotifier statusNotifier;
-    /** 阶段2: 配置(取 targetProjectRoot/outputRoot 决定写盘 root) */
+    /** Output-root configuration for per-plan isolated generation directories. */
     private final AiWorkflowProperties properties;
-    /** 阶段2: 已有项目索引(REAL 模式查重用) */
-    private final ConflictDetector conflictDetector;
-    /** 阶段2增强: 参考项目索引(REAL 模式生成时参考现有风格) */
+    /** Reference project index used for generation style adaptation. */
     private final ReferenceProjectIndex referenceProjectIndex;
 
     /** 跨文件契约校验器 — 无状态工具, 直接持有实例 */
@@ -78,11 +74,9 @@ public class BladeXCodeAgent {
                            ConventionValidator conventionValidator,
                            ChangeEvaluator changeEvaluator,
                            FileWriteExecutor fileWriteExecutor,
-                           BuildVerifier buildVerifier,
                            ObjectMapper objectMapper,
                            int maxReviewRetries, boolean autoCommit,
                            AiWorkflowProperties properties,
-                           ConflictDetector conflictDetector,
                            ReferenceProjectIndex referenceProjectIndex,
                            TopologySorter topologySorter,
                            GeneratedFileStore generatedFileStore,
@@ -95,12 +89,10 @@ public class BladeXCodeAgent {
         this.conventionValidator = conventionValidator;
         this.changeEvaluator = changeEvaluator;
         this.fileWriteExecutor = fileWriteExecutor;
-        this.buildVerifier = buildVerifier;
         this.objectMapper = objectMapper;
         this.maxReviewRetries = maxReviewRetries;
         this.autoCommit = autoCommit;
         this.properties = properties;
-        this.conflictDetector = conflictDetector;
         this.referenceProjectIndex = referenceProjectIndex;
         this.topologySorter = topologySorter;
         this.generatedFileStore = generatedFileStore;
@@ -109,9 +101,29 @@ public class BladeXCodeAgent {
                 conventionValidator != null ? conventionValidator : new ConventionValidator());
     }
 
-    /**
-     * 执行工作流
-     */
+    /** Compatibility constructor; retired direct-write collaborators are ignored. */
+    public BladeXCodeAgent(AiPlanMapper planMapper, AiSubPlanMapper subPlanMapper,
+                           AiExecutionLogMapper executionLogMapper,
+                           AiGeneratedFileMapper generatedFileMapper,
+                           BladeCodeGenRouter codeGenRouter,
+                           ConventionValidator conventionValidator,
+                           ChangeEvaluator changeEvaluator,
+                           FileWriteExecutor fileWriteExecutor,
+                           BuildVerifier ignoredBuildVerifier,
+                           ObjectMapper objectMapper,
+                           int maxReviewRetries, boolean autoCommit,
+                           AiWorkflowProperties properties,
+                           ConflictDetector ignoredConflictDetector,
+                           ReferenceProjectIndex referenceProjectIndex,
+                           TopologySorter topologySorter,
+                           GeneratedFileStore generatedFileStore,
+                           WorkflowStatusNotifier statusNotifier) {
+        this(planMapper, subPlanMapper, executionLogMapper, generatedFileMapper, codeGenRouter,
+                conventionValidator, changeEvaluator, fileWriteExecutor, objectMapper, maxReviewRetries,
+                autoCommit, properties, referenceProjectIndex, topologySorter, generatedFileStore, statusNotifier);
+    }
+
+    /** Executes the complete generation workflow for one persisted plan. */
     public void executeWorkflow(String receptionId) {
         log.info("开始执行工作流: receptionId={}", receptionId);
 
@@ -136,14 +148,25 @@ public class BladeXCodeAgent {
         log.info("加载方案完成: planId={}, subPlanCount={}", plan.getId(), subPlans.size());
 
         GenerationIdentity generationIdentity = GenerationIdentityResolver.resolve(plan, subPlans, objectMapper);
-        ReferenceFrameworkProfile frameworkProfile = referenceProjectIndex != null
-                ? referenceProjectIndex.getFrameworkProfile() : ReferenceFrameworkProfile.defaults();
         CanonicalPlanContractV2 wireContract = null;
         if (plan.getCanonicalContractJson() != null && !plan.getCanonicalContractJson().isBlank()) {
             try {
                 wireContract = objectMapper.readValue(plan.getCanonicalContractJson(), CanonicalPlanContractV2.class);
             } catch (JsonProcessingException error) {
                 throw new IllegalStateException("Unable to deserialize canonicalContract v2", error);
+            }
+        }
+        boolean reviewedReferenceRequired = wireContract != null && "STRUCTURED".equals(wireContract.sourceMode());
+        String expectedSnapshotId = wireContract == null ? null : wireContract.referenceSnapshotId();
+        try (ReferenceProjectIndex.SnapshotLease referenceLease =
+                     referenceProjectIndex.acquireSnapshot(expectedSnapshotId, reviewedReferenceRequired)) {
+        ReferenceFrameworkProfile currentProfile = referenceLease.profile();
+        ReferenceFrameworkProfile frameworkProfile = currentProfile;
+        if (wireContract != null && wireContract.referenceProfile() != null) {
+            frameworkProfile = objectMapper.convertValue(wireContract.referenceProfile(), ReferenceFrameworkProfile.class)
+                    .withoutSourceProjectRoot();
+            if (!frameworkProfile.equals(currentProfile.withoutSourceProjectRoot())) {
+                throw new IllegalStateException("Reference framework profile drift between review and execution");
             }
         }
         CanonicalDomainContractCompiler.Compilation domainCompilation;
@@ -164,10 +187,7 @@ public class BladeXCodeAgent {
         } catch (JsonProcessingException e) {
             throw new IllegalStateException("Unable to persist generation context", e);
         }
-        boolean realWrite = WriteTarget.parse(plan.getWriteTarget()).isReal();
-        plan.setOutputDirectory(realWrite
-                ? Paths.get(properties.getOutputRoot(), receptionId, "real-staging").toString()
-                : Paths.get(properties.getOutputRoot(), receptionId).toString());
+        plan.setOutputDirectory(Paths.get(properties.getOutputRoot(), receptionId).toString());
         plan.setCompileVerificationStatus("NOT_RUN");
         planMapper.updateById(plan);
         log.info("Generation context locked: identity={}, profile={}, domainFields={}",
@@ -372,31 +392,18 @@ public class BladeXCodeAgent {
         if (finalValidationSucceeded && finalContractErrorCount == 0 && projectQualityErrorCount == 0) {
             reconcileRepairedSubPlanStatuses(executionOrder);
         }
-
-        // Dependency-independent source validation always runs before a REAL project can be modified.
+        // Dependency-independent source validation always runs for isolated output.
         boolean sourceGateFailed = projectIssues.stream()
                 .anyMatch(issue -> issue.isError() && GeneratedSourceGate.isSourceGateRule(issue.rule()));
         boolean hasSubPlanErrors = executionOrder.stream()
                 .anyMatch(sp -> sp.getStatus() == SubPlanStatus.COMPLETED_WITH_ERRORS);
         boolean qualityGateFailed = !allSuccess || hasSubPlanErrors
                 || finalContractErrorCount + projectQualityErrorCount > 0;
-        boolean compileFailed = false;
         boolean verificationFailed = sourceGateFailed || qualityGateFailed;
         if (sourceGateFailed) {
             plan.setCompileVerificationStatus("FAILED_SOURCE_GATE");
             logPlanExecution(plan, "SOURCE_GATE", "", "FAILED",
                     "Generated source failed dependency-independent syntax or XML validation", null);
-        } else if (WriteTarget.parse(plan.getWriteTarget()).isReal()) {
-            logPlanExecution(plan, "SOURCE_GATE", "", "SUCCESS",
-                    "Generated source passed dependency-independent validation", null);
-            if (qualityGateFailed) {
-                plan.setCompileVerificationStatus("BLOCKED_QUALITY_GATE");
-                logPlanExecution(plan, "REAL_PROMOTION", "", "SKIPPED",
-                        "REAL project was not modified because final deterministic quality gates did not pass", null);
-            } else {
-                compileFailed = !promoteAndCompileRealPlan(plan, finalGeneratedFiles);
-                verificationFailed = compileFailed;
-            }
         } else {
             plan.setCompileVerificationStatus("PASSED_SOURCE_GATE_DEPENDENCIES_UNVERIFIED");
             logPlanExecution(plan, "SOURCE_GATE", "", "SUCCESS",
@@ -416,6 +423,7 @@ public class BladeXCodeAgent {
         statusNotifier.notifyPlan(plan, executionOrder);
 
         log.info("工作流执行完成: receptionId={}, status={}", receptionId, plan.getStatus());
+        }
     }
 
     private void failPlanPreflight(AiPlan plan, List<AiSubPlan> executionOrder,
@@ -563,98 +571,7 @@ public class BladeXCodeAgent {
             statusNotifier.notifySubPlan(subPlan);
         }
     }
-
-    /** REAL compile verification. Any verifier infrastructure exception fails closed. */
-    private boolean runCompileVerification(AiPlan plan) {
-        try {
-            List<AiGeneratedFile> dbFiles = generatedFileMapper.selectByPlanId(plan.getId());
-            if (dbFiles == null || dbFiles.isEmpty()) return true;
-            Set<String> modules = new LinkedHashSet<>();
-            for (AiGeneratedFile file : dbFiles) {
-                String path = file.getFilePath();
-                if (path == null) continue;
-                for (String prefix : new String[]{"blade-service/", "blade-service-api/"}) {
-                    if (path.startsWith(prefix)) {
-                        String rest = path.substring(prefix.length());
-                        int slash = rest.indexOf('/');
-                        if (slash > 0) modules.add(prefix + rest.substring(0, slash));
-                        break;
-                    }
-                }
-            }
-            if (modules.isEmpty()) return true;
-            List<String> moduleList = new ArrayList<>(modules);
-            BuildResult buildResult = buildVerifier.verify(moduleList);
-            if (buildResult.isPasses()) {
-                logPlanExecution(plan, "COMPILE_VERIFICATION", "", "SUCCESS",
-                        "Compile verification passed: " + moduleList, null);
-                return true;
-            }
-            String summary = "Compile verification failed: " + moduleList + "; "
-                    + buildResult.getErrors().stream().map(Object::toString).limit(10)
-                    .reduce((left, right) -> left + " | " + right).orElse("");
-            logPlanExecution(plan, "COMPILE_VERIFICATION", "", "FAILED", summary, null);
-            log.warn("Compile verification failed: plan={}, {}", plan.getReceptionId(), summary);
-            return false;
-        } catch (Exception error) {
-            log.error("Compile verification infrastructure failure: plan={}", plan.getReceptionId(), error);
-            logPlanExecution(plan, "COMPILE_VERIFICATION", "", "FAILED",
-                    "Compile verification infrastructure failure: " + error.getMessage(), null);
-            return false;
-        }
-    }
-
-    boolean promoteAndCompileRealPlan(AiPlan plan, List<GeneratedFile> finalGeneratedFiles) {
-        if (finalGeneratedFiles == null || finalGeneratedFiles.isEmpty()) {
-            plan.setCompileVerificationStatus("FAILED_REAL_PROMOTION");
-            logPlanExecution(plan, "REAL_PROMOTION", "", "FAILED",
-                    "No generated files were available for promotion", null);
-            return false;
-        }
-        List<FileWriteTask> writeTasks = finalGeneratedFiles.stream()
-                .map(file -> new FileWriteTask(file.getFilePath(), file.getContent(), file.getAction()))
-                .toList();
-        FileWriteExecutor.PreparedWrite prepared;
-        try {
-            prepared = fileWriteExecutor.prepareTransactionalWrite(writeTasks, properties.getTargetProjectRoot());
-        } catch (Exception error) {
-            plan.setCompileVerificationStatus("FAILED_REAL_PROMOTION");
-            logPlanExecution(plan, "REAL_PROMOTION", "", "FAILED",
-                    "Unable to snapshot REAL project targets: " + error.getMessage(), null);
-            return false;
-        }
-
-        WriteResult promotion = prepared.apply();
-        if (!promotion.isSuccess()) {
-            plan.setCompileVerificationStatus("FAILED_REAL_PROMOTION");
-            logPlanExecution(plan, "REAL_PROMOTION", "", "ROLLED_BACK", promotion.getErrorMessage(), null);
-            return false;
-        }
-        logPlanExecution(plan, "REAL_PROMOTION", "", "SUCCESS",
-                "Promoted " + promotion.getWrittenFiles().size() + " staged files under a reversible snapshot", null);
-
-        if (!runCompileVerification(plan)) {
-            WriteResult rollback = prepared.rollback();
-            plan.setCompileVerificationStatus(rollback.isSuccess()
-                    ? "FAILED_COMPILE_ROLLED_BACK" : "FAILED_COMPILE_ROLLBACK");
-            logPlanExecution(plan, "REAL_ROLLBACK", "", rollback.isSuccess() ? "ROLLED_BACK" : "FAILED",
-                    rollback.isSuccess()
-                            ? "Compile verification failed; every promoted file was restored"
-                            : "Compile verification failed and rollback was incomplete: " + rollback.getErrorMessage(), null);
-            return false;
-        }
-
-        prepared.commit();
-        plan.setOutputDirectory(properties.getTargetProjectRoot());
-        plan.setCompileVerificationStatus("PASSED");
-        logPlanExecution(plan, "REAL_PROMOTION", "", "COMMITTED",
-                "Compile verification passed; REAL project changes committed", null);
-        return true;
-    }
-
-    /**
-     * 执行单个子方案
-     */
+    /** Executes one sub-plan. */
     private boolean executeSubPlan(AiSubPlan subPlan, AiPlan plan, Set<String> ensuredSkeletonKeys, GenerationContext generationContext, List<AtomicTask> tasks) {
         log.info("执行子方案: id={}, title={}", subPlan.getId(), subPlan.getTitle());
 
@@ -679,8 +596,7 @@ public class BladeXCodeAgent {
             if ("SKIP".equals(eval.getAction())) {
                 continue;
             }
-
-            // 选择生成策略并生成 — 阶段2增强: REAL 模式注入参考项目适配摘要 + 同类代码
+            // Inject reference-project adaptation and similar-code summaries when available.
             GenerationResult genResult;
             String adaptationSummary = getAdaptationSummary(subPlan.getPlanId());
             String referenceSummary = findReferenceSummary(task);
@@ -804,70 +720,26 @@ public class BladeXCodeAgent {
             allGeneratedFiles.addAll(parentPomUpdates);
             log.info("Parent pom registration snapshots added: {}", parentPomUpdates.size());
         }
-
-        // 3d. 写入文件 — 阶段2: 按 plan.writeTarget 决定写盘 root
-        //     ISOLATED(默认)→ outputRoot(隔离区);REAL → targetProjectRoot(默认亦隔离区, 需查重)
-        WriteTarget writeTarget = WriteTarget.parse(plan.getWriteTarget());
+        // Write files only to the per-plan isolated output directory.
         String writeRoot = plan.getOutputDirectory();
-        log.info("Generation write target: writeTarget={}, stagingRoot={}", writeTarget.getCode(), writeRoot);
-
-        // REAL 模式: 写盘前查重 — 类名/表名冲突即拒绝(不覆盖现有代码)
-        if (writeTarget.isReal()) {
-            String conflict = conflictDetector.detectNameConflicts(allGeneratedFiles);
-            if (conflict != null) {
-                log.warn("REAL 模式查重冲突,拒绝写盘: {}", conflict);
-                logExecution(subPlan.getId(), "FILE_WRITE", "", "SKIPPED",
-                        "类名/表名冲突: " + conflict, null);
-                generatedFileStore.saveBatch(subPlan, plan, allGeneratedFiles, "SKIPPED");
-                subPlan.setStatus(SubPlanStatus.FAILED);
-                subPlan.setErrorMessage("REAL 模式查重冲突,拒绝写盘: " + conflict);
-                subPlan.setCompletedAt(LocalDateTime.now());
-                subPlanMapper.updateById(subPlan);
-                statusNotifier.notifySubPlan(subPlan);
-                return false;
-            }
-        }
-
-        // REAL generation is staged outside the target project. The target root must already exist,
-        // but it is not modified until every final deterministic gate passes.
-        boolean targetAvailable = !writeTarget.isReal()
-                || fileWriteExecutor.isRootAvailable(properties.getTargetProjectRoot());
-        if (!targetAvailable) {
-            generatedFileStore.saveBatch(subPlan, plan, allGeneratedFiles, "SKIPPED");
-            logExecution(subPlan.getId(), "FILE_WRITE", "", "FAILED",
-                    "REAL target project root is unavailable: " + properties.getTargetProjectRoot(), null);
+        log.info("Generation write target: writeTarget=ISOLATED, root={}", writeRoot);
+        List<FileWriteTask> writeTasks = allGeneratedFiles.stream()
+                .map(f -> new FileWriteTask(f.getFilePath(), f.getContent(), f.getAction()))
+                .toList();
+        WriteResult writeResult = fileWriteExecutor.write(writeTasks, writeRoot);
+        if (!writeResult.isSuccess()) {
+            logExecution(subPlan.getId(), "FILE_WRITE", "", "ROLLED_BACK",
+                    writeResult.getErrorMessage(), null);
+            generatedFileStore.saveBatch(subPlan, plan, allGeneratedFiles, "FAILED");
             subPlan.setStatus(SubPlanStatus.FAILED);
-            subPlan.setErrorMessage("REAL target project root is unavailable");
+            subPlan.setErrorMessage(writeResult.getErrorMessage());
             subPlan.setCompletedAt(LocalDateTime.now());
             subPlanMapper.updateById(subPlan);
             statusNotifier.notifySubPlan(subPlan);
             return false;
-        } else {
-            List<FileWriteTask> writeTasks = allGeneratedFiles.stream()
-                    .map(f -> new FileWriteTask(f.getFilePath(), f.getContent(), f.getAction()))
-                    .toList();
-            WriteResult writeResult = fileWriteExecutor.write(writeTasks, writeRoot);
-
-            if (!writeResult.isSuccess()) {
-                logExecution(subPlan.getId(), "FILE_WRITE", "", "ROLLED_BACK",
-                        writeResult.getErrorMessage(), null);
-                // 即使写入文件系统失败,我们也把生成的内容落库供 Part A 查看
-                generatedFileStore.saveBatch(subPlan, plan, allGeneratedFiles, "FAILED");
-                subPlan.setStatus(SubPlanStatus.FAILED);
-                subPlan.setErrorMessage(writeResult.getErrorMessage());
-                subPlan.setCompletedAt(LocalDateTime.now());
-                subPlanMapper.updateById(subPlan);
-                statusNotifier.notifySubPlan(subPlan);
-                return false;
-            }
-
-            log.info("文件写入完成: {} 个文件 (root={})", writeResult.getWrittenFiles().size(), writeRoot);
-            // 把生成的代码文件落库,供 Part A /api/plans/{receptionId}/files 拉取
-            generatedFileStore.saveBatch(subPlan, plan, allGeneratedFiles, "CREATED");
         }
-
-        // 3d. 编译验证（跳过—需要完整的目标项目环境）
-        // BuildResult buildResult = buildVerifier.verify(getAffectedModules(allGeneratedFiles));
+        log.info("Generated files written: count={}, root={}", writeResult.getWrittenFiles().size(), writeRoot);
+        generatedFileStore.saveBatch(subPlan, plan, allGeneratedFiles, "CREATED");
         // 当前阶段：跳过编译验证，记录日志
         log.info("编译验证跳过（需要完整目标项目 Maven环境）");
 
@@ -1045,7 +917,7 @@ public class BladeXCodeAgent {
     }
 
     /**
-     * 阶段2: REAL 模式查重 — 检测本次生成的类名/表名是否与目标项目已有冲突。
+     * Legacy helper retained for compatibility; direct project writes are disabled.
      *
      * <p>从每个 GeneratedFile 的路径推类名(文件名去 .java)、从内容提 @TableName,
      * 调 ExistingProjectIndex 查询。任一命中返回冲突描述(用于拒绝写盘),无冲突返回 null。
@@ -1093,18 +965,18 @@ public class BladeXCodeAgent {
 
     private String findReferenceSummary(AtomicTask task) {
         if (!referenceProjectIndex.isReady()) {
-            log.debug("REAL 生成: 参考项目未就绪, 不注入参考");
+            log.debug("Reference adaptation skipped because the project is not ready");
             return null;
         }
         ClassType targetType = mapTaskTypeToClassType(task);
         if (targetType == null) {
-            log.debug("REAL 生成: task 类型 {} 无对应 ClassType, 不注入参考", task.getType());
+            log.debug("Reference adaptation skipped for unsupported task type {}", task.getType());
             return null;
         }
         // 参考项目独立于生成目标,不排除同模块(同模块恰是风格最相关的参考)
         var ref = referenceProjectIndex.findBestReferenceExample(targetType, task.getModuleName(), task.getEntityName());
         if (ref.isEmpty()) {
-            log.debug("REAL 生成: 参考项目中无 {} 类型的参考代码", targetType);
+            log.debug("Reference adaptation found no {} example", targetType);
             return null;
         }
         IndexedClassInfo selected = ref.get();
@@ -1119,10 +991,10 @@ public class BladeXCodeAgent {
                         + ", score=" + score + ", reason=" + task.getReferenceReason(), null);
         String summary = referenceProjectIndex.buildStructuredSummary(ref.get().relativePath());
         if (summary == null) {
-            log.warn("REAL 生成: 参考代码摘要失败: {}", ref.get().relativePath());
+            log.warn("Reference adaptation summary failed: {}", ref.get().relativePath());
             return null;
         }
-        log.info("REAL 生成注入参考: task={}, 参考类={}, 摘要长度={}",
+        log.info("Reference adaptation injected: task={}, reference={}, summaryLength={}",
                 task.getType(), ref.get().simpleName(), summary.length());
         return summary;
     }
@@ -1879,7 +1751,7 @@ public class BladeXCodeAgent {
 
     /**
      * 写盘单个文件 — 按 plan.writeTarget 决定写盘根(与 executeSubPlan 主写盘逻辑一致)。
-     * 修复前 bug: 单参 write(tasks) 固定写 outputRoot,导致 REAL 模式修复后 Entity 落 ai-generated-modules
+     * Historical note: the old single-argument writer could place repaired files under the wrong root.
      * 而 blade_hgsjy 仍是旧版,造成 DB↔磁盘不一致。
      */
     /**

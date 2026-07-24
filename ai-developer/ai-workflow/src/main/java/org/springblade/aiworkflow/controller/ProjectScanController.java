@@ -69,7 +69,7 @@ public class ProjectScanController {
     }
 
     @PostMapping("/reference")
-    @Operation(summary = "设置参考项目路径并扫描", description = "REAL 模式生成时参考该项目的同类代码风格。需 X-Admin-Token。body: {path:'绝对路径'}")
+    @Operation(summary = "Set and scan the reference project", description = "The selected project is read-only and supplies generation conventions. Requires X-Admin-Token.")
     public ApiResponse<ReferenceProjectVO> setReference(
             @RequestBody ReferencePathRequest body,
             HttpServletRequest req) {

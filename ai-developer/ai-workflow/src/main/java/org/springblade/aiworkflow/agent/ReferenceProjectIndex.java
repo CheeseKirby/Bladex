@@ -31,6 +31,7 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.locks.ReentrantReadWriteLock;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
@@ -38,8 +39,8 @@ import java.util.stream.Stream;
  * 参考项目索引器 — 阶段2增强。
  *
  * <p>与 {@link ExistingProjectIndex} 区别:**root 可变**(用户通过前端设置参考项目路径)。
- * 用途:REAL 模式生成代码时,从参考项目找同类代码,提取结构化摘要注入 prompt,
- * 让生成的新模块贴合现有风格。参考项目**只读**,不写入(写入目标仍是 blade_hgsjy)。
+ * Purpose: find similar code in the selected reference project and inject bounded structural summaries.
+ * The reference project is read-only; generated files always go to an isolated output directory.
  *
  * <p>设计:
  * <ul>
@@ -65,18 +66,76 @@ public class ReferenceProjectIndex {
     private ProjectScanVO cachedVo;
     private List<IndexedClassInfo> cachedFlat;
     private ReferenceFrameworkProfile cachedProfile;
+    private final ReentrantReadWriteLock snapshotLock = new ReentrantReadWriteLock(true);
 
     /** 设置参考项目路径。先清缓存再改 root,避免并发读到"新 root + 旧 cache"组合。null/空表示取消参考 */
-    public synchronized void setPath(String path) {
-        // 先清缓存,再改 root — 确保读方法不会拿到"新 root + 旧 cache"的错配
-        this.cachedVo = null;
-        this.cachedFlat = null;
-        this.cachedProfile = null;
-        this.rootPath = (path == null || path.isBlank()) ? null : path.trim();
-        this.projectRoot = (this.rootPath != null)
-                ? Paths.get(this.rootPath).toAbsolutePath().normalize() : null;
-        if (this.rootPath != null && !Files.isDirectory(this.projectRoot)) {
-            log.warn("参考项目路径不存在或不是目录: {}", this.rootPath);
+    public void setPath(String path) {
+        snapshotLock.writeLock().lock();
+        try {
+            synchronized (this) {
+                // Clear caches before switching roots so readers cannot observe mixed snapshots.
+                this.cachedVo = null;
+                this.cachedFlat = null;
+                this.cachedProfile = null;
+                this.rootPath = (path == null || path.isBlank()) ? null : path.trim();
+                this.projectRoot = (this.rootPath != null)
+                        ? Paths.get(this.rootPath).toAbsolutePath().normalize() : null;
+                if (this.rootPath != null && !Files.isDirectory(this.projectRoot)) {
+                    log.warn("Reference project path does not exist or is not a directory: {}", this.rootPath);
+                }
+            }
+        } finally {
+            snapshotLock.writeLock().unlock();
+        }
+    }
+
+    /** Pins the current reference snapshot for the duration of a generation workflow. */
+    public SnapshotLease acquireSnapshot(String expectedSnapshotId, boolean required) {
+        snapshotLock.readLock().lock();
+        boolean acquired = false;
+        try {
+            synchronized (this) {
+                if (rootPath != null && cachedFlat == null) scan(false);
+                List<IndexedClassInfo> all = cachedFlat == null ? List.of() : cachedFlat;
+                String currentSnapshotId = buildReferenceSnapshotId(all);
+                ReferenceFrameworkProfile profile = getFrameworkProfile().withoutSourceProjectRoot();
+                if (required && (expectedSnapshotId == null || expectedSnapshotId.isBlank())) {
+                    throw new IllegalStateException("Reviewed structured plan is missing referenceSnapshotId");
+                }
+                if (expectedSnapshotId != null && !expectedSnapshotId.isBlank()
+                        && !expectedSnapshotId.equals(currentSnapshotId)) {
+                    throw new IllegalStateException("Reference project snapshot drift between review and execution");
+                }
+                acquired = true;
+                return new SnapshotLease(currentSnapshotId, profile, snapshotLock.readLock());
+            }
+        } finally {
+            if (!acquired) snapshotLock.readLock().unlock();
+        }
+    }
+
+    public static final class SnapshotLease implements AutoCloseable {
+        private final String snapshotId;
+        private final ReferenceFrameworkProfile profile;
+        private final java.util.concurrent.locks.Lock lock;
+        private boolean closed;
+
+        private SnapshotLease(String snapshotId, ReferenceFrameworkProfile profile,
+                              java.util.concurrent.locks.Lock lock) {
+            this.snapshotId = snapshotId;
+            this.profile = profile;
+            this.lock = lock;
+        }
+
+        public String snapshotId() { return snapshotId; }
+        public ReferenceFrameworkProfile profile() { return profile; }
+
+        @Override
+        public void close() {
+            if (!closed) {
+                closed = true;
+                lock.unlock();
+            }
         }
     }
 
@@ -224,8 +283,10 @@ public class ReferenceProjectIndex {
         List<ReferenceSearchResult.AccessDecision> decisions = buildAccessDecisions(
                 normalizedIntent, tokens, direct, anomalies);
 
+        ReferenceFrameworkProfile profile = getFrameworkProfile().withoutSourceProjectRoot();
         return new ReferenceSearchResult(
                 buildReferenceSnapshotId(all),
+                profile,
                 normalizedIntent,
                 symbols,
                 relations.values().stream()
@@ -445,7 +506,8 @@ public class ReferenceProjectIndex {
     private String buildReferenceSnapshotId(List<IndexedClassInfo> all) {
         try {
             MessageDigest digest = MessageDigest.getInstance("SHA-256");
-            digest.update((rootPath == null ? "" : rootPath).getBytes(StandardCharsets.UTF_8));
+            digest.update((projectRoot == null ? "" : projectRoot.toString()).getBytes(StandardCharsets.UTF_8));
+            digest.update(getFrameworkProfile().fingerprintMaterial().getBytes(StandardCharsets.UTF_8));
             all.stream().sorted(Comparator.comparing(IndexedClassInfo::relativePath)).forEach(info -> {
                 String signature = info.relativePath() + "|" + info.simpleName() + "|" + info.type()
                         + "|" + info.tableName() + "|" + info.fields() + "|" + info.publicMethodSignatures();
@@ -491,8 +553,9 @@ public class ReferenceProjectIndex {
     private ReferenceFrameworkProfile detectFrameworkProfile() {
         if (projectRoot == null || !Files.isDirectory(projectRoot)) return ReferenceFrameworkProfile.defaults();
         String rootPom = readSourceContent("pom.xml");
-        String version = firstNonBlank(tagValue(rootPom, "revision"), directProjectTag(rootPom, "version"), "UNKNOWN");
-        String javaVersion = firstNonBlank(tagValue(rootPom, "java.version"), "UNKNOWN");
+        ReferenceFrameworkProfile defaults = ReferenceFrameworkProfile.defaults();
+        String version = firstNonBlank(tagValue(rootPom, "revision"), directProjectTag(rootPom, "version"), defaults.bladeXVersion());
+        String javaVersion = firstNonBlank(tagValue(rootPom, "java.version"), defaults.javaVersion());
         String groupId = firstNonBlank(directProjectTag(rootPom, "groupId"), parentTag(rootPom, "groupId"), "org.springblade");
         String apiParentArtifact = "blade-service-api";
         String serviceParentArtifact = "blade-service";
@@ -514,8 +577,8 @@ public class ReferenceProjectIndex {
         }
         return new ReferenceFrameworkProfile(version, javaVersion, groupId,
                 apiParentArtifact, serviceParentArtifact, apiParentVersion, serviceParentVersion,
-                detectInternalDependencyVersion(version), firstNonBlank(detectJakartaOrJavax(), "javax"),
-                firstNonBlank(detectSwaggerVersion(), "v2"),
+                detectInternalDependencyVersion(version), firstNonBlank(detectJakartaOrJavax(), "jakarta"),
+                firstNonBlank(detectSwaggerVersion(), "v3"),
                 detectPackageSuffix(ClassType.ENTITY, null, "pojo.entity"), voPackages,
                 detectPackageSuffix(ClassType.CONTROLLER, null, "controller"),
                 detectPackageSuffix(ClassType.SERVICE, null, "service"),

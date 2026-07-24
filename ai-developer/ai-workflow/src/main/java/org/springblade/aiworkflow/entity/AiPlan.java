@@ -81,10 +81,10 @@ public class AiPlan implements Serializable {
     private Integer qualityWarningCount;
 
     /**
-     * 写入目标 — 阶段2:ISOLATED(落隔离区) / REAL(落目标项目根)。
-     * 空/非法按 ISOLATED。决定 executeSubPlan 的写盘 root 与是否查重。
+     * Generation output target; only ISOLATED is supported.
+     * Empty values are normalized to ISOLATED at request intake.
      */
-    @Schema(description = "写入目标: ISOLATED / REAL")
+    @Schema(description = "Generation output target: ISOLATED")
     private String writeTarget;
 
     @Schema(description = "创建时间")

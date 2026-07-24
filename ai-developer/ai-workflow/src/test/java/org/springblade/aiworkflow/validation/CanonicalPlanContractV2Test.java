@@ -247,7 +247,7 @@ class CanonicalPlanContractV2Test {
     private CanonicalPlanContractV2 copyContract(CanonicalPlanContractV2 source, String sourceMode,
                                                   List<CanonicalPlanContractV2.Deliverable> deliverables) {
         return new CanonicalPlanContractV2(source.contractVersion(), source.sourceHash(), sourceMode,
-                source.referenceSnapshotId(), source.rulesetVersion(), source.identity(), source.fields(),
+                source.referenceSnapshotId(), source.referenceProfile(), source.rulesetVersion(), source.identity(), source.fields(),
                 source.domains(), source.modules(), source.aggregates(), source.entities(), source.states(),
                 source.integrations(), deliverables, source.referenceBindings(), source.architectureDecisions());
     }

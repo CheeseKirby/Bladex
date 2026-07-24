@@ -166,7 +166,11 @@ function hasGroundedStateIntent(draft: PlanDraftV2, requirement: string): boolea
   return values.length >= 2 && values.every((value) => normalized.includes(value));
 }
 
-export function compileStructuredPlanDraft(draft: PlanDraftV2, referenceSnapshotId?: string): PlanContract {
+export function compileStructuredPlanDraft(
+  draft: PlanDraftV2,
+  referenceSnapshotId?: string,
+  referenceProfile?: import('../services/referenceSummary').ReferenceFrameworkProfile,
+): PlanContract {
   const moduleName = normalizeModuleName(draft.identity.moduleName);
   const entityId = `entity.${toId(draft.identity.entityName)}`;
   const moduleId = `module.${toId(moduleName)}`;
@@ -215,6 +219,7 @@ export function compileStructuredPlanDraft(draft: PlanDraftV2, referenceSnapshot
     sourceHash: '0'.repeat(64),
     sourceMode: 'STRUCTURED',
     ...(referenceSnapshotId ? { referenceSnapshotId } : {}),
+    ...(referenceProfile ? { referenceProfile } : {}),
     rulesetVersion: PLAN_CONTRACT_RULESET_VERSION,
     identity,
     fields,

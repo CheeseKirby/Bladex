@@ -61,8 +61,8 @@ public class PlanReceiveRequest {
     @Schema(description = "HMAC-SHA256 credential issued by trusted Part A")
     private String bundleSignature;
 
-    /** Empty values default to ISOLATED. REAL writes require administrator authorization. */
-    @Schema(description = "Write target: ISOLATED or REAL", defaultValue = "ISOLATED")
+    /** Empty values default to ISOLATED; all other values are rejected. */
+    @Schema(description = "Write target: ISOLATED", defaultValue = "ISOLATED")
     private String writeTarget;
 
     @Data

@@ -147,6 +147,9 @@
       "items": {
         "$ref": "#/$defs/architectureDecision"
       }
+    },
+    "referenceProfile": {
+      "$ref": "#/$defs/referenceProfile"
     }
   },
   "$defs": {
@@ -575,7 +578,150 @@
           "uniqueItems": true
         }
       }
+    },
+    "referenceProfile": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "bladeXVersion",
+        "javaVersion",
+        "parentGroupId",
+        "apiParentArtifactId",
+        "serviceParentArtifactId",
+        "apiParentVersion",
+        "serviceParentVersion",
+        "internalDependencyVersion",
+        "validationNamespace",
+        "swaggerGeneration",
+        "entityPackageSuffix",
+        "voPackageSuffixes",
+        "controllerPackageSuffix",
+        "servicePackageSuffix",
+        "serviceImplPackageSuffix",
+        "mapperPackageSuffix",
+        "wrapperPackageSuffix",
+        "feignPackageSuffix",
+        "excelPackageSuffix",
+        "mapperXmlInJava",
+        "applicationStyle",
+        "nacosNamespace",
+        "profileStyle"
+      ],
+      "properties": {
+        "bladeXVersion": {
+          "type": "string",
+          "minLength": 1
+        },
+        "javaVersion": {
+          "type": "string",
+          "minLength": 1
+        },
+        "parentGroupId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "apiParentArtifactId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "serviceParentArtifactId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "apiParentVersion": {
+          "type": "string",
+          "minLength": 1
+        },
+        "serviceParentVersion": {
+          "type": "string",
+          "minLength": 1
+        },
+        "internalDependencyVersion": {
+          "type": "string",
+          "minLength": 1
+        },
+        "validationNamespace": {
+          "type": "string",
+          "minLength": 1
+        },
+        "swaggerGeneration": {
+          "type": "string",
+          "minLength": 1
+        },
+        "entityPackageSuffix": {
+          "type": "string",
+          "minLength": 1
+        },
+        "controllerPackageSuffix": {
+          "type": "string",
+          "minLength": 1
+        },
+        "servicePackageSuffix": {
+          "type": "string",
+          "minLength": 1
+        },
+        "serviceImplPackageSuffix": {
+          "type": "string",
+          "minLength": 1
+        },
+        "mapperPackageSuffix": {
+          "type": "string",
+          "minLength": 1
+        },
+        "wrapperPackageSuffix": {
+          "type": "string",
+          "minLength": 1
+        },
+        "feignPackageSuffix": {
+          "type": "string",
+          "minLength": 1
+        },
+        "excelPackageSuffix": {
+          "type": "string",
+          "minLength": 1
+        },
+        "applicationStyle": {
+          "type": "string",
+          "minLength": 1
+        },
+        "nacosNamespace": {
+          "type": "string",
+          "minLength": 1
+        },
+        "profileStyle": {
+          "type": "string",
+          "minLength": 1
+        },
+        "voPackageSuffixes": {
+          "type": "object",
+          "minProperties": 1,
+          "additionalProperties": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "mapperXmlInJava": {
+          "type": "boolean"
+        }
+      }
     }
   },
-  "additionalProperties": false
+  "additionalProperties": false,
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "sourceMode": {
+            "const": "STRUCTURED"
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "referenceSnapshotId",
+          "referenceProfile"
+        ]
+      }
+    }
+  ]
 }

@@ -7,7 +7,6 @@ import org.springblade.aiworkflow.entity.AiGeneratedFile;
 import org.springblade.aiworkflow.entity.AiPlan;
 import org.springblade.aiworkflow.entity.AiSubPlan;
 import org.springblade.aiworkflow.enums.TaskType;
-import org.springblade.aiworkflow.enums.WriteTarget;
 import org.springblade.aiworkflow.mapper.AiGeneratedFileMapper;
 import org.springframework.stereotype.Component;
 
@@ -111,16 +110,8 @@ public class GeneratedFileStore {
         String filePath = file.getFilePath();
         String content = file.getContent();
         try {
-            WriteTarget writeTarget = WriteTarget.parse(plan.getWriteTarget());
             String writeRoot = plan.getOutputDirectory() == null || plan.getOutputDirectory().isBlank()
                     ? properties.getOutputRoot() : plan.getOutputDirectory();
-            boolean rootAvailable = !writeTarget.isReal()
-                    || fileWriteExecutor.isRootAvailable(properties.getTargetProjectRoot());
-            if (!rootAvailable) {
-                log.warn("Repair write skipped because root is unavailable: path={}, target={}",
-                        filePath, plan.getWriteTarget());
-                return false;
-            }
 
             WriteResult result = fileWriteExecutor.write(
                     List.of(new FileWriteTask(filePath, content, "MODIFY")), writeRoot);

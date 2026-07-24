@@ -8,6 +8,7 @@ import java.util.Map;
  */
 public record ReferenceSearchResult(
         String snapshotId,
+        ReferenceFrameworkProfile profile,
         String intent,
         List<Symbol> symbols,
         List<Relation> relations,

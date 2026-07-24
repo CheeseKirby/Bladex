@@ -33,7 +33,7 @@ interface FetchOpts {
   method?: string;
   body?: unknown;
   timeoutMs?: number;
-  /** 透传给 Part B 的额外请求头(如 REAL 模式的 X-Admin-Token) */
+  /** Additional headers forwarded to Part B for privileged reference-project endpoints. */
   extraHeaders?: Record<string, string>;
 }
 
@@ -93,10 +93,11 @@ export function prepareV2PlanBundle(
     return { ok: false, status: 400, code: 'INVALID_PLAN_BUNDLE', message: 'projectId, masterPlan.id and a positive masterPlan.version are required.' };
   }
   const requestedWriteTarget = stringValue(value.writeTarget);
-  if (requestedWriteTarget && requestedWriteTarget !== 'ISOLATED' && requestedWriteTarget !== 'REAL') {
-    return { ok: false, status: 400, code: 'INVALID_WRITE_TARGET', message: 'writeTarget must be ISOLATED or REAL.' };
+  if (requestedWriteTarget && requestedWriteTarget !== 'ISOLATED') {
+    return { ok: false, status: 400, code: 'REAL_WRITE_DISABLED',
+      message: 'writeTarget must be ISOLATED; direct project writes are disabled.' };
   }
-  const writeTarget: 'ISOLATED' | 'REAL' = requestedWriteTarget === 'REAL' ? 'REAL' : 'ISOLATED';
+  const writeTarget: 'ISOLATED' = 'ISOLATED';
   const masterReviewId = stringValue(value.reviewManifest.masterReviewId);
   if (!masterReviewId) return { ok: false, status: 428, code: 'REVIEW_REQUIRED', message: 'Master review ID is required.' };
   const masterReview = reviewStore.get(masterReviewId);
@@ -377,20 +378,11 @@ transmissionRouter.post('/send', async (req: Request, res: Response) => {
   }
 
   // 真实调用 Part B
-  // 阶段2: writeTarget=REAL(写真实 blade_hgsjy)需带 X-Admin-Token,Part B 会校验
-  const writeTarget = (planData && typeof planData === 'object' && 'writeTarget' in planData)
-    ? String((planData as { writeTarget: unknown }).writeTarget)
-    : '';
-  const extraHeaders: Record<string, string> = {};
-  if (writeTarget.toUpperCase() === 'REAL') {
-    const adminToken = process.env.AI_WORKFLOW_ADMIN_TOKEN || '';
-    if (adminToken) extraHeaders['X-Admin-Token'] = adminToken;
-  }
+  // Forward the reviewed plan to Part B; generation is always isolated.
   const result = await proxy<unknown>('/api/plans/receive', {
     method: 'POST',
     body: planData,
     timeoutMs: LONG_PROXY_TIMEOUT_MS,
-    extraHeaders,
   });
   if (!result.ok) {
     res.status(502).json({ code: 502, success: false, msg: result.msg });
@@ -482,7 +474,7 @@ transmissionRouter.get('/timeline/:receptionId', async (req: Request, res: Respo
   res.json(result.data);
 });
 
-// ─── 阶段2增强:参考项目(REAL 模式生成时参考现有代码风格)───
+// Reference project configuration and read-only source browsing.
 
 /** 设置参考项目路径并扫描(需 Part B 鉴权) */
 transmissionRouter.post('/reference', async (req: Request, res: Response) => {

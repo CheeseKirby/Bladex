@@ -50,7 +50,7 @@ END$$
 DELIMITER ;
 
 CALL add_column_if_missing('ai_workflow_plan', 'write_target',
-    "VARCHAR(10) NOT NULL DEFAULT 'ISOLATED' COMMENT '写入目标: ISOLATED(隔离区) / REAL(真实项目)'");
+    "VARCHAR(10) NOT NULL DEFAULT 'ISOLATED' COMMENT 'write target: ISOLATED only'");
 CALL add_column_if_missing('ai_workflow_plan', 'generation_identity_json',
     "JSON NULL COMMENT 'Canonical generation identity JSON'");
 CALL add_column_if_missing('ai_workflow_plan', 'reference_profile_json',

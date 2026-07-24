@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs';
 import { test } from 'node:test';
 import type { PlanContract } from '../llm/planContract';
 import {
+  DEFAULT_REFERENCE_PROFILE,
   buildBusinessEvidence,
   buildCanonicalReferenceIntent,
   getReferenceAdaptationSummary,
@@ -53,6 +54,7 @@ test('intent-aware context uses bounded Part B search with snapshot, relations a
       searchRequest = init;
       return new Response(JSON.stringify({ data: {
         snapshotId: 'ref-1234567890',
+        profile: DEFAULT_REFERENCE_PROFILE,
         intent: '\u7279\u6b8a\u65f6\u6bb5\u52a8\u706b\u4f5c\u4e1a\u8282\u5047\u65e5\u5ba1\u6279\u5347\u7ea7',
         symbols: [
           {
@@ -133,6 +135,7 @@ test('reference search normalizes nullable ownership metadata from relation-expa
     }
     return new Response(JSON.stringify({ data: {
       snapshotId: 'ref-nullable-module',
+      profile: DEFAULT_REFERENCE_PROFILE,
       intent: 'safe SpecialPeriod flow WORKFLOW',
       symbols: [{
         score: 0,

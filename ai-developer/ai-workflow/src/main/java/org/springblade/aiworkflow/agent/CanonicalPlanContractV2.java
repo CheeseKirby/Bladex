@@ -16,6 +16,7 @@ public record CanonicalPlanContractV2(
         String sourceHash,
         String sourceMode,
         String referenceSnapshotId,
+        Map<String, Object> referenceProfile,
         String rulesetVersion,
         Identity identity,
         List<Field> fields,
@@ -38,6 +39,7 @@ public record CanonicalPlanContractV2(
         states = copy(states);
         integrations = copy(integrations);
         deliverables = copy(deliverables);
+        referenceProfile = referenceProfile == null ? null : Map.copyOf(referenceProfile);
         referenceBindings = copy(referenceBindings);
         architectureDecisions = copy(architectureDecisions);
     }
@@ -82,6 +84,10 @@ public record CanonicalPlanContractV2(
         if (!isV2()) errors.add("canonicalContract.contractVersion must be 2.0");
         if (!("STRUCTURED".equals(sourceMode) || "LEGACY_INFERRED".equals(sourceMode))) {
             errors.add("canonicalContract.sourceMode is invalid");
+        }
+        if ("STRUCTURED".equals(sourceMode)
+                && (referenceSnapshotId == null || referenceSnapshotId.isBlank() || referenceProfile == null)) {
+            errors.add("structured canonicalContract must pin referenceSnapshotId and referenceProfile");
         }
         try { generationIdentity(); } catch (RuntimeException error) { errors.add(error.getMessage()); }
         if (identity != null && (!hasText(identity.moduleName()) || !hasText(identity.entityName())

@@ -437,6 +437,21 @@ class GeneratedProjectValidatorTest {
         assertTrue(hasRule(issues, "MAPPER-PARAM-PROPERTY-MISSING"), issues.toString());
     }
 
+    @Test
+    void bladeX410ProfileRejectsLegacyValidationAndSwaggerImports() {
+        GeneratedFile file = GeneratedFile.create(TaskType.STANDARD_CRUD_ENTITY,
+                BladeXModuleLayout.entityPath(context, "SpecialPeriod"), """
+                package org.springblade.safeprod.pojo.entity;
+                import javax.validation.constraints.NotNull;
+                import io.swagger.annotations.ApiModel;
+                public class SpecialPeriod {}
+                """);
+        List<GeneratedProjectValidator.Issue> issues = new GeneratedProjectValidator()
+                .validate(List.of(file), List.of(), context, null);
+        assertTrue(hasRule(issues, "FRAMEWORK-VALIDATION-NAMESPACE-MISMATCH"), issues.toString());
+        assertTrue(hasRule(issues, "FRAMEWORK-SWAGGER-GENERATION-MISMATCH"), issues.toString());
+    }
+
     private boolean hasRule(List<GeneratedProjectValidator.Issue> issues, String rule) {
         return issues.stream().anyMatch(issue -> rule.equals(issue.rule()));
     }

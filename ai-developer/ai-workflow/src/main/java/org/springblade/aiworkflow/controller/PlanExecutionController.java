@@ -25,7 +25,7 @@ public class PlanExecutionController {
     /**
      * 触发执行方案 - 管理操作,需 admin token 鉴权。
      *
-     * <p>trigger 可重触发任意已落库 plan(含 REAL 模式写真实项目),无鉴权会被远程利用写盘真实项目。
+     * <p>Triggering persisted plans remains privileged because it starts resource-intensive generation work.
      * 复用 {@link AdminTokenGuard#requireAdmin},未配 token 时仅放行本地回环。
      */
     @PostMapping("/trigger")

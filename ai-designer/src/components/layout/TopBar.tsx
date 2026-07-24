@@ -137,7 +137,7 @@ const TopBar: React.FC<TopBarProps> = ({ onNewProject, onSave, onExport, project
         <Button icon={<PlusOutlined />} size="small" onClick={onNewProject}>
           新建
         </Button>
-        <Tooltip title="设置参考项目(REAL 模式生成时参考现有代码风格)">
+        <Tooltip title="Configure a read-only reference project for generation style adaptation">
           <Button icon={<FolderOpenOutlined />} size="small" onClick={() => setRefModalOpen(true)}>
             参考项目
           </Button>
