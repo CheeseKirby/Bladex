@@ -30,6 +30,7 @@ public final class CanonicalJsonHasher {
 
     public static String contentHash(String markdown) {
         String value = markdown == null ? "" : markdown;
+        value = value.replace("\r\n", "\n").replace('\r', '\n');
         value = CONTRACT_HEADING.matcher(value).replaceAll("\n");
         value = CONTRACT_BLOCK.matcher(value).replaceAll("").stripTrailing();
         return sha256(value);

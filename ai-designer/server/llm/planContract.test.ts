@@ -313,7 +313,10 @@ test('multiple plan-contract blocks are rejected and stripped consistently for c
   const compilation = compilePlanContract(content);
   assert.equal(compilation.source, 'INFERRED');
   assert.match(compilation.diagnostics.join(' '), /Multiple plan-contract blocks are forbidden/);
-  assert.equal(hashPlanContent(content), expected);
+  const lfContent = content.replace(/\r\n?/g, '\n');
+  const crlfContent = lfContent.replace(/\n/g, '\r\n');
+  assert.equal(hashPlanContent(lfContent), expected);
+  assert.equal(hashPlanContent(crlfContent), expected);
 });
 
 

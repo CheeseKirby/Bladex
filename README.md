@@ -1,6 +1,38 @@
 # AI 驱动 BladeX 代码生成工作流
 
+[![CI](https://github.com/CheeseKirby/Bladex/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/CheeseKirby/Bladex/actions/workflows/ci.yml)
+[![Version](https://img.shields.io/badge/version-0.1.0-blue)](CHANGELOG.md)
+[![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
+[![Node.js](https://img.shields.io/badge/Node.js-20.19.x-339933?logo=node.js&logoColor=white)](#支持矩阵)
+[![JDK](https://img.shields.io/badge/JDK-17-007396?logo=openjdk&logoColor=white)](#支持矩阵)
+
 通过可视化设计、自然语言需求和参考项目分析，生成符合目标 BladeX 工程约束的业务代码（Entity/VO/Controller/Service/Mapper/Wrapper/Excel/Feign、DDL 与模块骨架）。当前版本已针对 BladeX 2.4.0.RELEASE、Java 8、`javax.*`、Swagger v2 和双模块布局完成真实回放验证。
+
+> 当前版本：`0.1.0`。生成器运行环境与生成代码目标环境不同，详见下方支持矩阵。
+
+## 支持矩阵
+
+### 生成器运行环境
+
+| 组件 | 支持版本 | 说明 |
+|---|---|---|
+| 操作系统 | Windows 10/11；CI 使用 Ubuntu | `start.ps1` / `start.bat` 面向 Windows |
+| Node.js | 20.19.x | 前端与 BFF |
+| JDK | 17 | Part B / Spring Boot 运行时 |
+| Maven | 3.8+ | Part B 构建与测试 |
+| MySQL | 8.0 | 工作流状态和生成文件元数据 |
+| Docker Desktop | 可选 | 本机没有 MySQL 时自动启动容器 |
+
+### 生成代码目标环境
+
+| 组件 | 支持范围 |
+|---|---|
+| BladeX | 2.4.0.RELEASE |
+| Java | 8 |
+| Java EE API | `javax.*` |
+| Swagger | v2 |
+| 模块布局 | API + Service 双模块 |
+| 最终编译 | 需要目标项目私有 Maven 仓库和依赖环境 |
 
 ## 当前阶段
 
@@ -196,3 +228,13 @@ powershell -ExecutionPolicy Bypass -File deploy.ps1
 | `AI_WORKFLOW_ADMIN_TOKEN` | (空) | 管理端 token;未配置时写入端点仅接受本地回环 |
 | `TARGET_PROJECT_ROOT` | `../../ai-generated-modules` | 生成产物写入根（默认隔离区） |
 | `REFERENCE_PROJECT_ROOT` | （空） | 可选：启动时自动加载的参考项目绝对路径；不要写入仓库共享配置 |
+
+## 发布与项目治理
+
+- 版本变更记录：[`CHANGELOG.md`](CHANGELOG.md)
+- 发布流程与主分支保护：[`docs/RELEASING.md`](docs/RELEASING.md)
+- 验证门禁：[`docs/VERIFICATION.md`](docs/VERIFICATION.md)
+- 开源许可证：[`LICENSE`](LICENSE)（Apache License 2.0）
+- 第三方与商标说明：[`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md)
+
+提交到 `main` 前应通过 `frontend-bff`、`backend` 和 `mysql-schema` 三项 CI 检查。正式版本仅从已通过 CI 的 `main` 提交创建。
