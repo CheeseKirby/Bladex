@@ -93,7 +93,7 @@
 |---|---|
 | JDK | 17 |
 | Maven | ≥ 3.8 |
-| Node.js | ≥ 18 |
+| Node.js | ≥ 22.12(或 20.19+,推荐 22 LTS) |
 | 数据库 | MySQL ≥ 8.0，或 Docker Desktop |
 
 校验:`java -version`、`mvn -v`、`node -v` 都能输出版本。

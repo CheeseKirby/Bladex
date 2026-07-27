@@ -6,7 +6,7 @@
 #   3. .\deploy.ps1
 #
 # 脚本职责:
-#   - 检查依赖(JDK 17 / Maven / Node 18+ / MySQL 或 Docker)
+#   - 检查依赖(JDK 17 / Maven / Node 22 LTS / MySQL 或 Docker)
 #   - 交互式收集凭证(LLM token、DB 密码)
 #   - 写 .env 文件
 #   - 选择 MySQL 来源(本地 / Docker)并灌 schema
@@ -78,11 +78,14 @@ $mvnMajor = [int]$Matches[1]
 if ($mvnMajor -lt 3) { Fail "需要 Maven 3.8+,当前是 $mvnMajor。" }
 Write-Host "  mvn: OK (v$mvnMajor)"
 
-if (-not (Test-Cmd "node")) { Fail "未找到 node。请装 Node 18+ (https://nodejs.org/)。" }
+if (-not (Test-Cmd "node")) { Fail "未找到 node。请装 Node 22 LTS(https://nodejs.org/),vite 8 需 ^20.19 || >=22.12。" }
 $nodeVer = (& node -v 2>&1).TrimStart('v')
-if ($nodeVer -notmatch '^(\d+)\.') { Fail "无法解析 node -v: $nodeVer" }
+if ($nodeVer -notmatch '^(\d+)\.(\d+)\.') { Fail "无法解析 node -v: $nodeVer" }
 $nodeMajor = [int]$Matches[1]
-if ($nodeMajor -lt 18) { Fail "需要 Node 18+,当前是 v$nodeVer。" }
+$nodeMinor = [int]$Matches[2]
+# vite 8 / @vitejs/plugin-react 6 要求 ^20.19.0 || >=22.12.0,Node 18 跑不动
+$nodeOk = ($nodeMajor -eq 20 -and $nodeMinor -ge 19) -or ($nodeMajor -eq 22 -and $nodeMinor -ge 12) -or ($nodeMajor -ge 23)
+if (-not $nodeOk) { Fail "需要 Node ^20.19 || >=22.12(vite 8 要求),当前 v$nodeVer。推荐装 Node 22 LTS。" }
 Write-Host "  node: OK (v$nodeVer)"
 
 if (-not (Test-Cmd "npm")) { Fail "未找到 npm(随 Node 一起装)。" }

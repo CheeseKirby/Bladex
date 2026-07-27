@@ -151,7 +151,16 @@ function Wait-Http([string]$Name, [string]$Url, [int]$TimeoutSeconds) {
     return $false
 }
 function Test-DockerEngine {
-    & docker info *> $null
+    # docker info 在引擎未运行时写 stderr,$ErrorActionPreference=Stop 下会抛
+    # NativeCommandError 中断脚本(2>$null / *>$null 在 Stop 下无法抑制)。
+    # 临时切 SilentlyContinue,让任何失败都靠 $LASTEXITCODE 判断、安全返回 $false。
+    $prev = $ErrorActionPreference
+    $ErrorActionPreference = 'SilentlyContinue'
+    try {
+        & docker info *> $null
+    } finally {
+        $ErrorActionPreference = $prev
+    }
     return $LASTEXITCODE -eq 0
 }
 
@@ -181,7 +190,16 @@ function Ensure-DockerEngine {
 }
 
 function Test-ManagedMysqlContainer {
-    $running = & docker inspect --format '{{.State.Running}}' ai-workflow-mysql 2>$null
+    # Docker 引擎未运行或容器不存在时,docker inspect 写 stderr,$ErrorActionPreference=Stop
+    # 下抛 NativeCommandError 中断脚本(2>$null 在 Stop 下无法抑制)。临时切 SilentlyContinue,
+    # 让任何失败都安全返回 $false(本地 MySQL 场景本就该走"外部 MySQL"分支)。
+    $prev = $ErrorActionPreference
+    $ErrorActionPreference = 'SilentlyContinue'
+    try {
+        $running = & docker inspect --format '{{.State.Running}}' ai-workflow-mysql 2>$null
+    } finally {
+        $ErrorActionPreference = $prev
+    }
     return $LASTEXITCODE -eq 0 -and "$running".Trim().ToLowerInvariant() -eq "true"
 }
 
@@ -331,7 +349,14 @@ Import-DotEnv $EnvPath
 Ensure-PlanBundleSigningSecret $EnvPath
 Assert-Command "java" "请安装 JDK 17 并加入 PATH。"
 Assert-Command "mvn" "请安装 Maven 3.8+ 并加入 PATH。"
-Assert-Command "node" "请安装 Node.js 18+ 并加入 PATH。"
+Assert-Command "node" "请安装 Node.js 22 LTS(^20.19 || >=22.12,vite 8 要求)并加入 PATH。"
+$nodeVer = (& node -v 2>&1).TrimStart('v')
+if ($nodeVer -notmatch '^(\d+)\.(\d+)\.') { Stop-WithError "无法解析 node -v: $nodeVer" }
+$nodeMajor = [int]$Matches[1]
+$nodeMinor = [int]$Matches[2]
+if (-not (($nodeMajor -eq 20 -and $nodeMinor -ge 19) -or ($nodeMajor -eq 22 -and $nodeMinor -ge 12) -or ($nodeMajor -ge 23))) {
+    Stop-WithError "需要 Node ^20.19 || >=22.12(vite 8 要求),当前 v$nodeVer。推荐装 Node 22 LTS。"
+}
 Assert-Command "npm.cmd" "请确认 npm 已随 Node.js 安装并加入 PATH。"
 
 $dbHost = if ($env:DB_HOST) { $env:DB_HOST } else { "127.0.0.1" }
