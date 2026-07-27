@@ -242,9 +242,13 @@ export function validatePlanContract(
   for (const diagnostic of compilation.diagnostics.slice(1)) {
     add('WARN', 'PLAN-CONTRACT-DIAGNOSTIC', diagnostic);
   }
-  if (contract.sourceMode === 'STRUCTURED' && (!contract.referenceSnapshotId || !contract.referenceProfile)) {
-    add('ERROR', 'REFERENCE-CONTEXT-REQUIRED',
-      'Structured contracts must pin both referenceSnapshotId and referenceProfile.');
+  if (contract.sourceMode === 'STRUCTURED') {
+    const hasReferenceSnapshot = Boolean(contract.referenceSnapshotId);
+    const hasReferenceProfile = Boolean(contract.referenceProfile);
+    if (hasReferenceSnapshot !== hasReferenceProfile) {
+      add('ERROR', 'REFERENCE-CONTEXT-INCONSISTENT',
+        'Structured contracts must pin both referenceSnapshotId and referenceProfile, or neither when no reference project is set.');
+    }
   }
 
   const ids = collectContractIds(contract);

@@ -554,9 +554,13 @@ llmRouter.post('/review-plan', async (req: Request, res: Response) => {
       : await getReferenceReviewEvidence(buildCanonicalReferenceIntent(initialCanonicalContract));
     reviewReferenceSnapshotId ??= lastReferenceEvidence.search?.snapshotId;
     reviewReferenceProfile ??= lastReferenceEvidence.search?.profile;
-    if (!parentReviewRecord && (lastReferenceEvidence.searchStatus !== 'SUCCESS' || !lastReferenceEvidence.search)) {
+    // Reference project is optional. NOT_CONFIGURED does not block review;
+    // only network/timeout/HTTP/schema failures block.
+    const referenceSearchStatus = lastReferenceEvidence.searchStatus;
+    const referenceBlocksReview = referenceSearchStatus !== 'SUCCESS' && referenceSearchStatus !== 'NOT_CONFIGURED';
+    if (!parentReviewRecord && (referenceBlocksReview || (referenceSearchStatus === 'SUCCESS' && !lastReferenceEvidence.search))) {
       throw new ReviewInfrastructureError(
-        `Reference evidence unavailable: ${lastReferenceEvidence.searchStatus ?? 'INVALID_RESPONSE'}${lastReferenceEvidence.searchDiagnostic ? ` (${lastReferenceEvidence.searchDiagnostic})` : ''}`,
+        `Reference evidence unavailable: ${referenceSearchStatus ?? 'INVALID_RESPONSE'}${lastReferenceEvidence.searchDiagnostic ? ` (${lastReferenceEvidence.searchDiagnostic})` : ''}`,
         buildReviewAudit(reviewId, reviewStartedAt, reviewRoundEvidence),
       );
     }

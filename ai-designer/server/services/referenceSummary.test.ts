@@ -188,6 +188,27 @@ test('invalid search schema fails closed without injecting malformed evidence', 
   assert.equal(evidence.adaptationSummary, 'framework-profile');
 });
 
+test('reference not-configured business 404 is NOT_CONFIGURED, not a schema mismatch', async () => {
+  invalidateReferenceSummaryCache();
+  const fetchMock = (async (input: string | URL | Request) => {
+    const url = String(input);
+    if (url.endsWith('/api/project/adaptation-summary')) {
+      return new Response(JSON.stringify({ data: 'framework-profile' }), { status: 200 });
+    }
+    // Part B returns HTTP 200 + business 404 when the reference project is not configured.
+    return new Response(JSON.stringify({
+      code: 404, success: false, data: null,
+      msg: 'Reference project is not ready; configure and scan it first',
+    }), { status: 200 });
+  }) as typeof fetch;
+
+  const evidence = await getReferenceReviewEvidence('hotwork', 'http://part-b', fetchMock);
+  assert.equal(evidence.search, null);
+  assert.equal(evidence.searchStatus, 'NOT_CONFIGURED');
+  assert.match(evidence.searchDiagnostic ?? '', /not ready/i);
+  assert.equal(evidence.adaptationSummary, 'framework-profile');
+});
+
 test('business evidence includes fields, module ownership and source path', () => {
   const evidence = buildBusinessEvidence('hotwork flow', [{
     score: 0,

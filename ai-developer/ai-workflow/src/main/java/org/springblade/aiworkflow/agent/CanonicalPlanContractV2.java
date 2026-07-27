@@ -85,9 +85,12 @@ public record CanonicalPlanContractV2(
         if (!("STRUCTURED".equals(sourceMode) || "LEGACY_INFERRED".equals(sourceMode))) {
             errors.add("canonicalContract.sourceMode is invalid");
         }
-        if ("STRUCTURED".equals(sourceMode)
-                && (referenceSnapshotId == null || referenceSnapshotId.isBlank() || referenceProfile == null)) {
-            errors.add("structured canonicalContract must pin referenceSnapshotId and referenceProfile");
+        if ("STRUCTURED".equals(sourceMode)) {
+            boolean hasSnapshot = referenceSnapshotId != null && !referenceSnapshotId.isBlank();
+            boolean hasProfile = referenceProfile != null;
+            if (hasSnapshot != hasProfile) {
+                errors.add("structured canonicalContract must pin both referenceSnapshotId and referenceProfile, or neither when no reference project is set");
+            }
         }
         try { generationIdentity(); } catch (RuntimeException error) { errors.add(error.getMessage()); }
         if (identity != null && (!hasText(identity.moduleName()) || !hasText(identity.entityName())

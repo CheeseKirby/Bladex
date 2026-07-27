@@ -45,6 +45,22 @@ class ReferenceFrameworkProfileTest {
     }
 
     @Test
+    void structuredPlanWithoutReferenceProjectFallsBackToDefaults() {
+        ReferenceProjectIndex index = new ReferenceProjectIndex();
+        // No reference project configured; a structured plan carries no snapshotId and must fall back to defaults.
+        ReferenceProjectIndex.SnapshotLease lease = index.acquireSnapshot(null, true);
+        try {
+            ReferenceFrameworkProfile profile = lease.profile();
+            assertEquals("4.1.0.RELEASE", profile.bladeXVersion());
+            assertEquals("17", profile.javaVersion());
+            assertEquals("jakarta", profile.validationNamespace());
+            assertEquals("v3", profile.swaggerGeneration());
+        } finally {
+            lease.close();
+        }
+    }
+
+    @Test
     void detectsVersionPackagesAndApplicationStyleFromReferenceSource() throws Exception {
         write("pom.xml", """
                 <project><modelVersion>4.0.0</modelVersion><groupId>org.springblade</groupId>

@@ -99,7 +99,9 @@ public class ReferenceProjectIndex {
                 List<IndexedClassInfo> all = cachedFlat == null ? List.of() : cachedFlat;
                 String currentSnapshotId = buildReferenceSnapshotId(all);
                 ReferenceFrameworkProfile profile = getFrameworkProfile().withoutSourceProjectRoot();
-                if (required && (expectedSnapshotId == null || expectedSnapshotId.isBlank())) {
+                // Only require a pinned snapshotId when a reference project is configured.
+                // Without a reference project, structured plans fall back to the 4.1.0 default profile.
+                if (required && rootPath != null && (expectedSnapshotId == null || expectedSnapshotId.isBlank())) {
                     throw new IllegalStateException("Reviewed structured plan is missing referenceSnapshotId");
                 }
                 if (expectedSnapshotId != null && !expectedSnapshotId.isBlank()

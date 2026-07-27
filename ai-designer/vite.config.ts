@@ -4,6 +4,9 @@ import react from '@vitejs/plugin-react'
 export default defineConfig({
   plugins: [react()],
   server: {
+    // 监听所有网卡,允许局域网其他主机通过 http://<本机IP>:3005/ 访问
+    // (true 等价于 0.0.0.0,启动时还会打印 Network 地址)
+    host: true,
     port: 3005,
     strictPort: true,
     proxy: {

@@ -102,7 +102,7 @@ export interface ReferenceSearchResult {
   decisions: ReferenceAccessDecision[];
 }
 
-export type ReferenceSearchStatus = 'SUCCESS' | 'TIMEOUT' | 'HTTP_ERROR' | 'INVALID_RESPONSE' | 'NETWORK_ERROR';
+export type ReferenceSearchStatus = 'SUCCESS' | 'TIMEOUT' | 'HTTP_ERROR' | 'INVALID_RESPONSE' | 'NETWORK_ERROR' | 'NOT_CONFIGURED';
 
 export interface ReferenceSearchOutcome {
   status: ReferenceSearchStatus;
@@ -238,12 +238,25 @@ async function searchReferenceProject(
         outcome = { status: 'HTTP_ERROR', result: null, durationMs: Date.now() - startedAt,
           diagnostic: `Part B reference search returned HTTP ${response.status}` };
       } else {
-        const body = await response.json() as { data?: unknown };
-        const result = parseReferenceSearchResult(body.data);
-        outcome = result
-          ? { status: 'SUCCESS', result, durationMs: Date.now() - startedAt }
-          : { status: 'INVALID_RESPONSE', result: null, durationMs: Date.now() - startedAt,
-              diagnostic: 'Part B reference search response did not match the required schema' };
+        const body = await response.json() as { code?: number; success?: boolean; data?: unknown; msg?: string };
+        if (body.success === false) {
+          // Part B wraps errors as HTTP 200 + { code, success:false, data:null, msg }.
+          // Business 404 means the reference project is not configured/ready;
+          // classify as graceful NOT_CONFIGURED instead of a schema mismatch.
+          const businessCode = typeof body.code === 'number' ? body.code : -1;
+          const businessMsg = typeof body.msg === 'string' ? body.msg : '';
+          outcome = businessCode === 404
+            ? { status: 'NOT_CONFIGURED', result: null, durationMs: Date.now() - startedAt,
+                diagnostic: businessMsg || 'Reference project is not ready' }
+            : { status: 'HTTP_ERROR', result: null, durationMs: Date.now() - startedAt,
+                diagnostic: `Part B reference search returned business error code=${businessCode}${businessMsg ? `: ${businessMsg}` : ''}` };
+        } else {
+          const result = parseReferenceSearchResult(body.data);
+          outcome = result
+            ? { status: 'SUCCESS', result, durationMs: Date.now() - startedAt }
+            : { status: 'INVALID_RESPONSE', result: null, durationMs: Date.now() - startedAt,
+                diagnostic: 'Part B reference search response did not match the required schema' };
+        }
       }
     } catch (error) {
       const name = error && typeof error === 'object' && 'name' in error ? String((error as { name?: unknown }).name) : '';
