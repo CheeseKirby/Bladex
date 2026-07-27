@@ -1,4 +1,4 @@
-# AI Workflow 一键部署脚本(Windows / PowerShell)
+﻿# AI Workflow 一键部署脚本(Windows / PowerShell)
 #
 # 用法:
 #   1. 解压本压缩包到任意目录(例如 D:\workspace\houduan\)
@@ -169,6 +169,13 @@ Info "Step 5/6: 数据库初始化(灌 init.sql)"
 $initSql = Join-Path $Root "ai-developer\sql\init.sql"
 if (-not (Test-Path $initSql)) { Fail "找不到 init.sql: $initSql" }
 
+# PS5.1 默认 $OutputEncoding=ASCII、Get-Content 默认按系统 ANSI(GBK)读 UTF-8 文件,
+# 会把 init.sql 里的中文注释和动态 SQL 单引号破坏成 '?' 或 '\',触发 ERROR 1064
+# (例如 CONCAT('ALTER TABLE `', tbl, ...) 的首个单引号被 '\' 转义吃掉)。
+# $OutputEncoding 控制 PS 管道喂给原生进程 stdin 的字节编码,切到 UTF-8 即让
+# init.sql 字节原样进 mysql 客户端。不动 [Console]::OutputEncoding,避免影响中文显示。
+$OutputEncoding = New-Object System.Text.UTF8Encoding($false)
+
 if ($mysqlMode -eq "2") {
     # Docker 模式:起容器
     $composeFile = Join-Path $Root "docker-compose.mysql.yml"
@@ -229,14 +236,14 @@ volumes:
     Write-Host "  MySQL 就绪"
 
     Write-Host "  灌入 init.sql..."
-    Get-Content $initSql -Raw | & docker exec -i ai-workflow-mysql mysql -uroot -p"$dbPass"
+    Get-Content $initSql -Raw -Encoding UTF8 | & docker exec -i ai-workflow-mysql mysql --default-character-set=utf8mb4 -uroot -p"$dbPass"
     if ($LASTEXITCODE -ne 0) { Fail "init.sql 执行失败" }
 }
 else {
     # 本地 MySQL
     Write-Host "  灌入 init.sql 到 ${dbHost}:${dbPort}..."
     # 用 stdin 管道灌入(与 Docker 模式一致),避免 source 命令对含空格部署路径解析失败
-    Get-Content $initSql -Raw | & mysql -h $dbHost -P $dbPort -u $dbUser -p"$dbPass"
+    Get-Content $initSql -Raw -Encoding UTF8 | & mysql --default-character-set=utf8mb4 -h $dbHost -P $dbPort -u $dbUser -p"$dbPass"
     if ($LASTEXITCODE -ne 0) { Fail "init.sql 执行失败,请检查 MySQL 凭证。" }
 }
 Write-Host "  数据库初始化完成"

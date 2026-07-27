@@ -1,4 +1,4 @@
-param(
+﻿param(
     [switch]$CheckOnly
 )
 
@@ -200,8 +200,17 @@ function Initialize-ManagedDatabase([string]$User, [string]$Password) {
         Stop-WithError "找不到数据库初始化脚本: $InitSqlPath"
     }
     Write-Host "  检查并更新数据库 schema..."
-    Get-Content -LiteralPath $InitSqlPath -Raw |
-        & docker exec -e "MYSQL_PWD=$Password" -i ai-workflow-mysql mysql "-u$User"
+    # 显式 UTF-8 读取 + $OutputEncoding=UTF8 喂给 mysql,避免 PS5.1 默认 ASCII/GBK
+    # 破坏 init.sql 中文与动态 SQL 单引号(触发 ERROR 1064)。try/finally 恢复,
+    # 不影响后续原生进程调用;不设 [Console]::OutputEncoding 以免影响中文显示。
+    $prevOutputEncoding = $OutputEncoding
+    try {
+        $OutputEncoding = New-Object System.Text.UTF8Encoding($false)
+        Get-Content -LiteralPath $InitSqlPath -Raw -Encoding UTF8 |
+            & docker exec -e "MYSQL_PWD=$Password" -i ai-workflow-mysql mysql --default-character-set=utf8mb4 "-u$User"
+    } finally {
+        $OutputEncoding = $prevOutputEncoding
+    }
     if ($LASTEXITCODE -ne 0) {
         Stop-WithError "数据库 schema 初始化失败，请查看 docker logs ai-workflow-mysql。"
     }
